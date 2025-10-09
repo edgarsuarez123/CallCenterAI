@@ -1,0 +1,27 @@
+﻿version: "3.9"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: callcenterai
+      POSTGRES_USER: callcenterai
+      POSTGRES_PASSWORD: ChangeThisNow_!
+    volumes:
+      - C:/Users/Edgar/Desktop/CallCenterAI/data/gateway/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U callcenterai -d callcenterai -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: always
+
+  gateway:
+    build:
+      context: C:/Users/Edgar/Desktop/CallCenterAI/gateway
+      dockerfile: C:/Users\Edgar\Desktop\CallCenterAI\gateway\Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8443:8443"
+    restart: always

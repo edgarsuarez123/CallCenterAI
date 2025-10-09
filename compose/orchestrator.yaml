@@ -1,0 +1,9 @@
+﻿version: "3.9"
+services:
+  orchestrator:
+    build:
+      context: C:/Users/Edgar/Desktop/CallCenterAI/orchestrator
+      dockerfile: C:/Users/Edgar/Desktop/CallCenterAI/orchestrator/Dockerfile
+    ports:
+      - "8085:8085"
+    restart: always
