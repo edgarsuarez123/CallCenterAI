@@ -1,0 +1,322 @@
+# CallCenterAI — Azure OpenAI Mode (Planning Document)
+**Version:** 1.0  
+**Status:** Draft  
+**Last Updated:** 2025-10-10
+
+---
+
+## 1. Introduction / Objective
+
+This document defines the **Azure OpenAI Mode** for CallCenterAI — a HIPAA-aligned call automation platform for medical clinics that uses:
+
+- **Azure Speech** for real-time **speech-to-text (STT)** and **text-to-speech (TTS)**
+- **Azure OpenAI** for language understanding and conversational orchestration
+- **Twilio** for inbound/outbound telephony
+- **NextGen EHR** as the primary scheduling system with **Google Calendar** as a failover
+
+The design assumes the clinic (or your SaaS) operates within an **Azure tenant** configured for HIPAA with appropriate commercial agreements in place. PHI is processed only through **controlled, private network paths**, and retained solely within **approved, encrypted stores**.
+
+Primary goals:
+
+1. Deliver a working demo of the full voice loop using Azure Speech + Azure OpenAI.  
+2. Integrate NextGen EHR and advanced routing (caller-type and overload).  
+3. Provide a GUI-based Admin Portal, reminder automation, and subscription control.  
+4. Achieve hardened security posture (network isolation, encryption, access control).  
+5. Optimize for small-clinic CPU deployments and multi-clinic scalability.
+
+---
+
+## 2. Scope & Non-Goals
+
+**In Scope**
+- Inbound/outbound voice calls; bilingual EN/ES conversation
+- Scheduling: create/confirm/cancel via NextGen; failover to Google Calendar
+- Caller-type routing (patient, physician, pharmacy, insurer) and overload handling
+- Reminder calls 24 hours prior with one retry after 30 minutes
+- On-prem **Router Node** plus optional on-prem **ASR Workers** (if desired)
+- Azure-mode pipeline where STT/TTS and LLM run in Azure services
+
+**Out of Scope**
+- Custom EHRs beyond NextGen (can be added later via connector pattern)
+- Non-Azure cloud providers for AI services (documented separately)
+- Code samples and deployment scripts (document is a planner, not a runbook)
+
+---
+
+## 3. Architecture Overview (Azure Mode)
+
+### 3.1 High-Level Flow
+1. **Caller** dials the clinic number (Twilio).  
+2. **Twilio** streams audio to **Router Node** (on-prem or Azure VM).  
+3. **Router Node** sends audio to **Azure Speech (STT)** over private network; receives partial/final transcripts.  
+4. Transcripts go to **Azure OpenAI** for intent and response generation (bilingual handling).  
+5. Response text goes to **Azure Speech (TTS)**; audio streamed back to **Twilio**, then to the caller.  
+6. For booking/cancel/confirm and lookups, **Router Node** calls **NextGen EHR**; on EHR failure, uses **Google Calendar** fallback.  
+7. **Admin Portal** provides configuration, monitoring, reminders scheduling, and subscription status.
+
+### 3.2 Roles
+- **Twilio**: Telephony and call media relay.
+- **Router Node (PHI Proxy & Orchestrator)**: Entry point; session control; admission/queue/forward logic; integration calls to Azure and EHR/Calendar; logging with PHI-safe policies.
+- **Azure Speech**: Real-time STT and TTS with EN/ES voices.
+- **Azure OpenAI**: NLU/LU, dialogue state, bilingual prompt logic.
+- **NextGen Connector**: Appointment CRUD; patient lookups; availability checks; audit trail.
+- **Google Calendar Connector**: Failover scheduling when EHR is down or degraded.
+- **Admin Portal**: GUI configuration (telephony, EHR, calendar, language, reminders, license), status dashboards, and usage analytics.
+- **License Service**: Usage tiers, grace periods, suspension/reactivation.
+
+---
+
+## 4. Network & Data Flow Controls (Azure Mode)
+
+**Network Isolation Concept**
+- Traffic between Router Node and Azure services traverses **private network paths** only (no public Internet), using **Private Endpoints/Private Link** within an **Azure Virtual Network (VNet)**.
+- **Public network access disabled** on Azure OpenAI and Azure Speech resources.
+- **VPN Gateway** or **ExpressRoute** connects the clinic site to the Azure VNet.
+- **Private DNS** ensures Azure service FQDNs resolve to **private IPs**.
+
+**PHI Handling**
+- PHI may be present in speech/audio and in LLM prompts/replies.  
+- Tokenization is **optional** in Azure Mode; retaining it reduces audit surface.  
+- Logs are **content-minimized** (no audio, no raw prompts) and **encrypted**.
+
+---
+
+## 5. Audio & Capacity Guidelines
+
+- **Telephony input**: Narrowband PCM 8 kHz mono or wideband PCM 16 kHz mono; EN/ES mixed utterances supported.  
+- **Round-trip latency targets**:  
+  - Conversational response: ≤ 700 ms average under nominal load  
+  - Under stress: ≤ 900 ms average with graceful degradation  
+- **Concurrency**:  
+  - CPU-only Router + Azure Speech typically supports high call concurrency (Azure STT/TTS scales in service).  
+  - If using local ASR Workers (optional), plan ~2–3 calls per 8 physical CPU cores.
+
+**10-minute call storage math (reference)**
+- PCM 16-bit, 8 kHz, mono ≈ 9.6 MB  
+- PCM 16-bit, 16 kHz, mono ≈ 19.2 MB  
+- Opus at ~16 kbps ≈ 1.2 MB (streaming preferred; recordings minimized or disabled by policy)
+
+---
+
+## 6. Phase-Based Implementation Plan (Azure Mode)
+
+**Phase 1: Demo Core (Azure Speech + Azure OpenAI + Calendar)**
+- Objectives  
+  1. Establish real-time call loop with Azure Speech STT/TTS and Azure OpenAI.  
+  2. Validate bilingual detection and language lock (EN/ES).  
+  3. Demonstrate basic appointment flow using Google Calendar for availability.  
+  4. Prove private connectivity (VNet + Private Endpoints) and content-minimized logging.  
+- Dependencies  
+  - Twilio number and media streaming; Azure tenant with OpenAI/Speech resources; VNet, Private Endpoints, Private DNS; VPN Gateway or ExpressRoute; Google Calendar account for test availability.  
+- Implementation Steps  
+  1. Configure Private Endpoints for Azure OpenAI and Azure Speech; disable public network access.  
+  2. Connect Router Node to Azure via VPN/ExpressRoute; validate name resolution to Private IPs.  
+  3. Set up bilingual dialogue policies (language auto-detect → language lock).  
+  4. Build prototype flows: greeting, identify intent, confirm details, tentative booking, farewell.  
+  5. Integrate Calendar availability checks and holds.  
+  6. Configure admission limits and overload actions (queue ≤ 45s, forward-to-staff, or busy).  
+  7. Validate content-minimized logging and retention.  
+- Exit Criteria  
+  - End-to-end call works in EN/ES; calendar hold created; logs contain no PHI content; latency ≤ 700 ms average.
+
+**Phase 2: EHR Integration + Advanced Routing**
+- Objectives  
+  1. Integrate NextGen for real appointment CRUD and patient lookups.  
+  2. Implement caller-type routing (patient vs physician vs pharmacy vs insurer).  
+  3. Enforce advanced overload policies (latency-aware, least-loaded routing).  
+- Dependencies  
+  - Phase 1; NextGen sandbox credentials; staff handoff numbers/queues; defined routing matrix and business rules.  
+- Implementation Steps  
+  1. Normalize appointment schema and patient identity queries against NextGen.  
+  2. Implement routing matrix (caller intent, known caller IDs, trigger phrases, load state).  
+  3. Add “human-forward” branches and failure handling (timeouts, low confidence, EHR outage).  
+  4. Validate EHR audit logging and data reconciliation with Calendar fallback.  
+- Exit Criteria  
+  - AI can create/cancel/confirm in NextGen; caller-type routing accuracy ≥ 95%; EHR outage triggers Calendar fallback without loss.
+
+**Phase 3: Admin Portal + Reminder & Subscription Engine**
+- Objectives  
+  1. GUI installer and configuration portal (no CLI for clinics).  
+  2. Reminder calls 24 hours prior; one retry after 30 minutes.  
+  3. Subscription control: usage metering, grace period (5–7 days), suspension/reactivation.  
+- Dependencies  
+  - Phase 2; billing platform account; clinic templates for reminders (EN/ES).  
+- Implementation Steps  
+  1. Portal screens for Twilio/EHR/Azure settings, languages, reminders, and license state.  
+  2. Reminder engine reads upcoming appointments from EHR; schedules outbound.  
+  3. Subscription logic updates license token; enforces suspension gracefully (calls disabled; data retained encrypted).  
+  4. Dashboard with usage, capacity, reminder success rate, and health indicators.  
+- Exit Criteria  
+  - Clinics can configure system via Portal; reminders run reliably; suspension/reactivation flows validated.
+
+**Phase 4: Security Hardening + Compliance Enhancements**
+- Objectives  
+  1. Finalize encryption policies, network isolation proof, and access control enforcement.  
+  2. Immutable audit logging; alerting and incident response readiness.  
+  3. Internal/third-party security testing and HIPAA posture review.  
+- Dependencies  
+  - Phase 3; policy drafts; monitoring destinations; incident runbooks.  
+- Implementation Steps  
+  1. Enforce Customer-Managed Keys (CMK) for Azure secrets at rest; key rotation policy.  
+  2. Enable alerting on thresholds: worker CPU, latency, 5xx error rate, reminder failures.  
+  3. Validate Private Endpoints and Public Access Disabled on all cognitive resources.  
+  4. Role reviews with PIM; 2FA on all privileged accounts; break-glass procedures tested.  
+  5. Penetration tests and remediation cycle.  
+- Exit Criteria  
+  - Documented “defense-in-depth” controls; no critical vulns open; pass security review.
+
+**Phase 5: Small Clinic CPU Setup + Scalability**
+- Objectives  
+  1. Finalize CPU-only packaging and SOPs for small clinics.  
+  2. Multi-clinic scaling plan; capacity models; horizontal expansion.  
+- Dependencies  
+  - Phase 4; baseline performance data; Partner clinics for pilot.  
+- Implementation Steps  
+  1. Benchmark typical clinic loads and set sizing tables (calls vs. CPU).  
+  2. Create installer workflow and rollback procedures.  
+  3. Validate multi-clinic license isolation; usage metering per tenant.  
+  4. HA options: secondary Router Node and failover scenarios.  
+- Exit Criteria  
+  - Installer completes < 30 minutes; 99.9% availability over 7-day soak; linear scaling with additional Routers/tenants.
+
+---
+
+## 7. Detailed Security Precautions (Azure Mode)
+
+**Network Isolation**
+- Use **Azure Private Link/Private Endpoints** for Azure OpenAI, Azure Speech, Key Vault.  
+- **Disable Public Network Access** on all cognitive and secret stores.  
+- Set up a **VNet + subnets** for AI services, Router VM (if in Azure), and management.  
+- Connect on-prem to Azure VNet via **VPN Gateway** or **ExpressRoute**.  
+- Configure **Private DNS** so service FQDNs resolve to private IPs.  
+- Apply **NSGs** to allow only necessary egress/ingress between Router and Private Endpoints.
+
+**Encryption & Key Management**
+- Enforce **TLS 1.2+** for all service connections; prefer mutual TLS for internal hops where applicable.  
+- Enable **encryption at rest** for all data stores; prefer **Customer-Managed Keys (CMK)** with **Azure Key Vault**.  
+- Define **key rotation** intervals and document key custodians and emergency procedures.  
+- Encrypt local tokens/config/state at rest using strong algorithms; store secrets in Key Vault.
+
+**Access Control & Identity**
+- Use **Azure AD** with **role-based access control (RBAC)**; scope permissions to the smallest necessary resource set.  
+- Enable **Privileged Identity Management (PIM)** for admin roles; enforce **MFA** and **JIT** access.  
+- Maintain **break-glass accounts** with strict storage and alerting if used.  
+- In the Admin Portal, enforce **RBAC** (Admin/Operator/Viewer), session timeouts, and IP/device posture checks where possible.
+
+**Logging & Monitoring**
+- Enable **Diagnostic settings** for cognitive services; route to Log Analytics/Storage with restricted access.  
+- Log **events and metrics only** (avoid PHI content); redact any identifiers at the Router Node.  
+- Define **retention windows** (e.g., 30–60 days operational logs, 365 days audit where required).  
+- Set up **alerting** for CPU saturation, latency spikes, error rates, abnormal usage, and login anomalies.
+
+**Data Handling & Retention**
+- Minimize or **disable call recordings** unless legally required; if enabled, store encrypted and time-bound.  
+- Keep **content-minimized logs** (no prompt bodies, no audio payloads).  
+- Define **data retention** and **deletion workflows** per clinic policy (e.g., 30 days logs, 7 days audio metadata).  
+- Implement **data subject requests** procedures (export/delete on demand).
+
+**EHR & Calendar Integration**
+- Restrict EHR connector credentials to **least privilege** scopes.  
+- Log EHR operations immutably with timestamps and correlation IDs (no PHI fields in logs).  
+- Implement **availability reconciliation** between EHR and fallback Calendar after outages.
+
+**Operational Safeguards**
+- Admission control: cap concurrent calls; overflow to queue/forward/busy to protect QoS.  
+- **Graceful degradation**: If Azure services degrade, forward to staff rather than fail silently.  
+- **Configuration drift control**: approve changes via change management; maintain environment baselines.  
+- **Patch policy**: staging rollout within 48 hours for non-urgent updates; 24 hours for security fixes.
+
+---
+
+## 8. Testing & Validation (Per Phase)
+
+**Phase 1 (Demo Core)**
+- Verify private connectivity (Private Endpoints active; public access disabled).  
+- Measure STT→LLM→TTS round-trip latency; target ≤ 700 ms.  
+- Confirm EN/ES detection and lock stability ≥ 95%.  
+- Validate content-minimized logs (no PHI leakage).  
+- Calendar hold bookings succeed and match requested times.
+
+**Phase 2 (EHR + Routing)**
+- EHR auth and token refresh flows operate reliably.  
+- Appointment creation, cancel, and confirm round-trip verified in EHR.  
+- Caller-type routing accuracy ≥ 95%; overflow policies behave as designed.  
+- Calendar fallback triggers on EHR outage and reconciles post-recovery.  
+- No PHI appears in operational logs; audit logs are complete and immutable.
+
+**Phase 3 (Portal + Reminders + Subscription)**
+- Portal RBAC enforced; no cross-role access; session security validated.  
+- Reminder calls align 100% with EHR next-day appointments; retry after 30 minutes for no-answer.  
+- Subscription grace period, suspension, and reactivation flows tested end-to-end.  
+- Dashboard metrics match backend telemetry within ±2%.
+
+**Phase 4 (Security Hardening)**
+- Encryption audit confirms CMK use and rotation policies documented.  
+- PIM/JIT/MFA enforced on all privileged accounts.  
+- Penetration tests yield no critical findings; medium findings remediated.  
+- Incident response runbooks exercised; alerting thresholds produce timely notifications.
+
+**Phase 5 (CPU Setup + Scalability)**
+- Installer completes in < 30 minutes with clear rollback.  
+- 7-day soak test at target load achieves 99.9% uptime; no QoS regressions.  
+- Horizontal scaling with additional Routers/tenants demonstrates linear capacity growth.  
+- HA/Failover verified (secondary Router takeover within seconds).
+
+---
+
+## 9. Deployment & Operations (Azure Mode)
+
+- **Clinic Pilot (preferred)**: Router Node on-prem; Azure STT/TTS/LLM via Private Link; EHR integrated; Calendar as failover.  
+- **All-Azure Variant**: Router Node as Azure VM in the VNet; on-prem connects via VPN/ExpressRoute; identical security controls.  
+- **Multi-Clinic**: Each clinic licensed (token); centralized operational dashboards per tenant; quotas and auto-upgrade offers at 115% usage.
+
+---
+
+## 10. Cost & Capacity Considerations
+
+- **Telephony**: Per-minute Twilio; clinics typically cover voice charges.  
+- **Azure Cognitive**: Usage-based for STT/TTS and LLM tokens; monitor and cap via quotas.  
+- **Bandwidth**: Streaming PCM at 16 kHz increases quality and bandwidth; consider Opus if your path supports it.  
+- **Hardware**: CPU-only Router Node typically sufficient; optional local ASR Workers if you want hybrid redundancy.  
+- **Subscription Tiers**: Flat tiers with soft caps and auto-upgrade at 115% to prevent service degradation.
+
+---
+
+## 11. Final Readiness Checklist (Azure Mode)
+
+- **Networking**
+  - Private Endpoints active for Azure OpenAI, Azure Speech, and Key Vault  
+  - Public network access disabled on cognitive resources  
+  - VPN/ExpressRoute established; Private DNS resolving to private IPs  
+  - NSGs restrict traffic to least privilege
+
+- **Security**
+  - TLS enforced; CMK for data at rest; key rotation documented  
+  - RBAC with PIM/JIT/MFA; break-glass accounts sealed and monitored  
+  - Content-minimized, encrypted logs with defined retention  
+  - Alerting: CPU, latency, errors, reminder failures, auth anomalies
+
+- **Functionality**
+  - EN/ES pipeline stable; language lock validated  
+  - EHR appointment CRUD and Calendar fallback reconciled  
+  - Caller-type routing and overload behaviors proven  
+  - Reminders operational; retry after 30 minutes works
+
+- **Operations**
+  - Admin Portal usable by non-technical staff; installer < 30 minutes  
+  - Subscription engine enforces grace/suspension/reactivation  
+  - SOPs for backup/restore, incident response, and patching  
+  - 7-day soak tests at target concurrency; 99.9% availability
+
+---
+
+## 12. Notes on Tokenization (Optional in Azure Mode)
+
+- Tokenization is **not required** in Azure Mode if all services remain inside your HIPAA-configured Azure tenant; however, it is **recommended** for:
+  - Reducing the audit surface and breach impact  
+  - Enabling lower-risk analytics and replay without PHI  
+  - Preserving provider portability (e.g., future multi-cloud strategies)
+
+---
+
+**End of Document — CallCenterAI Azure OpenAI Mode Planning**
