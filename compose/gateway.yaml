@@ -3,8 +3,6 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: callcenterai
-      POSTGRES_USER: callcenterai
       POSTGRES_PASSWORD: ChangeThisNow_!
     volumes:
       - C:/Users/Edgar/Desktop/CallCenterAI/data/gateway/postgres:/var/lib/postgresql/data
@@ -14,14 +12,24 @@ services:
       timeout: 5s
       retries: 10
     restart: always
-
+  
   gateway:
     build:
       context: C:/Users/Edgar/Desktop/CallCenterAI/gateway
-      dockerfile: C:/Users\Edgar\Desktop\CallCenterAI\gateway\Dockerfile
+      dockerfile: C:/Users/Edgar/Desktop/CallCenterAI/gateway/Dockerfile
+    environment:
+       - PYTHONPATH=/app
+       - APP_ENV=dev
+       - CLINIC_TOKEN_HMAC_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9IYW1jS2V5XzMyQnl0ZXM=
+       - AES_GCM_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9BRVNfS2V5XzMyQnl0ZXM=
+    volumes:
+      # Mount source code for live editing
+      - C:/Users/Edgar/Desktop/CallCenterAI/gateway:/app:rw
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8443:8443"
     restart: always
+    # Optional: Enable hot reload (if using uvicorn/fastapi)
+    command: uvicorn main:app --host 0.0.0.0 --port 8443 --reload
