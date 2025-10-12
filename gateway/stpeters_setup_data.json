@@ -1,0 +1,1251 @@
+{
+  "clinic": {
+    "clinic_name": "St. Peters Medical",
+    "phone_number": "+14071234567",
+    "timezone": "America/New_York",
+    "default_language": "en",
+    "supported_languages": "en,es",
+    "ehr_system": "epic",
+    "ehr_api_endpoint": "https://api.epic.com/stpeters",
+    "ehr_credentials_vault_key": "stpeters-epic-creds",
+    "max_concurrent_calls": 15,
+    "queue_timeout_seconds": 60,
+    "subscription_tier": "professional"
+  },
+  "providers": [
+    {
+      "name_token": "PROVIDER_DR_SMITH_001",
+      "title": "Dr.",
+      "specialty": "Internal Medicine",
+      "license_number": "FL123456",
+      "npi_number": "1234567890"
+    },
+    {
+      "name_token": "PROVIDER_DR_JOHNSON_001",
+      "title": "Dr.",
+      "specialty": "Cardiology",
+      "license_number": "FL789012",
+      "npi_number": "0987654321"
+    },
+    {
+      "name_token": "PROVIDER_DR_GARCIA_001",
+      "title": "Dr.",
+      "specialty": "Family Medicine",
+      "license_number": "FL345678",
+      "npi_number": "1122334455"
+    },
+    {
+      "name_token": "PROVIDER_NURSE_WILSON_001",
+      "title": "RN",
+      "specialty": "Nursing",
+      "license_number": "RN901234",
+      "npi_number": "5566778899"
+    }
+  ],
+  "system_configs": [
+    {
+      "config_key": "emergency_keywords_stpeters",
+      "config_value": "emergency,urgent,chest pain,heart attack,stroke,bleeding,unconscious,can't breathe",
+      "description": "Emergency detection keywords for St. Peters Medical"
+    },
+    {
+      "config_key": "business_hours_stpeters",
+      "config_value": "MON-FRI:08:00-17:00,SAT:09:00-13:00,SUN:CLOSED",
+      "description": "Business hours for St. Peters Medical"
+    },
+    {
+      "config_key": "ai_model_stpeters",
+      "config_value": "gpt-4",
+      "description": "AI model configuration for St. Peters Medical"
+    },
+    {
+      "config_key": "voice_settings_stpeters",
+      "config_value": "en-US-AriaNeural,es-US-PalomaNeural",
+      "description": "Voice synthesis settings for St. Peters Medical"
+    }
+  ],
+  "appointment_slots": [
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-13 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-13 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-13 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-13 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-14 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-14 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-14 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-14 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-15 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-15 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-15 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-15 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-16 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-16 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-16 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-16 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-17 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-17 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-17 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-17 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_001",
+      "slot_datetime": "2025-10-18 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_002",
+      "slot_datetime": "2025-10-18 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_003",
+      "slot_datetime": "2025-10-18 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 08:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 09:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 10:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 11:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 13:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 14:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 15:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    },
+    {
+      "provider_id": "PROVIDER_004",
+      "slot_datetime": "2025-10-18 16:00:00",
+      "duration_minutes": 60,
+      "clinic_id": "CLINIC_STPETERS_001"
+    }
+  ],
+  "license": {
+    "clinic_id": "CLINIC_STPETERS_001",
+    "tier": "professional",
+    "max_calls_per_month": 2000,
+    "max_concurrent_calls": 15,
+    "max_providers": 20,
+    "monthly_fee_usd": 599.0,
+    "billing_cycle": "monthly"
+  },
+  "searches": {
+    "clinic": "clinic_name='St. Peters' phone_number=None subscription_tier=<SubscriptionTier.PROFESSIONAL: 'professional'> is_active=<YesNo.YES: 'yes'> limit=10 offset=0",
+    "provider": "clinic_id='CLINIC_STPETERS_001' specialty='Internal Medicine' is_available=<YesNo.YES: 'yes'> limit=20 offset=0",
+    "appointment": "clinic_id='CLINIC_STPETERS_001' patient_id=None provider_id=None start_date=datetime.datetime(2025, 10, 11, 15, 57, 19, 528284) end_date=datetime.datetime(2025, 10, 18, 15, 57, 19, 528285) status=None limit=50 offset=0"
+  },
+  "bulk_setup": {
+    "clinics": [
+      {
+        "clinic_name": "St. Peters Medical",
+        "phone_number": "+14071234567",
+        "ehr_system": "epic",
+        "subscription_tier": "professional"
+      },
+      {
+        "clinic_name": "Miami Family Care",
+        "phone_number": "+13051234567",
+        "ehr_system": "cerner",
+        "subscription_tier": "basic"
+      }
+    ]
+  }
+}
