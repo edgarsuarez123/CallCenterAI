@@ -22,6 +22,9 @@ services:
        - APP_ENV=dev
        - CLINIC_TOKEN_HMAC_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9IYW1jS2V5XzMyQnl0ZXM=
        - AES_GCM_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9BRVNfS2V5XzMyQnl0ZXM=
+       - GOOGLE_CLIENT_ID=182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com
+       - GOOGLE_CLIENT_SECRET=literal:REDACTED_GOOGLE_CLIENT_SECRET
+       - GOOGLE_REDIRECT_URI=http://localhost:8443/api/v1/google-calendar/oauth/callback
     volumes:
       # Mount source code for live editing
       - C:/Users/Edgar/Desktop/CallCenterAI/gateway:/app:rw

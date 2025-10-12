@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Center AI - Call Simulator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.8;
+            font-size: 1.1em;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .call-controls {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        
+        input, select, button {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .call-status {
+            background: #e8f5e8;
+            border: 2px solid #28a745;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .call-status.active {
+            background: #fff3cd;
+            border-color: #ffc107;
+        }
+        
+        .call-status.completed {
+            background: #d1ecf1;
+            border-color: #17a2b8;
+        }
+        
+        .ai-message {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .user-input {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .option-button {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        
+        .option-button:hover {
+            background: #218838;
+        }
+        
+        .conversation-history {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            background: #f8f9fa;
+        }
+        
+        .history-item {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        
+        .history-item.ai {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+        }
+        
+        .history-item.user {
+            background: #f3e5f5;
+            border-left: 4px solid #9c27b0;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-indicator.active {
+            background: #28a745;
+        }
+        
+        .status-indicator.completed {
+            background: #17a2b8;
+        }
+        
+        .status-indicator.error {
+            background: #dc3545;
+        }
+        
+        .demo-scenarios {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        
+        .scenario {
+            background: white;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        
+        .scenario:hover {
+            border-color: #667eea;
+        }
+        
+        .scenario h4 {
+            margin: 0 0 10px 0;
+            color: #2c3e50;
+        }
+        
+        .scenario p {
+            margin: 0;
+            color: #6c757d;
+            font-size: 14px;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Call Center AI</h1>
+            <p>Interactive Call Simulator for Appointment Booking</p>
+        </div>
+        
+        <div class="content">
+            <!-- Call Controls -->
+            <div class="call-controls">
+                <h3>Start New Call</h3>
+                <div class="form-group">
+                    <label for="callerPhone">Caller Phone Number:</label>
+                    <input type="tel" id="callerPhone" placeholder="+1 (555) 123-4567" value="+1 (555) 123-4567">
+                </div>
+                <div class="form-group">
+                    <label for="clinicId">Clinic ID:</label>
+                    <input type="text" id="clinicId" placeholder="CLINIC_ce749ecb_CLINIC_D" value="CLINIC_ce749ecb_CLINIC_D">
+                </div>
+                <button id="startCallBtn" onclick="startCall()">📞 Start Call</button>
+            </div>
+            
+            <!-- Call Status -->
+            <div id="callStatus" class="call-status hidden">
+                <h3><span id="statusIndicator" class="status-indicator"></span>Call Status</h3>
+                <p><strong>Call ID:</strong> <span id="callSid">-</span></p>
+                <p><strong>State:</strong> <span id="currentState">-</span></p>
+                <p><strong>Message:</strong> <span id="currentMessage">-</span></p>
+                <div id="currentOptions" class="options"></div>
+            </div>
+            
+            <!-- User Input -->
+            <div id="userInputSection" class="hidden">
+                <div class="form-group">
+                    <label for="userInput">Your Response:</label>
+                    <input type="text" id="userInput" placeholder="Type your response here..." onkeypress="handleKeyPress(event)">
+                </div>
+                <button id="sendBtn" onclick="sendInput()">Send</button>
+                <button id="endCallBtn" onclick="endCall()" style="background: #dc3545; margin-left: 10px;">End Call</button>
+            </div>
+            
+            <!-- Conversation History -->
+            <div id="conversationHistory" class="conversation-history hidden">
+                <h3>Conversation History</h3>
+                <div id="historyContent"></div>
+            </div>
+            
+            <!-- Demo Scenarios -->
+            <div class="demo-scenarios">
+                <h3>Demo Scenarios</h3>
+                <div class="scenario" onclick="loadScenario('new_patient_booking')">
+                    <h4>🆕 New Patient Booking</h4>
+                    <p>Simulate a new patient calling to book their first appointment</p>
+                </div>
+                <div class="scenario" onclick="loadScenario('returning_patient_booking')">
+                    <h4>🔄 Returning Patient Booking</h4>
+                    <p>Simulate a returning patient calling to book an appointment</p>
+                </div>
+                <div class="scenario" onclick="loadScenario('appointment_cancellation')">
+                    <h4>❌ Appointment Cancellation</h4>
+                    <p>Simulate a patient calling to cancel an appointment</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentCallSid = null;
+        let isCallActive = false;
+        
+        const API_BASE = 'http://localhost:8443/api/call-simulator';
+        
+        async function startCall() {
+            const callerPhone = document.getElementById('callerPhone').value;
+            const clinicId = document.getElementById('clinicId').value;
+            
+            if (!callerPhone || !clinicId) {
+                alert('Please enter both phone number and clinic ID');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/start-call`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        caller_phone: callerPhone,
+                        clinic_id: clinicId
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                currentCallSid = data.call_sid;
+                isCallActive = true;
+                
+                updateCallStatus(data);
+                showCallInterface();
+                
+            } catch (error) {
+                console.error('Error starting call:', error);
+                alert('Failed to start call: ' + error.message);
+            }
+        }
+        
+        async function sendInput() {
+            const userInput = document.getElementById('userInput').value.trim();
+            
+            if (!userInput || !currentCallSid) {
+                return;
+            }
+            
+            try {
+                // Add user input to history
+                addToHistory('user', userInput);
+                
+                const response = await fetch(`${API_BASE}/call/${currentCallSid}/input`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        user_input: userInput,
+                        call_sid: currentCallSid
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                updateCallStatus(data);
+                
+                // Clear input
+                document.getElementById('userInput').value = '';
+                
+                // Check if call is complete
+                if (data.is_complete) {
+                    isCallActive = false;
+                    document.getElementById('sendBtn').disabled = true;
+                }
+                
+            } catch (error) {
+                console.error('Error sending input:', error);
+                alert('Failed to send input: ' + error.message);
+            }
+        }
+        
+        async function endCall() {
+            if (!currentCallSid) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/call/${currentCallSid}/end`, {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                isCallActive = false;
+                currentCallSid = null;
+                hideCallInterface();
+                
+            } catch (error) {
+                console.error('Error ending call:', error);
+                alert('Failed to end call: ' + error.message);
+            }
+        }
+        
+        function updateCallStatus(data) {
+            document.getElementById('callSid').textContent = data.call_sid;
+            document.getElementById('currentState').textContent = data.current_state;
+            document.getElementById('currentMessage').textContent = data.message;
+            
+            // Update status indicator
+            const indicator = document.getElementById('statusIndicator');
+            indicator.className = 'status-indicator';
+            if (data.is_complete) {
+                indicator.classList.add('completed');
+            } else {
+                indicator.classList.add('active');
+            }
+            
+            // Update options
+            const optionsContainer = document.getElementById('currentOptions');
+            optionsContainer.innerHTML = '';
+            
+            if (data.options && data.options.length > 0) {
+                data.options.forEach(option => {
+                    const button = document.createElement('button');
+                    button.className = 'option-button';
+                    button.textContent = option;
+                    button.onclick = () => {
+                        document.getElementById('userInput').value = option;
+                        sendInput();
+                    };
+                    optionsContainer.appendChild(button);
+                });
+            }
+            
+            // Add AI message to history
+            addToHistory('ai', data.message);
+        }
+        
+        function addToHistory(type, message) {
+            const historyContent = document.getElementById('historyContent');
+            const item = document.createElement('div');
+            item.className = `history-item ${type}`;
+            item.innerHTML = `<strong>${type === 'ai' ? 'AI' : 'You'}:</strong> ${message}`;
+            historyContent.appendChild(item);
+            historyContent.scrollTop = historyContent.scrollHeight;
+        }
+        
+        function showCallInterface() {
+            document.getElementById('callStatus').classList.remove('hidden');
+            document.getElementById('userInputSection').classList.remove('hidden');
+            document.getElementById('conversationHistory').classList.remove('hidden');
+        }
+        
+        function hideCallInterface() {
+            document.getElementById('callStatus').classList.add('hidden');
+            document.getElementById('userInputSection').classList.add('hidden');
+            document.getElementById('conversationHistory').classList.add('hidden');
+            document.getElementById('historyContent').innerHTML = '';
+        }
+        
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendInput();
+            }
+        }
+        
+        function loadScenario(scenarioId) {
+            // This would load predefined scenario steps
+            // For now, just show an alert
+            alert(`Loading scenario: ${scenarioId}\n\nThis would automatically fill in the conversation steps for testing.`);
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Call Simulator loaded');
+        });
+    </script>
+</body>
+</html>
