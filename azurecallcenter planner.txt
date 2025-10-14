@@ -1,4 +1,4 @@
-# CallCenterAI — Azure OpenAI Mode (Planning Document)
+# CallCenterAI — Azure OpenAI Mode (Cloud-Only Architecture Planning Document)
 **Version:** 1.0  
 **Status:** Draft  
 **Last Updated:** 2025-10-10
@@ -11,10 +11,10 @@ This document defines the **Azure OpenAI Mode** for CallCenterAI — a HIPAA-ali
 
 - **Azure Speech** for real-time **speech-to-text (STT)** and **text-to-speech (TTS)**
 - **Azure OpenAI** for language understanding and conversational orchestration
-- **Twilio** for inbound/outbound telephony
+- **Azure Communication Services (ACS)** for inbound/outbound telephony
 - **NextGen EHR** as the primary scheduling system with **Google Calendar** as a failover
 
-The design assumes the clinic (or your SaaS) operates within an **Azure tenant** configured for HIPAA with appropriate commercial agreements in place. PHI is processed only through **controlled, private network paths**, and retained solely within **approved, encrypted stores**.
+The design assumes the clinic (or your SaaS) operates within an **Azure tenant** configured for HIPAA with appropriate commercial agreements in place. PHI is processed only through **controlled, private network paths**, and retained solely within **approved, encrypted stores**. The entire system operates in a **fully cloud-based architecture** with no on-premises components.
 
 Primary goals:
 
@@ -22,7 +22,7 @@ Primary goals:
 2. Integrate NextGen EHR and advanced routing (caller-type and overload).  
 3. Provide a GUI-based Admin Portal, reminder automation, and subscription control.  
 4. Achieve hardened security posture (network isolation, encryption, access control).  
-5. Optimize for small-clinic CPU deployments and multi-clinic scalability.
+5. Optimize for cloud-based deployments and multi-clinic scalability.
 
 ---
 
@@ -33,8 +33,8 @@ Primary goals:
 - Scheduling: create/confirm/cancel via NextGen; failover to Google Calendar
 - Caller-type routing (patient, physician, pharmacy, insurer) and overload handling
 - Reminder calls 24 hours prior with one retry after 30 minutes
-- On-prem **Router Node** plus optional on-prem **ASR Workers** (if desired)
-- Azure-mode pipeline where STT/TTS and LLM run in Azure services
+- **Cloud-based Router Service** running in Azure
+- Fully cloud-based pipeline where STT/TTS, LLM, and telephony run in Azure services
 
 **Out of Scope**
 - Custom EHRs beyond NextGen (can be added later via connector pattern)
@@ -46,17 +46,17 @@ Primary goals:
 ## 3. Architecture Overview (Azure Mode)
 
 ### 3.1 High-Level Flow
-1. **Caller** dials the clinic number (Twilio).  
-2. **Twilio** streams audio to **Router Node** (on-prem or Azure VM).  
-3. **Router Node** sends audio to **Azure Speech (STT)** over private network; receives partial/final transcripts.  
+1. **Caller** dials the clinic number (Azure Communication Services).  
+2. **Azure Communication Services** streams audio to **Cloud Router Service** (Azure App Service/Container).  
+3. **Cloud Router Service** sends audio to **Azure Speech (STT)** over private network; receives partial/final transcripts.  
 4. Transcripts go to **Azure OpenAI** for intent and response generation (bilingual handling).  
-5. Response text goes to **Azure Speech (TTS)**; audio streamed back to **Twilio**, then to the caller.  
-6. For booking/cancel/confirm and lookups, **Router Node** calls **NextGen EHR**; on EHR failure, uses **Google Calendar** fallback.  
+5. Response text goes to **Azure Speech (TTS)**; audio streamed back to **Azure Communication Services**, then to the caller.  
+6. For booking/cancel/confirm and lookups, **Cloud Router Service** calls **NextGen EHR**; on EHR failure, uses **Google Calendar** fallback.  
 7. **Admin Portal** provides configuration, monitoring, reminders scheduling, and subscription status.
 
 ### 3.2 Roles
-- **Twilio**: Telephony and call media relay.
-- **Router Node (PHI Proxy & Orchestrator)**: Entry point; session control; admission/queue/forward logic; integration calls to Azure and EHR/Calendar; logging with PHI-safe policies.
+- **Azure Communication Services**: Telephony and call media relay.
+- **Cloud Router Service (PHI Proxy & Orchestrator)**: Entry point; session control; admission/queue/forward logic; integration calls to Azure services and EHR/Calendar; logging with PHI-safe policies.
 - **Azure Speech**: Real-time STT and TTS with EN/ES voices.
 - **Azure OpenAI**: NLU/LU, dialogue state, bilingual prompt logic.
 - **NextGen Connector**: Appointment CRUD; patient lookups; availability checks; audit trail.
@@ -69,15 +69,18 @@ Primary goals:
 ## 4. Network & Data Flow Controls (Azure Mode)
 
 **Network Isolation Concept**
-- Traffic between Router Node and Azure services traverses **private network paths** only (no public Internet), using **Private Endpoints/Private Link** within an **Azure Virtual Network (VNet)**.
-- **Public network access disabled** on Azure OpenAI and Azure Speech resources.
-- **VPN Gateway** or **ExpressRoute** connects the clinic site to the Azure VNet.
-- **Private DNS** ensures Azure service FQDNs resolve to **private IPs**.
+- All services operate within **Azure Virtual Network (VNet)** using **Private Endpoints/Private Link** for internal communication.
+- **Public network access disabled** on Azure OpenAI, Azure Speech, and Azure Communication Services resources.
+- **Cloud Router Service** runs within the same VNet as other Azure services for optimal performance and security.
+- **Private DNS** ensures Azure service FQDNs resolve to **private IPs** within the VNet.
+- **Network Security Groups (NSGs)** and **Azure Firewall** control traffic flow between services.
 
 **PHI Handling**
 - PHI may be present in speech/audio and in LLM prompts/replies.  
 - Tokenization is **optional** in Azure Mode; retaining it reduces audit surface.  
 - Logs are **content-minimized** (no audio, no raw prompts) and **encrypted**.
+- All data transmission between Azure services uses **TLS 1.2+** encryption in transit.
+- **Azure Key Vault** manages all encryption keys and secrets with **Customer-Managed Keys (CMK)**.
 
 ---
 
@@ -88,8 +91,9 @@ Primary goals:
   - Conversational response: ≤ 700 ms average under nominal load  
   - Under stress: ≤ 900 ms average with graceful degradation  
 - **Concurrency**:  
-  - CPU-only Router + Azure Speech typically supports high call concurrency (Azure STT/TTS scales in service).  
-  - If using local ASR Workers (optional), plan ~2–3 calls per 8 physical CPU cores.
+  - Cloud Router Service + Azure Speech + Azure Communication Services supports high call concurrency with auto-scaling.
+  - Azure services scale automatically based on demand; no manual capacity planning required.
+  - **Azure App Service** or **Azure Container Instances** can auto-scale the Router Service based on CPU/memory metrics.
 
 **10-minute call storage math (reference)**
 - PCM 16-bit, 8 kHz, mono ≈ 9.6 MB  
@@ -100,17 +104,17 @@ Primary goals:
 
 ## 6. Phase-Based Implementation Plan (Azure Mode)
 
-**Phase 1: Demo Core (Azure Speech + Azure OpenAI + Calendar)**
+**Phase 1: Demo Core (Azure Speech + Azure OpenAI + Azure Communication Services + Calendar)**
 - Objectives  
-  1. Establish real-time call loop with Azure Speech STT/TTS and Azure OpenAI.  
+  1. Establish real-time call loop with Azure Speech STT/TTS, Azure OpenAI, and Azure Communication Services.  
   2. Validate bilingual detection and language lock (EN/ES).  
   3. Demonstrate basic appointment flow using Google Calendar for availability.  
   4. Prove private connectivity (VNet + Private Endpoints) and content-minimized logging.  
 - Dependencies  
-  - Twilio number and media streaming; Azure tenant with OpenAI/Speech resources; VNet, Private Endpoints, Private DNS; VPN Gateway or ExpressRoute; Google Calendar account for test availability.  
+  - Azure Communication Services phone number and media streaming; Azure tenant with OpenAI/Speech/ACS resources; VNet, Private Endpoints, Private DNS; Google Calendar account for test availability.  
 - Implementation Steps  
-  1. Configure Private Endpoints for Azure OpenAI and Azure Speech; disable public network access.  
-  2. Connect Router Node to Azure via VPN/ExpressRoute; validate name resolution to Private IPs.  
+  1. Configure Private Endpoints for Azure OpenAI, Azure Speech, and Azure Communication Services; disable public network access.  
+  2. Deploy Cloud Router Service in Azure App Service or Container Instances within the VNet.  
   3. Set up bilingual dialogue policies (language auto-detect → language lock).  
   4. Build prototype flows: greeting, identify intent, confirm details, tentative booking, farewell.  
   5. Integrate Calendar availability checks and holds.  
@@ -165,31 +169,31 @@ Primary goals:
 - Exit Criteria  
   - Documented “defense-in-depth” controls; no critical vulns open; pass security review.
 
-**Phase 5: Small Clinic CPU Setup + Scalability**
+**Phase 5: Cloud Deployment Optimization + Multi-Tenant Scalability**
 - Objectives  
-  1. Finalize CPU-only packaging and SOPs for small clinics.  
+  1. Finalize cloud deployment automation and SOPs for small clinics.  
   2. Multi-clinic scaling plan; capacity models; horizontal expansion.  
 - Dependencies  
   - Phase 4; baseline performance data; Partner clinics for pilot.  
 - Implementation Steps  
-  1. Benchmark typical clinic loads and set sizing tables (calls vs. CPU).  
-  2. Create installer workflow and rollback procedures.  
+  1. Benchmark typical clinic loads and set auto-scaling parameters for Azure services.  
+  2. Create Infrastructure as Code (ARM templates/Bicep) for automated deployment.  
   3. Validate multi-clinic license isolation; usage metering per tenant.  
-  4. HA options: secondary Router Node and failover scenarios.  
+  4. HA options: multi-region deployment and failover scenarios.  
 - Exit Criteria  
-  - Installer completes < 30 minutes; 99.9% availability over 7-day soak; linear scaling with additional Routers/tenants.
+  - Deployment completes < 30 minutes; 99.9% availability over 7-day soak; linear scaling with additional tenants.
 
 ---
 
 ## 7. Detailed Security Precautions (Azure Mode)
 
 **Network Isolation**
-- Use **Azure Private Link/Private Endpoints** for Azure OpenAI, Azure Speech, Key Vault.  
-- **Disable Public Network Access** on all cognitive and secret stores.  
-- Set up a **VNet + subnets** for AI services, Router VM (if in Azure), and management.  
-- Connect on-prem to Azure VNet via **VPN Gateway** or **ExpressRoute**.  
+- Use **Azure Private Link/Private Endpoints** for Azure OpenAI, Azure Speech, Azure Communication Services, and Key Vault.  
+- **Disable Public Network Access** on all cognitive, communication, and secret stores.  
+- Set up a **VNet + subnets** for AI services, Cloud Router Service, and management.  
+- Deploy all services within the same VNet for optimal security and performance.  
 - Configure **Private DNS** so service FQDNs resolve to private IPs.  
-- Apply **NSGs** to allow only necessary egress/ingress between Router and Private Endpoints.
+- Apply **NSGs** and **Azure Firewall** to allow only necessary traffic between services.
 
 **Encryption & Key Management**
 - Enforce **TLS 1.2+** for all service connections; prefer mutual TLS for internal hops where applicable.  
@@ -223,8 +227,9 @@ Primary goals:
 **Operational Safeguards**
 - Admission control: cap concurrent calls; overflow to queue/forward/busy to protect QoS.  
 - **Graceful degradation**: If Azure services degrade, forward to staff rather than fail silently.  
-- **Configuration drift control**: approve changes via change management; maintain environment baselines.  
-- **Patch policy**: staging rollout within 48 hours for non-urgent updates; 24 hours for security fixes.
+- **Configuration drift control**: approve changes via change management; maintain environment baselines using Infrastructure as Code.  
+- **Patch policy**: automated updates for Azure services; staging rollout within 48 hours for non-urgent updates; 24 hours for security fixes.  
+- **Auto-scaling**: Configure auto-scaling rules for Cloud Router Service based on CPU, memory, and call volume metrics.
 
 ---
 
@@ -256,28 +261,29 @@ Primary goals:
 - Penetration tests yield no critical findings; medium findings remediated.  
 - Incident response runbooks exercised; alerting thresholds produce timely notifications.
 
-**Phase 5 (CPU Setup + Scalability)**
-- Installer completes in < 30 minutes with clear rollback.  
+**Phase 5 (Cloud Deployment + Scalability)**
+- Cloud deployment completes in < 30 minutes with clear rollback.  
 - 7-day soak test at target load achieves 99.9% uptime; no QoS regressions.  
-- Horizontal scaling with additional Routers/tenants demonstrates linear capacity growth.  
-- HA/Failover verified (secondary Router takeover within seconds).
+- Auto-scaling with additional tenants demonstrates linear capacity growth.  
+- HA/Failover verified (multi-region deployment and failover within seconds).
 
 ---
 
 ## 9. Deployment & Operations (Azure Mode)
 
-- **Clinic Pilot (preferred)**: Router Node on-prem; Azure STT/TTS/LLM via Private Link; EHR integrated; Calendar as failover.  
-- **All-Azure Variant**: Router Node as Azure VM in the VNet; on-prem connects via VPN/ExpressRoute; identical security controls.  
-- **Multi-Clinic**: Each clinic licensed (token); centralized operational dashboards per tenant; quotas and auto-upgrade offers at 115% usage.
+- **Cloud-Only Deployment**: All services run in Azure; Cloud Router Service in App Service or Container Instances; Azure STT/TTS/LLM/ACS via Private Link; EHR integrated; Calendar as failover.  
+- **Infrastructure as Code**: ARM templates or Bicep for automated deployment; version-controlled infrastructure; consistent environments.  
+- **Multi-Clinic**: Each clinic licensed (token); centralized operational dashboards per tenant; quotas and auto-upgrade offers at 115% usage; isolated resource groups per tenant.
 
 ---
 
 ## 10. Cost & Capacity Considerations
 
-- **Telephony**: Per-minute Twilio; clinics typically cover voice charges.  
+- **Telephony**: Per-minute Azure Communication Services; clinics typically cover voice charges.  
 - **Azure Cognitive**: Usage-based for STT/TTS and LLM tokens; monitor and cap via quotas.  
+- **Azure Compute**: App Service or Container Instances for Cloud Router Service; auto-scaling based on demand.  
 - **Bandwidth**: Streaming PCM at 16 kHz increases quality and bandwidth; consider Opus if your path supports it.  
-- **Hardware**: CPU-only Router Node typically sufficient; optional local ASR Workers if you want hybrid redundancy.  
+- **Storage**: Azure Storage for logs and temporary data; lifecycle management for cost optimization.  
 - **Subscription Tiers**: Flat tiers with soft caps and auto-upgrade at 115% to prevent service degradation.
 
 ---
@@ -285,10 +291,10 @@ Primary goals:
 ## 11. Final Readiness Checklist (Azure Mode)
 
 - **Networking**
-  - Private Endpoints active for Azure OpenAI, Azure Speech, and Key Vault  
-  - Public network access disabled on cognitive resources  
-  - VPN/ExpressRoute established; Private DNS resolving to private IPs  
-  - NSGs restrict traffic to least privilege
+  - Private Endpoints active for Azure OpenAI, Azure Speech, Azure Communication Services, and Key Vault  
+  - Public network access disabled on cognitive and communication resources  
+  - All services deployed within VNet; Private DNS resolving to private IPs  
+  - NSGs and Azure Firewall restrict traffic to least privilege
 
 - **Security**
   - TLS enforced; CMK for data at rest; key rotation documented  
@@ -303,9 +309,10 @@ Primary goals:
   - Reminders operational; retry after 30 minutes works
 
 - **Operations**
-  - Admin Portal usable by non-technical staff; installer < 30 minutes  
+  - Admin Portal usable by non-technical staff; cloud deployment < 30 minutes  
   - Subscription engine enforces grace/suspension/reactivation  
   - SOPs for backup/restore, incident response, and patching  
+  - Auto-scaling configured for Cloud Router Service  
   - 7-day soak tests at target concurrency; 99.9% availability
 
 ---
@@ -319,4 +326,25 @@ Primary goals:
 
 ---
 
-**End of Document — CallCenterAI Azure OpenAI Mode Planning**
+## 13. Cloud-Only Architecture Benefits
+
+**Operational Advantages**
+- **No On-Premises Infrastructure**: Eliminates hardware procurement, maintenance, and physical security concerns.
+- **Automatic Scaling**: Azure services scale automatically based on demand; no manual capacity planning.
+- **Simplified Deployment**: Infrastructure as Code enables consistent, repeatable deployments.
+- **Reduced Maintenance**: Azure handles OS updates, security patches, and infrastructure maintenance.
+- **Global Availability**: Multi-region deployment options for disaster recovery and low latency.
+
+**Cost Benefits**
+- **Pay-per-Use**: Only pay for actual usage; no idle hardware costs.
+- **Reduced Operational Overhead**: No need for on-site IT staff or hardware management.
+- **Predictable Scaling**: Auto-scaling prevents over-provisioning and under-utilization.
+
+**Security Benefits**
+- **Azure Security**: Leverages Microsoft's enterprise-grade security infrastructure.
+- **Centralized Management**: All services managed through Azure portal and APIs.
+- **Compliance**: Built-in compliance certifications and audit capabilities.
+
+---
+
+**End of Document — CallCenterAI Azure OpenAI Mode Cloud-Only Architecture Planning**

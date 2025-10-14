@@ -5,6 +5,7 @@ Handles appointment booking, scheduling, and Google Calendar integration.
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timedelta
 import uuid
@@ -17,6 +18,15 @@ from models.schemas import (
 )
 from services.crypto import make_ulid_token
 from services.google_calendar_service import GoogleCalendarIntegrationService
+from services.transaction_manager import TransactionManager, get_transaction_manager, ConcurrencyError
+from services.structured_logging import get_logger, LogCategory, log_performance
+from services.configuration import get_settings
+from services.exceptions import (
+    SlotUnavailableError, AppointmentNotFoundError, InvalidAppointmentTimeError,
+    PatientNotFoundError, ProviderNotFoundError, ProviderUnavailableError,
+    ValidationError, BusinessRuleViolationError
+)
+from services.reminder_service import get_reminder_service
 
 
 class AppointmentService:
@@ -25,12 +35,20 @@ class AppointmentService:
     def __init__(self, db: Session, google_calendar_service: Optional[GoogleCalendarIntegrationService] = None):
         self.db = db
         self.google_calendar_service = google_calendar_service
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger("appointment_service")
+        self.settings = get_settings()
     
-    def create_appointment(self, appointment_data: AppointmentCreateRequest, 
+    @log_performance("appointment_creation")
+    async def create_appointment(self, appointment_data: AppointmentCreateRequest, 
                          patient_name: str = None) -> Tuple[Optional[Appointment], Optional[str]]:
         """
-        Create a new appointment and sync to Google Calendar.
+        Create a new appointment with atomic transaction management and sync to Google Calendar.
+        
+        This method uses transaction management to ensure:
+        - Atomic appointment creation (all-or-nothing)
+        - Row-level locking to prevent double booking
+        - Automatic rollback on any failure
+        - Proper concurrency control
         
         Args:
             appointment_data: Appointment creation request
@@ -39,65 +57,140 @@ class AppointmentService:
         Returns:
             Tuple of (appointment_instance, google_calendar_event_id)
         """
+        # Get transaction manager
+        transaction_manager = get_transaction_manager(self.db)
+        
         try:
-            # Validate appointment data
-            if not self._validate_appointment_data(appointment_data):
-                raise ValueError("Invalid appointment data")
+            self.logger.info(
+                "Starting appointment creation",
+                LogCategory.APPOINTMENT,
+                extra_data={
+                    'patient_id': appointment_data.patient_id,
+                    'provider_id': appointment_data.provider_id,
+                    'appointment_date': appointment_data.appointment_date.isoformat(),
+                    'start_time': appointment_data.start_time.isoformat(),
+                    'end_time': appointment_data.end_time.isoformat(),
+                    'appointment_type': appointment_data.appointment_type
+                }
+            )
             
-            # Check if appointment slot is available
-            if not self._is_slot_available(appointment_data.start_time, appointment_data.end_time, 
-                                         appointment_data.provider_id):
-                raise ValueError("Appointment slot is not available")
+            # Validate appointment data
+            self._validate_appointment_data(appointment_data)
+            
+            # Find the appointment slot to book
+            slot = self._find_appointment_slot(appointment_data.start_time, appointment_data.provider_id)
+            if not slot:
+                self.logger.warning("No appointment slot found", LogCategory.APPOINTMENT, extra_data={
+                    'start_time': appointment_data.start_time.isoformat(),
+                    'provider_id': appointment_data.provider_id
+                })
+                raise SlotUnavailableError(
+                    "unknown", 
+                    appointment_data.provider_id, 
+                    "No appointment slot found for the specified time"
+                )
             
             # Generate appointment ID
             appointment_id = make_ulid_token('APPOINTMENT')
             
-            # Create appointment record
-            appointment = Appointment(
-                appointment_id=appointment_id,
+            # Prepare appointment data for atomic booking
+            appointment_dict = {
+                'appointment_id': appointment_id,
+                'appointment_date': appointment_data.appointment_date,
+                'start_time': appointment_data.start_time,
+                'end_time': appointment_data.end_time,
+                'appointment_type': appointment_data.appointment_type,
+                'duration_minutes': (appointment_data.end_time - appointment_data.start_time).total_seconds() / 60
+            }
+            
+            # Get clinic_id for usage counter updates
+            provider = self.db.query(Provider).filter_by(provider_id=appointment_data.provider_id).first()
+            if not provider:
+                raise ProviderNotFoundError(appointment_data.provider_id)
+            
+            # Get clinic_id from slot
+            clinic_id = slot.clinic_id
+            
+            # Perform atomic appointment booking
+            result = transaction_manager.atomic_appointment_booking(
+                appointment_data=appointment_dict,
+                slot_id=slot.slot_id,
                 patient_id=appointment_data.patient_id,
                 provider_id=appointment_data.provider_id,
-                appointment_date=appointment_data.appointment_date,
-                start_time=appointment_data.start_time,
-                end_time=appointment_data.end_time,
-                appointment_type=appointment_data.appointment_type,
-                notes_token=appointment_data.notes_token,
-                status="scheduled"
+                clinic_id=clinic_id
             )
             
-            self.db.add(appointment)
-            self.db.flush()  # Get the appointment_id for slot booking
+            appointment = result['appointment']
             
-            # Book the appointment slot
-            if not self._book_appointment_slot(appointment_data.start_time, appointment_data.provider_id, appointment_id):
-                self.db.rollback()
-                raise ValueError("Failed to book appointment slot")
-            
-            # Sync to Google Calendar if service is available
+            # Sync to Google Calendar if service is available and configured
             google_event_id = None
-            if self.google_calendar_service:
-                google_event_id = self.google_calendar_service.sync_appointment_to_calendar(
-                    appointment, appointment_data.provider_id, patient_name
+            if self.google_calendar_service and self.settings.google_calendar.client_id:
+                try:
+                    google_event_id = self.google_calendar_service.sync_appointment_to_calendar(
+                        appointment, appointment_data.provider_id, patient_name
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to sync appointment to Google Calendar: {e}")
+            
+            # Schedule reminder call if reminders are enabled
+            try:
+                reminder_service = get_reminder_service()
+                await reminder_service.schedule_reminder(
+                    db=self.db,
+                    appointment_id=appointment.appointment_id,
+                    reminder_type='appointment_reminder'
                 )
-                
-                if google_event_id:
-                    # TODO: Store google_event_id in appointment record
-                    pass
+                self.logger.info(f"Reminder scheduled for appointment {appointment.appointment_id}", LogCategory.APPOINTMENT)
+            except Exception as e:
+                # Don't fail appointment creation if reminder scheduling fails
+                self.logger.warning(f"Failed to schedule reminder for appointment {appointment.appointment_id}: {e}", LogCategory.APPOINTMENT)
             
-            # Log the creation
-            self._log_audit("appointments", appointment_id, "CREATE", None, appointment_data.dict())
-            
-            self.db.commit()
+            self.logger.info(
+                "Appointment created successfully with transaction management",
+                LogCategory.APPOINTMENT,
+                extra_data={
+                    'appointment_id': appointment.appointment_id,
+                    'slot_id': slot.slot_id,
+                    'google_event_id': google_event_id
+                }
+            )
             return appointment, google_event_id
             
+        except ConcurrencyError as e:
+            self.logger.error(
+                "Concurrency error creating appointment",
+                LogCategory.APPOINTMENT,
+                exception=e,
+                extra_data={
+                    'patient_id': appointment_data.patient_id,
+                    'provider_id': appointment_data.provider_id,
+                    'start_time': appointment_data.start_time.isoformat()
+                }
+            )
+            raise SlotUnavailableError(
+                "unknown",
+                appointment_data.provider_id,
+                "Appointment slot is no longer available - please try again"
+            )
         except Exception as e:
-            self.db.rollback()
-            self.logger.error(f"Failed to create appointment: {str(e)}")
-            raise ValueError(f"Failed to create appointment: {str(e)}")
+            self.logger.error(
+                "Error creating appointment",
+                LogCategory.APPOINTMENT,
+                exception=e,
+                extra_data={
+                    'patient_id': appointment_data.patient_id,
+                    'provider_id': appointment_data.provider_id,
+                    'start_time': appointment_data.start_time.isoformat()
+                }
+            )
+            raise
     
     def get_appointment(self, appointment_id: str) -> Optional[Appointment]:
         """Get appointment by ID."""
-        return self.db.query(Appointment).filter_by(appointment_id=appointment_id).first()
+        appointment = self.db.query(Appointment).filter_by(appointment_id=appointment_id).first()
+        if not appointment:
+            raise AppointmentNotFoundError(appointment_id)
+        return appointment
     
     def update_appointment(self, appointment_id: str, updates: AppointmentUpdateRequest,
                           patient_name: str = None) -> Tuple[Optional[Appointment], bool]:
@@ -112,9 +205,7 @@ class AppointmentService:
         Returns:
             Tuple of (updated_appointment, google_calendar_updated)
         """
-        appointment = self.get_appointment(appointment_id)
-        if not appointment:
-            return None, False
+        appointment = self.get_appointment(appointment_id)  # This will raise AppointmentNotFoundError if not found
         
         # Store old values for audit
         old_values = {
@@ -140,7 +231,11 @@ class AppointmentService:
                                          updates.end_time or appointment.end_time,
                                          updates.provider_id or appointment.provider_id,
                                          exclude_appointment_id=appointment_id):
-                raise ValueError("New appointment time is not available")
+                raise SlotUnavailableError(
+                    "unknown",
+                    updates.provider_id or appointment.provider_id,
+                    "New appointment time is not available"
+                )
         
         # Update fields
         update_data = updates.dict(exclude_unset=True)
@@ -157,9 +252,9 @@ class AppointmentService:
             # Book new slot
             self._book_appointment_slot(appointment.start_time, appointment.provider_id, appointment_id)
         
-        # Update Google Calendar if service is available
+        # Update Google Calendar if service is available and configured
         google_calendar_updated = False
-        if self.google_calendar_service:
+        if self.google_calendar_service and self.settings.google_calendar.client_id:
             # TODO: Get stored google_event_id from appointment record
             google_event_id = None  # Placeholder
             if google_event_id:
@@ -183,9 +278,7 @@ class AppointmentService:
         Returns:
             True if successful
         """
-        appointment = self.get_appointment(appointment_id)
-        if not appointment:
-            return False
+        appointment = self.get_appointment(appointment_id)  # This will raise AppointmentNotFoundError if not found
         
         # Store old values for audit
         old_values = {"status": appointment.status}
@@ -197,8 +290,8 @@ class AppointmentService:
         # Release appointment slot
         self._release_appointment_slot(appointment.start_time, appointment.provider_id)
         
-        # Cancel Google Calendar event if service is available
-        if self.google_calendar_service:
+        # Cancel Google Calendar event if service is available and configured
+        if self.google_calendar_service and self.settings.google_calendar.client_id:
             # TODO: Get stored google_event_id from appointment record
             google_event_id = None  # Placeholder
             if google_event_id:
@@ -279,8 +372,8 @@ class AppointmentService:
                 'duration_minutes': slot.duration_minutes
             })
         
-        # If Google Calendar integration is available, cross-reference with calendar availability
-        if self.google_calendar_service:
+        # If Google Calendar integration is available and configured, cross-reference with calendar availability
+        if self.google_calendar_service and self.settings.google_calendar.client_id:
             google_availability = self.google_calendar_service.calendar_service.get_provider_availability(
                 provider_id, start_date
             )
@@ -314,25 +407,29 @@ class AppointmentService:
         
         return None
     
-    def _validate_appointment_data(self, appointment_data: AppointmentCreateRequest) -> bool:
+    def _validate_appointment_data(self, appointment_data: AppointmentCreateRequest) -> None:
         """Validate appointment creation data."""
         # Check if patient exists
         patient = self.db.query(Patient).filter_by(patient_id=appointment_data.patient_id).first()
         if not patient:
-            return False
+            raise PatientNotFoundError(appointment_data.patient_id)
         
         # Check if provider exists
         provider = self.db.query(Provider).filter_by(provider_id=appointment_data.provider_id).first()
         if not provider:
-            return False
+            raise ProviderNotFoundError(appointment_data.provider_id)
         
         # Check if provider is available
         if provider.is_available != "yes":
-            return False
+            raise ProviderUnavailableError(appointment_data.provider_id, "Provider is not available")
         
         # Validate time constraints
         if appointment_data.end_time <= appointment_data.start_time:
-            return False
+            raise InvalidAppointmentTimeError(
+                appointment_data.start_time.isoformat(),
+                appointment_data.end_time.isoformat(),
+                "End time must be after start time"
+            )
         
         # Check if appointment is in the future
         # Handle timezone-aware datetimes
@@ -343,9 +440,11 @@ class AppointmentService:
             now = now.replace(tzinfo=timezone.utc)
         
         if appointment_data.start_time <= now:
-            return False
-        
-        return True
+            raise InvalidAppointmentTimeError(
+                appointment_data.start_time.isoformat(),
+                appointment_data.end_time.isoformat(),
+                "Appointment must be scheduled in the future"
+            )
     
     def _is_slot_available(self, start_time: datetime, end_time: datetime, 
                           provider_id: str, exclude_appointment_id: str = None) -> bool:
@@ -392,6 +491,25 @@ class AppointmentService:
             return True
         
         return False
+    
+    def _find_appointment_slot(self, start_time: datetime, provider_id: str) -> Optional[AppointmentSlot]:
+        """
+        Find an appointment slot for the given time and provider.
+        
+        Args:
+            start_time: Start time of the appointment
+            provider_id: ID of the provider
+            
+        Returns:
+            AppointmentSlot if found, None otherwise
+        """
+        return self.db.query(AppointmentSlot).filter(
+            and_(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime == start_time,
+                AppointmentSlot.is_booked == 'no'
+            )
+        ).first()
     
     def _log_audit(self, table_name: str, record_id: str, action_type: str, 
                    old_values: Optional[Dict], new_values: Optional[Dict]):

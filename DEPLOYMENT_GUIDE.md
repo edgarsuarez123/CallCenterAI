@@ -91,6 +91,25 @@ docker-compose -f compose/gateway.yaml exec gateway python migrate_provider_emai
 2. Complete OAuth flow in browser
 3. Verify integration status
 
+#### OAuth Token Management (Important for Production)
+
+**How the system maintains persistent Google Calendar access:**
+
+- **Initial Setup**: Each provider authenticates once with their clinic's Google account
+- **Token Storage**: Access tokens and refresh tokens are encrypted and stored in the database
+- **Automatic Refresh**: System automatically refreshes access tokens using refresh tokens
+- **Seamless Operation**: No constant OAuth prompts - appointments are created automatically
+- **Token Lifecycle**: 
+  - Access tokens expire in ~1 hour
+  - Refresh tokens expire in ~6 months
+  - System proactively refreshes before expiration
+
+**Production Considerations:**
+- **Monitor token expiration** dates
+- **Set up alerts** for failed token refreshes
+- **Plan for re-authentication** when refresh tokens expire (rare, every 6+ months)
+- **Each clinic uses their own Google account** for complete data isolation
+
 ### 5. Testing
 
 ```bash
@@ -131,6 +150,7 @@ curl http://localhost:8443/healthz
 - API health endpoint: `/healthz`
 - Database connectivity monitoring
 - Google Calendar integration status
+- OAuth token expiration monitoring
 - System resource monitoring
 
 ### 2. Logging
@@ -160,6 +180,8 @@ curl http://localhost:8443/healthz
    - Verify OAuth credentials
    - Check redirect URI configuration
    - Ensure API is enabled
+   - Check token expiration and refresh status
+   - Verify provider has proper Google account access
 
 3. **Encryption Key Issues**
    - Verify keys are base64 encoded

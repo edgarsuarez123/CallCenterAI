@@ -8,16 +8,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 ENV PYTHONPATH=/app
 
-# Add all required Python deps (include cryptography for AES-GCM)
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn[standard] \
-    sqlalchemy \
-    psycopg2-binary \
-    cryptography
+# Install Python dependencies from requirements.txt
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
 COPY . /app
 
+# Make startup script executable
+RUN chmod +x start.sh
+
+# Install pg_isready for database health checks
+RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8443
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8443"]
+CMD ["./start.sh"]

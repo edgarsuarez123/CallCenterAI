@@ -16,6 +16,7 @@ from services.database import get_db
 from services.google_calendar_service import (
     GoogleCalendarService, GoogleCalendarIntegrationService, GoogleCalendarConfig
 )
+from services.configuration import get_settings
 from models.schemas import SuccessResponse, ErrorResponse
 
 router = APIRouter(prefix="/v1/google-calendar", tags=["google-calendar"])
@@ -26,25 +27,20 @@ class AuthenticateProviderRequest(BaseModel):
 
 
 def get_google_calendar_config() -> GoogleCalendarConfig:
-    """Get Google Calendar configuration from environment variables."""
-    client_id = os.getenv('GOOGLE_CLIENT_ID')
-    client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-    redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+    """Get Google Calendar configuration from application settings."""
+    settings = get_settings()
     
-    if not client_id or not client_secret:
+    if not settings.google_calendar.client_id or not settings.google_calendar.client_secret.get_secret_value():
         raise HTTPException(
             status_code=500,
             detail="Google Calendar credentials not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables."
         )
     
     config = GoogleCalendarConfig(
-        client_id=client_id,
-        client_secret=client_secret,
-        redirect_uri=redirect_uri
+        client_id=settings.google_calendar.client_id,
+        client_secret=settings.google_calendar.client_secret.get_secret_value(),
+        redirect_uri=settings.google_calendar.redirect_uri
     )
-    
-    print(f"DEBUG: Created config object: {type(config)}")
-    print(f"DEBUG: Config attributes: client_id={config.client_id}, redirect_uri={config.redirect_uri}")
     
     return config
 
