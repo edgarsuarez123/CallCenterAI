@@ -1,4 +1,4 @@
-﻿from sqlalchemy import Column, String, LargeBinary, DateTime, ForeignKey, Integer, Float, Text, UniqueConstraint, Index, Boolean
+﻿from sqlalchemy import Column, String, LargeBinary, DateTime, ForeignKey, Integer, Float, Text, UniqueConstraint, Index, Boolean, text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from . import __init__  # keep package marker import happy
@@ -13,6 +13,23 @@ class Mapping(Base):
     call_id = Column(String(64), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     last_used_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of encrypted PHI tokens
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this mapping was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this mapping (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this mapping was deleted (compliance, cleanup, etc.)
 
 
 class Call(Base):
@@ -77,12 +94,58 @@ class Call(Base):
     # We'll update this field when call terminates
 
     # ============================================================================
+    # CALLER TYPE DETECTION & ROUTING
+    # ============================================================================
+    
+    detected_caller_type = Column(String(50), nullable=True)
+    # Detected caller type: "patient", "physician", "pharmacy", "insurance", "emergency", "unknown"
+    
+    caller_type_confidence = Column(Float, nullable=True)
+    # Confidence score for caller type detection (0.0 - 1.0)
+    
+    routing_rule_id = Column(String(64), ForeignKey('routing_rules.rule_id', ondelete='SET NULL'), nullable=True)
+    # Routing rule applied to this call
+    
+    assigned_provider_id = Column(String(64), ForeignKey('providers.provider_id', ondelete='SET NULL'), nullable=True)
+    # Provider assigned to handle this call
+    
+    queue_id = Column(String(64), ForeignKey('call_queues.queue_id', ondelete='SET NULL'), nullable=True)
+    # Queue this call was placed in (if any)
+    
+    routing_metadata = Column(Text, nullable=True)
+    # JSON metadata about routing decisions and processing
+    
+    # ============================================================================
     # RELATIONSHIPS
     # ============================================================================
     
     # Optional link to patient (if caller is identified as existing patient)
     patient_id = Column(String(64), ForeignKey("patients.patient_id"), nullable=True)
     patient = relationship("Patient", back_populates="calls")
+    
+    # Routing relationships
+    routing_rule = relationship("RoutingRule", back_populates="calls")
+    assigned_provider = relationship("Provider", foreign_keys=[assigned_provider_id])
+    queue = relationship("CallQueue", back_populates="calls")
+    queued_call = relationship("QueuedCall", back_populates="call", uselist=False)
+    detection_logs = relationship("CallerDetectionLog", back_populates="call")
+    
+    # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of call records containing PHI
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this call was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this call (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this call was deleted (compliance, cleanup, etc.)
     
     # ============================================================================
     # DATABASE INDEXES
@@ -159,6 +222,23 @@ class Patient(Base):
     appointments = relationship("Appointment", back_populates="patient")
     
     # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of patient records containing PHI
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this patient was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this patient (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this patient was deleted (compliance, cleanup, etc.)
+    
+    # ============================================================================
     # DATABASE INDEXES
     # ============================================================================
     
@@ -222,12 +302,30 @@ class Appointment(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
     # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of appointment records containing PHI
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this appointment was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this appointment (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this appointment was deleted (compliance, cleanup, etc.)
+    
+    # ============================================================================
     # RELATIONSHIPS
     # ============================================================================
     
     patient = relationship("Patient", back_populates="appointments")
     provider = relationship("Provider", back_populates="appointments")
     call = relationship("Call")
+    reminders = relationship("Reminder", back_populates="appointment")
 
 
 class AppointmentBlock(Base):
@@ -331,6 +429,8 @@ class Provider(Base):
     appointment_blocks = relationship("AppointmentBlock", back_populates="provider")
     # One provider can have Google Calendar credentials
     google_calendar_credentials = relationship("GoogleCalendarCredentials", back_populates="provider", uselist=False)
+    # One provider can have capacity information
+    capacity = relationship("ProviderCapacity", back_populates="provider", uselist=False)
 
 
 class CallNotes(Base):
@@ -376,6 +476,23 @@ class CallNotes(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of call notes containing PHI
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this call note was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this call note (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this call note was deleted (compliance, cleanup, etc.)
     
     # ============================================================================
     # RELATIONSHIPS
@@ -435,6 +552,23 @@ class AuditLog(Base):
     
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     # When the action occurred
+    
+    # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of audit logs (critical for compliance)
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this audit log was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this audit log (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this audit log was deleted (compliance, cleanup, etc.)
     
     # ============================================================================
     # DATABASE INDEXES
@@ -1022,6 +1156,23 @@ class ClinicUsage(Base):
     # When usage was finalized for billing (end of period)
     
     # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of usage records (may contain PHI patterns)
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this usage record was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this usage record (user_id, system, etc.)
+    
+    deletion_reason = Column(String(200), nullable=True)
+    # Why this usage record was deleted (compliance, cleanup, etc.)
+    
+    # ============================================================================
     # DATABASE INDEXES
     # ============================================================================
     
@@ -1291,4 +1442,370 @@ class GoogleCalendarCredentials(Base):
         Index('idx_provider_credentials', 'provider_id'),
         Index('idx_credentials_active', 'is_active', 'last_used_at'),
         Index('idx_credentials_expires', 'token_expires_at'),
+    )
+
+
+class CallerType(Base):
+    """
+    Defines different types of callers for intelligent routing.
+    """
+    __tablename__ = "caller_types"
+    
+    # Primary identifier
+    caller_type_id = Column(String(64), primary_key=True)
+    
+    # Caller type information
+    caller_type_name = Column(String(50), nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    priority_level = Column(Integer, nullable=False, default=3)
+    default_routing_strategy = Column(String(50), nullable=False, default='round_robin')
+    default_overload_policy = Column(String(50), nullable=False, default='queue')
+    max_queue_size = Column(Integer, nullable=False, default=50)
+    is_active = Column(Boolean, nullable=False, default=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    routing_rules = relationship("RoutingRule", back_populates="caller_type")
+    call_queues = relationship("CallQueue", back_populates="caller_type")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_caller_types_active', 'caller_type_id', postgresql_where=text("is_deleted = 'no' AND is_active = true")),
+        Index('idx_caller_types_priority', 'priority_level'),
+    )
+
+
+class RoutingRule(Base):
+    """
+    Configurable routing rules for different caller types.
+    """
+    __tablename__ = "routing_rules"
+    
+    # Primary identifier
+    rule_id = Column(String(64), primary_key=True)
+    
+    # Rule information
+    rule_name = Column(String(100), nullable=False)
+    caller_type_id = Column(String(64), ForeignKey('caller_types.caller_type_id', ondelete='CASCADE'), nullable=False)
+    priority_level = Column(Integer, nullable=False)
+    routing_strategy = Column(String(50), nullable=False)
+    overload_policy = Column(String(50), nullable=False)
+    max_queue_size = Column(Integer, nullable=False)
+    target_providers = Column(Text, nullable=True)  # JSON array of provider IDs
+    conditions = Column(Text, nullable=True)  # JSON conditions for rule matching
+    is_enabled = Column(Boolean, nullable=False, default=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    caller_type = relationship("CallerType", back_populates="routing_rules")
+    calls = relationship("Call", back_populates="routing_rule")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_routing_rules_active', 'rule_id', postgresql_where=text("is_deleted = 'no' AND is_enabled = true")),
+        Index('idx_routing_rules_caller_type', 'caller_type_id', 'priority_level'),
+    )
+
+
+class CallerDetectionLog(Base):
+    """
+    Logs of caller type detection attempts for analysis and improvement.
+    """
+    __tablename__ = "caller_detection_logs"
+    
+    # Primary identifier
+    detection_id = Column(String(64), primary_key=True)
+    
+    # Call information
+    call_id = Column(String(64), ForeignKey('calls.call_id', ondelete='CASCADE'), nullable=False)
+    caller_phone_token = Column(String(64), nullable=True)
+    
+    # Detection results
+    detected_caller_type = Column(String(50), nullable=True)
+    detection_method = Column(String(50), nullable=False)
+    confidence_score = Column(Float, nullable=True)
+    detection_data = Column(Text, nullable=True)  # JSON data used for detection
+    detection_result = Column(Text, nullable=True)  # JSON result data
+    processing_time_ms = Column(Integer, nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    call = relationship("Call", back_populates="detection_logs")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_caller_detection_logs_call', 'call_id'),
+        Index('idx_caller_detection_logs_phone', 'caller_phone_token'),
+        Index('idx_caller_detection_logs_type', 'detected_caller_type'),
+    )
+
+
+class ProviderCapacity(Base):
+    """
+    Tracks provider capacity and availability for call routing.
+    """
+    __tablename__ = "provider_capacities"
+    
+    # Primary identifier
+    capacity_id = Column(String(64), primary_key=True)
+    
+    # Provider information
+    provider_id = Column(String(64), ForeignKey('providers.provider_id', ondelete='CASCADE'), nullable=False)
+    max_concurrent_calls = Column(Integer, nullable=False)
+    current_calls = Column(Integer, nullable=False, default=0)
+    available_capacity = Column(Integer, nullable=False)
+    skills = Column(Text, nullable=True)  # JSON array of skills
+    languages = Column(Text, nullable=True)  # JSON array of languages
+    specializations = Column(Text, nullable=True)  # JSON array of specializations
+    is_available = Column(Boolean, nullable=False, default=True)
+    
+    # Timestamps
+    last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    provider = relationship("Provider", back_populates="capacity")
+    queued_calls = relationship("QueuedCall", back_populates="assigned_provider")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_provider_capacities_provider', 'provider_id'),
+        Index('idx_provider_capacities_available', 'is_available', 'available_capacity'),
+    )
+
+
+class CallQueue(Base):
+    """
+    Call queues for overload management and priority handling.
+    """
+    __tablename__ = "call_queues"
+    
+    # Primary identifier
+    queue_id = Column(String(64), primary_key=True)
+    
+    # Queue information
+    queue_name = Column(String(100), nullable=False)
+    caller_type_id = Column(String(64), ForeignKey('caller_types.caller_type_id', ondelete='CASCADE'), nullable=False)
+    priority_level = Column(Integer, nullable=False)
+    max_queue_size = Column(Integer, nullable=False)
+    current_size = Column(Integer, nullable=False, default=0)
+    average_wait_time = Column(Float, nullable=False, default=0.0)
+    queue_config = Column(Text, nullable=True)  # JSON configuration
+    is_active = Column(Boolean, nullable=False, default=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    caller_type = relationship("CallerType", back_populates="call_queues")
+    queued_calls = relationship("QueuedCall", back_populates="queue")
+    calls = relationship("Call", back_populates="queue")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_call_queues_active', 'queue_id', postgresql_where=text("is_deleted = 'no' AND is_active = true")),
+    )
+
+
+class QueuedCall(Base):
+    """
+    Individual calls waiting in queues for provider assignment.
+    """
+    __tablename__ = "queued_calls"
+    
+    # Primary identifier
+    queued_call_id = Column(String(64), primary_key=True)
+    
+    # Call information
+    call_id = Column(String(64), ForeignKey('calls.call_id', ondelete='CASCADE'), nullable=False)
+    queue_id = Column(String(64), ForeignKey('call_queues.queue_id', ondelete='CASCADE'), nullable=False)
+    priority_score = Column(Float, nullable=False, default=0.0)
+    
+    # Queue timing
+    queued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    estimated_wait_time = Column(Float, nullable=True)
+    
+    # Assignment information
+    assigned_provider_id = Column(String(64), ForeignKey('providers.provider_id', ondelete='SET NULL'), nullable=True)
+    assigned_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(20), nullable=False, default='queued')  # queued, assigned, completed, expired
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    call = relationship("Call", back_populates="queued_call")
+    queue = relationship("CallQueue", back_populates="queued_calls")
+    assigned_provider = relationship("ProviderCapacity", back_populates="queued_calls")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_queued_calls_queue', 'queue_id', 'priority_score'),
+        Index('idx_queued_calls_status', 'status', 'queued_at'),
+        Index('idx_queued_calls_call', 'call_id'),
+    )
+
+
+class Reminder(Base):
+    """
+    Tracks automated reminder calls for appointments.
+    Each reminder represents a scheduled call to remind patients about upcoming appointments.
+    """
+    __tablename__ = "reminders"
+    
+    # Primary identifier
+    reminder_id = Column(String(64), primary_key=True)
+    
+    # Appointment relationship
+    appointment_id = Column(String(64), ForeignKey('appointments.appointment_id', ondelete='CASCADE'), nullable=False)
+    
+    # Reminder scheduling
+    scheduled_time = Column(DateTime(timezone=True), nullable=False)
+    # When the reminder call should be made
+    
+    reminder_type = Column(String(20), nullable=False, default='appointment_reminder')
+    # Type of reminder: 'appointment_reminder', 'follow_up', 'cancellation_reminder'
+    
+    # Reminder status
+    status = Column(String(20), nullable=False, default='scheduled')
+    # scheduled, calling, completed, failed, cancelled, no_answer
+    
+    # Call tracking
+    reminder_call_id = Column(String(64), nullable=True)
+    # ID of the actual call made for this reminder
+    
+    # Retry logic
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=3)
+    next_retry_time = Column(DateTime(timezone=True), nullable=True)
+    
+    # Call outcome
+    call_duration_seconds = Column(Integer, nullable=True)
+    call_outcome = Column(String(50), nullable=True)
+    # answered, no_answer, busy, failed, voicemail
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    appointment = relationship("Appointment", back_populates="reminders")
+    reminder_logs = relationship("ReminderLog", back_populates="reminder")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_reminders_scheduled', 'scheduled_time', 'status'),
+        Index('idx_reminders_appointment', 'appointment_id'),
+        Index('idx_reminders_status', 'status', 'scheduled_time'),
+        Index('idx_reminders_retry', 'next_retry_time', 'status'),
+    )
+
+
+class ReminderLog(Base):
+    """
+    Logs all reminder call attempts and outcomes.
+    Provides detailed audit trail for reminder system.
+    """
+    __tablename__ = "reminder_logs"
+    
+    # Primary identifier
+    log_id = Column(String(64), primary_key=True)
+    
+    # Reminder relationship
+    reminder_id = Column(String(64), ForeignKey('reminders.reminder_id', ondelete='CASCADE'), nullable=False)
+    
+    # Call attempt information
+    attempt_number = Column(Integer, nullable=False)
+    # Which attempt this log entry represents (1st, 2nd, 3rd, etc.)
+    
+    call_started_at = Column(DateTime(timezone=True), nullable=False)
+    call_ended_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Call outcome details
+    call_status = Column(String(20), nullable=False)
+    # initiated, ringing, answered, no_answer, busy, failed, completed
+    
+    call_duration_seconds = Column(Integer, nullable=True)
+    call_outcome = Column(String(50), nullable=True)
+    # answered, no_answer, busy, failed, voicemail, hangup
+    
+    # Error information
+    error_code = Column(String(50), nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Call metadata
+    caller_id = Column(String(20), nullable=True)
+    # Phone number used for the reminder call
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    
+    # Soft delete fields
+    is_deleted = Column(String(10), default="no", nullable=False)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(64), nullable=True)
+    deletion_reason = Column(String(200), nullable=True)
+    
+    # Relationships
+    reminder = relationship("Reminder", back_populates="reminder_logs")
+    
+    # Indexes
+    __table_args__ = (
+        Index('idx_reminder_logs_reminder', 'reminder_id', 'attempt_number'),
+        Index('idx_reminder_logs_status', 'call_status', 'call_started_at'),
+        Index('idx_reminder_logs_outcome', 'call_outcome', 'call_started_at'),
     )

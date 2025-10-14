@@ -72,6 +72,7 @@ class NaturalLanguageProcessor:
                 (r'\b(?:i need|i want|i would like)\s+(?:to\s+)?(?:reschedule|change|move|postpone)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.9),
                 (r'\b(?:reschedule|change|move|postpone)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.8),
                 (r'\b(?:can i change|can we change|is it possible to change)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.7),
+                (r'\b(?:i want to reschedule|i need to reschedule|i\'d like to reschedule)\b', 0.9),
             ],
             IntentType.INSURANCE_INQUIRY: [
                 (r'\b(?:insurance|coverage|benefits|claim|authorization|pre-authorization)\b', 0.8),
@@ -102,6 +103,13 @@ class NaturalLanguageProcessor:
             IntentType.NEGATION: [
                 (r'\b(?:no|nope|not|don\'t|doesn\'t|won\'t|can\'t|cannot|never|none)\b', 0.8),
                 (r'\b(?:that\'s not|that\'s wrong|incorrect|not right)\b', 0.7),
+            ],
+            IntentType.GENERAL_INQUIRY: [
+                (r'\b(?:what|when|where|how|why|who)\b', 0.6),
+                (r'\b(?:i have a question|i need help|can you help|do you know)\b', 0.7),
+                (r'\b(?:information|details|tell me|explain)\b', 0.6),
+                (r'\b(?:what time is my appointment|when is my appointment|what time is my visit)\b', 0.9),
+                (r'\b(?:i want to know|i need to know|can you tell me)\s+(?:about|when|what time)\b', 0.7),
             ]
         }
         

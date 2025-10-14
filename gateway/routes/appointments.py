@@ -20,7 +20,7 @@ router = APIRouter(prefix="/v1/appointments", tags=["appointment-management"])
 
 
 @router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
-def create_appointment(
+async def create_appointment(
     appointment_data: AppointmentCreateRequest,
     patient_name: Optional[str] = None,
     db: Session = Depends(get_db)
@@ -55,7 +55,7 @@ def create_appointment(
             pass
         
         service = AppointmentService(db, google_calendar_service)
-        appointment, google_event_id = service.create_appointment(appointment_data, patient_name)
+        appointment, google_event_id = await service.create_appointment(appointment_data, patient_name)
         
         response_data = {
             "appointment": AppointmentResponse.from_orm(appointment),

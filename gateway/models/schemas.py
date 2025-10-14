@@ -1,4 +1,5 @@
-﻿from pydantic import BaseModel, Field, validator
+﻿import re
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
@@ -78,7 +79,8 @@ class ClinicCreateRequest(BaseModel):
     queue_timeout_seconds: int = Field(default=45, ge=10, le=300)
     subscription_tier: SubscriptionTier = Field(default=SubscriptionTier.BASIC)
     
-    @validator('phone_number')
+    @field_validator('phone_number')
+    @classmethod
     def validate_phone_number(cls, v):
         # Basic phone number validation
         if not v.startswith('+'):
@@ -131,7 +133,8 @@ class ProviderCreateRequest(BaseModel):
     npi_number: Optional[str] = Field(None, max_length=20)
     email: Optional[str] = Field(None, max_length=255)
     
-    @validator('npi_number')
+    @field_validator('npi_number')
+    @classmethod
     def validate_npi_number(cls, v):
         if v and not v.isdigit():
             raise ValueError('NPI number must contain only digits')
@@ -213,7 +216,8 @@ class AppointmentCreateRequest(BaseModel):
     appointment_type: str = Field(..., min_length=1, max_length=50)
     notes_token: Optional[str] = Field(None, max_length=64)
     
-    @validator('end_time')
+    @field_validator('end_time')
+    @classmethod
     def validate_end_time(cls, v, values):
         if 'start_time' in values and v <= values['start_time']:
             raise ValueError('End time must be after start time')
