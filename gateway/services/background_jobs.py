@@ -14,7 +14,7 @@ and automating routine maintenance tasks without manual intervention.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -35,6 +35,7 @@ from models.models import (
     AppointmentSlot, Call, ClinicLicense, AuditLog, 
     ClinicUsage, Appointment, Patient, Mapping, Reminder, ReminderLog
 )
+from models.enums import CallStatus
 
 
 class JobStatus(Enum):
@@ -167,6 +168,16 @@ class BackgroundJobManager:
             function=self._update_usage_counters,
             schedule_interval=300,  # Every 5 minutes
             priority=JobPriority.NORMAL
+        )
+        
+        # Google Calendar token refresh
+        self.register_job(
+            job_id="refresh_google_tokens",
+            name="Refresh Google Calendar Tokens",
+            description="Proactively refresh Google Calendar tokens before 1-hour expiration",
+            function=self._refresh_google_calendar_tokens,
+            schedule_interval=3000,  # Every 50 minutes (tokens expire after 1 hour)
+            priority=JobPriority.HIGH
         )
         
         # HIPAA compliance jobs
@@ -479,7 +490,7 @@ class BackgroundJobManager:
             
             abandoned_calls = db.query(Call).filter(
                 and_(
-                    Call.status == "active",
+                    Call.status == CallStatus.ACTIVE.value,
                     Call.started_at < cutoff_time
                 )
             ).all()
@@ -594,23 +605,28 @@ class BackgroundJobManager:
     def _update_usage_counters(self) -> Dict[str, Any]:
         """Update real-time usage counters for billing."""
         with get_db_session() as db:
-            # Update current concurrent calls for all licenses
-            licenses = db.query(ClinicLicense).all()
+            # Use a single query with JOIN to avoid N+1 problem
+            from sqlalchemy import func
             
+            # Get active call counts per clinic in one query
+            active_calls_per_clinic = db.query(
+                Patient.clinic_id,
+                func.count(Call.call_id).label('active_calls')
+            ).join(
+                Call, Patient.patient_id == Call.patient_id
+            ).filter(
+                Call.status == CallStatus.ACTIVE.value
+            ).group_by(Patient.clinic_id).all()
+            
+            # Create a dictionary for quick lookup
+            active_calls_dict = {clinic_id: count for clinic_id, count in active_calls_per_clinic}
+            
+            # Update all licenses in one query
+            licenses = db.query(ClinicLicense).all()
             records_affected = 0
+            
             for license in licenses:
-                # Count active calls for this clinic
-                active_calls = db.query(Call).filter(
-                    and_(
-                        Call.status == "active",
-                        Call.patient_id.in_(
-                            db.query(Patient.patient_id).filter(
-                                Patient.clinic_id == license.clinic_id
-                            )
-                        )
-                    )
-                ).count()
-                
+                active_calls = active_calls_dict.get(license.clinic_id, 0)
                 license.current_concurrent_calls = active_calls
                 records_affected += 1
             
@@ -1037,6 +1053,52 @@ class BackgroundJobManager:
                 if (self.total_jobs_executed + self.total_jobs_failed) > 0 else 100
             )
         }
+    
+    def _refresh_google_calendar_tokens(self):
+        """Refresh Google Calendar tokens that will expire soon."""
+        try:
+            from services.database import get_db
+            from models.models import GoogleCalendarCredentials
+            from datetime import datetime, timezone, timedelta, timedelta
+            from services.google_calendar_credentials_service import GoogleCalendarCredentialsService
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            
+            db = next(get_db())
+            try:  # ADD TRY BLOCK TO ENSURE SESSION IS CLOSED
+                # Find credentials expiring in next 15 minutes
+                expiry_threshold = datetime.now(timezone.utc) + timedelta(minutes=15)
+                
+                expiring_creds = db.query(GoogleCalendarCredentials).filter(
+                    GoogleCalendarCredentials.is_active == True,
+                    GoogleCalendarCredentials.token_expires_at <= expiry_threshold,
+                    GoogleCalendarCredentials.refresh_token_ciphertext.isnot(None)
+                ).all()
+                
+                credentials_service = GoogleCalendarCredentialsService(db)
+                refreshed_count = 0
+                
+                for cred_record in expiring_creds:
+                    try:
+                        # Get credentials
+                        credentials = credentials_service.get_credentials(cred_record.provider_id)
+                        if credentials and credentials.refresh_token:
+                            # Refresh
+                            credentials.refresh(Request())
+                            # Save back
+                            credentials_service.store_credentials(cred_record.provider_id, credentials)
+                            refreshed_count += 1
+                            self.logger.info(f"Refreshed Google token for provider {cred_record.provider_id}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to refresh token for provider {cred_record.provider_id}: {e}")
+                
+                if refreshed_count > 0:
+                    self.logger.info(f"Refreshed {refreshed_count} Google Calendar tokens")
+            finally:  # ADD FINALLY BLOCK TO ENSURE SESSION IS CLOSED
+                db.close()
+                
+        except Exception as e:
+            self.logger.error(f"Failed to refresh Google Calendar tokens: {e}")
 
 
 # Global instance

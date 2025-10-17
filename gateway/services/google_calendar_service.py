@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import json
 import logging
+import os
 from dataclasses import dataclass
 
 # Google Calendar API imports
@@ -126,7 +127,10 @@ class GoogleCalendarService:
                 # Refresh credentials if needed
                 if credentials.expired and credentials.refresh_token:
                     credentials.refresh(Request())
-                    self._store_provider_credentials(provider_id, credentials)
+                    # Save refreshed credentials
+                    if self.credentials_service:
+                        self.credentials_service.store_credentials(provider_id, credentials)
+                        self.logger.info(f"Auto-refreshed and saved Google Calendar credentials for provider {provider_id}")
             
             # Build service with credentials
             self.service = build('calendar', 'v3', credentials=credentials)
@@ -161,8 +165,17 @@ class GoogleCalendarService:
             provider_email = self._get_provider_email(provider_id)
             
             # Prepare event data
+            hipaa_compliant = os.getenv('GOOGLE_WORKSPACE_HIPAA_COMPLIANT', 'false').lower() == 'true'
+            
+            if hipaa_compliant and patient_name:
+                # With BAA: Show patient name in summary
+                summary = f'{clinic_info["clinic_name"]} - {patient_name}'
+            else:
+                # Without BAA: Show patient ID in summary
+                summary = f'{clinic_info["clinic_name"]} - Patient {appointment.patient_id}'
+            
             event_data = {
-                'summary': f'{clinic_info["clinic_name"]} - {appointment.appointment_type}',
+                'summary': summary,
                 'description': self._format_appointment_description(appointment, patient_name, clinic_info),
                 'start': {
                     'dateTime': appointment.start_time.isoformat(),
@@ -399,12 +412,21 @@ class GoogleCalendarService:
             description += f"Clinic: {clinic_info['clinic_name']}\n"
             description += f"Phone: {clinic_info['phone_number']}\n"
         
-        if patient_name:
+        # HIPAA-compliant patient identification
+        hipaa_compliant = os.getenv('GOOGLE_WORKSPACE_HIPAA_COMPLIANT', 'false').lower() == 'true'
+        
+        if hipaa_compliant and patient_name:
+            # With Google Workspace BAA: Show patient name
             description += f"Patient: {patient_name}\n"
+        else:
+            # Without BAA: Show patient ID only (no PHI)
+            description += f"Patient ID: {appointment.patient_id}\n"
+            description += "(Look up patient details in system using Patient ID)\n"
         
         if appointment.notes_token:
             description += f"Notes: [Tokenized - {appointment.notes_token}]\n"
         
+        description += f"Duration: {appointment.duration_minutes} minutes\n"
         description += f"Created: {appointment.created_at.strftime('%Y-%m-%d %H:%M')}\n"
         description += "Booked via CallCenterAI"
         

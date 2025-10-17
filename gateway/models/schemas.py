@@ -1,45 +1,12 @@
 ﻿import re
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+from typing import Optional, List, Dict, Any
 from datetime import datetime
-from enum import Enum
+from .enums import CallStatus, YesNo, PriorityLevel, SubscriptionTier, LicenseStatus, BillingCycle
 
 # ============================================================================
-# ENUMS
+# ENUMS - Now imported from enums.py to prevent circular imports
 # ============================================================================
-
-class YesNo(str, Enum):
-    YES = "yes"
-    NO = "no"
-
-class CallStatus(str, Enum):
-    RINGING = "ringing"
-    ANSWERED = "answered"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    BUSY = "busy"
-    NO_ANSWER = "no_answer"
-
-class PriorityLevel(str, Enum):
-    NORMAL = "normal"
-    EMERGENCY = "emergency"
-
-class SubscriptionTier(str, Enum):
-    BASIC = "basic"
-    PROFESSIONAL = "professional"
-    ENTERPRISE = "enterprise"
-
-class LicenseStatus(str, Enum):
-    ACTIVE = "active"
-    SUSPENDED = "suspended"
-    EXPIRED = "expired"
-    CANCELLED = "cancelled"
-
-class BillingCycle(str, Enum):
-    MONTHLY = "monthly"
-    QUARTERLY = "quarterly"
-    ANNUAL = "annual"
 
 # ============================================================================
 # EXISTING TOKENIZATION SCHEMAS
@@ -118,8 +85,7 @@ class ClinicResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # PROVIDER MANAGEMENT SCHEMAS
@@ -129,23 +95,12 @@ class ProviderCreateRequest(BaseModel):
     name_token: str = Field(..., min_length=1, max_length=64)
     title: str = Field(..., min_length=1, max_length=20)
     specialty: str = Field(..., min_length=1, max_length=100)
-    license_number: Optional[str] = Field(None, max_length=50)
-    npi_number: Optional[str] = Field(None, max_length=20)
     email: Optional[str] = Field(None, max_length=255)
-    
-    @field_validator('npi_number')
-    @classmethod
-    def validate_npi_number(cls, v):
-        if v and not v.isdigit():
-            raise ValueError('NPI number must contain only digits')
-        return v
 
 class ProviderUpdateRequest(BaseModel):
     name_token: Optional[str] = Field(None, min_length=1, max_length=64)
     title: Optional[str] = Field(None, min_length=1, max_length=20)
     specialty: Optional[str] = Field(None, min_length=1, max_length=100)
-    license_number: Optional[str] = Field(None, max_length=50)
-    npi_number: Optional[str] = Field(None, max_length=20)
     email: Optional[str] = Field(None, max_length=255)
     is_available: Optional[YesNo] = None
 
@@ -154,54 +109,51 @@ class ProviderResponse(BaseModel):
     name_token: str
     title: str
     specialty: str
-    license_number: Optional[str]
-    npi_number: Optional[str]
+    email: Optional[str]
     is_available: str
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # PATIENT MANAGEMENT SCHEMAS
 # ============================================================================
 
 class PatientCreateRequest(BaseModel):
-    first_name_token: str = Field(..., min_length=1, max_length=64)
-    last_name_token: str = Field(..., min_length=1, max_length=64)
+    name_token: str = Field(..., min_length=1, max_length=64)
     phone_token: str = Field(..., min_length=1, max_length=64)
     email_token: Optional[str] = Field(None, max_length=64)
-    date_of_birth_token: Optional[str] = Field(None, max_length=64)
+    dob_token: Optional[str] = Field(None, max_length=64)
+    address_token: Optional[str] = Field(None, max_length=64)
     insurance_provider_token: Optional[str] = Field(None, max_length=64)
     insurance_member_id_token: Optional[str] = Field(None, max_length=64)
     insurance_plan_type: Optional[str] = Field(None, max_length=50)
 
 class PatientUpdateRequest(BaseModel):
-    first_name_token: Optional[str] = Field(None, min_length=1, max_length=64)
-    last_name_token: Optional[str] = Field(None, min_length=1, max_length=64)
+    name_token: Optional[str] = Field(None, min_length=1, max_length=64)
     phone_token: Optional[str] = Field(None, min_length=1, max_length=64)
     email_token: Optional[str] = Field(None, max_length=64)
-    date_of_birth_token: Optional[str] = Field(None, max_length=64)
+    dob_token: Optional[str] = Field(None, max_length=64)
+    address_token: Optional[str] = Field(None, max_length=64)
     insurance_provider_token: Optional[str] = Field(None, max_length=64)
     insurance_member_id_token: Optional[str] = Field(None, max_length=64)
     insurance_plan_type: Optional[str] = Field(None, max_length=50)
 
 class PatientResponse(BaseModel):
     patient_id: str
-    first_name_token: str
-    last_name_token: str
+    name_token: str
     phone_token: str
     email_token: Optional[str]
-    date_of_birth_token: Optional[str]
+    dob_token: Optional[str]
+    address_token: Optional[str]
     insurance_provider_token: Optional[str]
     insurance_member_id_token: Optional[str]
     insurance_plan_type: Optional[str]
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # APPOINTMENT MANAGEMENT SCHEMAS
@@ -216,12 +168,11 @@ class AppointmentCreateRequest(BaseModel):
     appointment_type: str = Field(..., min_length=1, max_length=50)
     notes_token: Optional[str] = Field(None, max_length=64)
     
-    @field_validator('end_time')
-    @classmethod
-    def validate_end_time(cls, v, values):
-        if 'start_time' in values and v <= values['start_time']:
+    @model_validator(mode='after')
+    def validate_end_time(self):
+        if self.end_time <= self.start_time:
             raise ValueError('End time must be after start time')
-        return v
+        return self
 
 class AppointmentUpdateRequest(BaseModel):
     provider_id: Optional[str] = Field(None, min_length=1, max_length=64)
@@ -245,8 +196,7 @@ class AppointmentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # APPOINTMENT SLOT SCHEMAS
@@ -279,39 +229,45 @@ class AppointmentSlotResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # CALL MANAGEMENT SCHEMAS
 # ============================================================================
 
 class CallCreateRequest(BaseModel):
-    call_sid: str = Field(..., min_length=1, max_length=64)
-    caller_phone_token: str = Field(..., min_length=1, max_length=64)
-    status: CallStatus = Field(default=CallStatus.RINGING)
+    call_id: str = Field(..., min_length=1, max_length=64)
+    caller_phone_token: Optional[str] = Field(None, max_length=64)
+    status: CallStatus = Field(default=CallStatus.INITIALIZING)
     patient_id: Optional[str] = Field(None, max_length=64)
+    detected_caller_type: Optional[str] = Field(None, max_length=50)
+    caller_type_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
 class CallUpdateRequest(BaseModel):
     status: Optional[CallStatus] = None
     patient_id: Optional[str] = Field(None, max_length=64)
     ended_at: Optional[datetime] = None
-    duration_seconds: Optional[int] = Field(None, ge=0)
+    detected_caller_type: Optional[str] = Field(None, max_length=50)
+    caller_type_confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
 
 class CallResponse(BaseModel):
     call_id: str
     call_sid: str
-    caller_phone_token: str
-    status: str
+    caller_phone_token: Optional[str]
+    status: CallStatus
     started_at: datetime
     ended_at: Optional[datetime]
-    duration_seconds: Optional[int]
+    call_duration_seconds: Optional[int]
     patient_id: Optional[str]
+    routing_rule_id: Optional[str]
+    assigned_provider_id: Optional[str]
+    queue_id: Optional[str]
+    detected_caller_type: Optional[str]
+    caller_type_confidence: Optional[float]
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # CALL QUEUE SCHEMAS
@@ -319,7 +275,6 @@ class CallResponse(BaseModel):
 
 class CallQueueCreateRequest(BaseModel):
     call_id: str = Field(..., min_length=1, max_length=64)
-    clinic_id: str = Field(..., min_length=1, max_length=64)
     priority_level: PriorityLevel = Field(default=PriorityLevel.NORMAL)
     is_emergency: YesNo = Field(default=YesNo.NO)
     emergency_reason: Optional[str] = Field(None, max_length=200)
@@ -337,7 +292,6 @@ class CallQueueUpdateRequest(BaseModel):
 class CallQueueResponse(BaseModel):
     queue_id: str
     call_id: str
-    clinic_id: str
     priority_level: str
     is_emergency: str
     emergency_reason: Optional[str]
@@ -349,8 +303,7 @@ class CallQueueResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # SYSTEM CONFIG SCHEMAS
@@ -359,22 +312,35 @@ class CallQueueResponse(BaseModel):
 class SystemConfigCreateRequest(BaseModel):
     config_key: str = Field(..., min_length=1, max_length=100)
     config_value: str = Field(..., min_length=1, max_length=1000)
+    config_type: str = Field(default="string", max_length=20)
+    category: Optional[str] = Field(None, max_length=50)
     description: Optional[str] = Field(None, max_length=500)
+    is_sensitive: str = Field(default="no", max_length=10)
+    requires_restart: str = Field(default="no", max_length=10)
 
 class SystemConfigUpdateRequest(BaseModel):
     config_value: Optional[str] = Field(None, min_length=1, max_length=1000)
+    config_type: Optional[str] = Field(None, max_length=20)
+    category: Optional[str] = Field(None, max_length=50)
     description: Optional[str] = Field(None, max_length=500)
+    is_sensitive: Optional[str] = Field(None, max_length=10)
+    requires_restart: Optional[str] = Field(None, max_length=10)
+    updated_by: Optional[str] = Field(None, max_length=64)
 
 class SystemConfigResponse(BaseModel):
     config_id: str
     config_key: str
     config_value: str
+    config_type: str
+    category: Optional[str]
     description: Optional[str]
+    is_sensitive: str
+    requires_restart: str
+    updated_by: Optional[str]
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # AUDIT LOG SCHEMAS
@@ -382,18 +348,18 @@ class SystemConfigResponse(BaseModel):
 
 class AuditLogResponse(BaseModel):
     log_id: str
-    table_name: str
-    record_id: str
-    action_type: str
-    old_values: Optional[str]
-    new_values: Optional[str]
     user_id: Optional[str]
+    action_type: str
+    table_name: Optional[str]
+    record_id: Optional[str]
     ip_address: Optional[str]
     user_agent: Optional[str]
+    request_id: Optional[str]
+    details: Optional[str]
+    success: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # CLINIC LICENSE SCHEMAS
@@ -434,8 +400,7 @@ class ClinicLicenseResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # CLINIC USAGE SCHEMAS
@@ -447,19 +412,40 @@ class ClinicUsageResponse(BaseModel):
     billing_period_start: datetime
     billing_period_end: datetime
     total_calls: int
-    ai_tokens_used: int
-    speech_minutes: float
-    telephony_minutes: float
-    cost_breakdown: str
+    total_call_minutes: int
+    completed_calls: int
+    failed_calls: int
+    abandoned_calls: int
+    forwarded_calls: int
+    calls_english: int
+    calls_spanish: int
+    total_llm_prompt_tokens: int
+    total_llm_completion_tokens: int
+    total_llm_cost_usd: float
+    total_stt_minutes: int
+    total_stt_cost_usd: float
+    total_tts_characters: int
+    total_tts_cost_usd: float
+    total_twilio_minutes: int
+    total_twilio_cost_usd: float
+    reminder_calls_sent: int
+    reminder_calls_answered: int
+    reminder_calls_cost_usd: float
+    appointments_scheduled: int
+    appointments_cancelled: int
+    appointments_confirmed: int
     total_cost_usd: float
+    subscription_fee_usd: float
+    overage_fee_usd: float
+    total_billable_usd: float
     invoice_generated: str
-    invoice_number: Optional[str]
+    invoice_id: Optional[str]
     payment_status: str
     created_at: datetime
     updated_at: datetime
+    finalized_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 # ============================================================================
 # BULK OPERATION SCHEMAS
@@ -523,3 +509,28 @@ class SuccessResponse(BaseModel):
     success: bool = True
     message: str
     data: Optional[dict] = None
+
+# Appointment-specific response schemas
+class AppointmentCreateResponse(BaseModel):
+    appointment: AppointmentResponse
+    google_event_id: Optional[str] = None
+    message: str = "Appointment created successfully"
+
+class AppointmentUpdateResponse(BaseModel):
+    appointment: AppointmentResponse
+    google_event_id: Optional[str] = None
+    message: str = "Appointment updated successfully"
+
+class NextAvailableSlotResponse(BaseModel):
+    provider_id: str
+    next_available_slot: Optional[Dict[str, Any]] = None
+    message: str
+
+class AppointmentStatisticsResponse(BaseModel):
+    total_appointments: int
+    upcoming_appointments: int
+    completed_appointments: int
+    cancelled_appointments: int
+    average_duration_minutes: float
+    most_popular_provider: Optional[str] = None
+    most_popular_time_slot: Optional[str] = None

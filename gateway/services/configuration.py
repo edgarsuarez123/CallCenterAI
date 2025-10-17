@@ -47,8 +47,8 @@ class DatabaseConfig(BaseSettings):
     connect_timeout: int = Field(default=10, ge=1, le=60, description="Connection timeout in seconds")
     application_name: str = Field(default="CallCenterAI", description="Application name for database")
     default_transaction_isolation: str = Field(
-        default="read_committed", 
-        pattern="^(read_committed|repeatable_read|serializable)$",
+        default="read committed", 
+        pattern="^(read committed|repeatable read|serializable)$",
         description="Default transaction isolation level"
     )
     
@@ -157,9 +157,9 @@ class GoogleCalendarConfig(BaseSettings):
     """Google Calendar configuration with validation."""
     
     # OAuth settings
-    client_id: str = Field(..., description="Google OAuth client ID")
+    client_id: str = Field(default="182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com", description="Google OAuth client ID")
     client_secret: SecretStr = Field(..., description="Google OAuth client secret")
-    redirect_uri: str = Field(..., description="Google OAuth redirect URI")
+    redirect_uri: str = Field(default="http://localhost:8000/auth/callback", description="Google OAuth redirect URI")
     
     # API settings
     api_key: SecretStr = Field(..., description="Google Calendar API key")
@@ -203,13 +203,12 @@ class AzureCommunicationConfig(BaseSettings):
     """Azure Communication Services configuration with validation."""
     
     # Core ACS settings
-    connection_string: SecretStr = Field(..., description="Azure Communication Services connection string")
-    phone_number: str = Field(..., description="Azure Communication Services phone number")
-    callback_url: str = Field(..., description="Webhook callback URL for ACS events")
+    connection_string: SecretStr = Field(default="endpoint=https://test.communication.azure.com/;accesskey=test", description="Azure Communication Services connection string")
+    phone_number: str = Field(default="+15551234567", description="Azure Communication Services phone number")
+    callback_url: str = Field(default="https://localhost:8443/api/v1/callbacks", description="Webhook callback URL for ACS events")
     webhook_secret: SecretStr = Field(..., description="Webhook secret for signature verification")
     
     # Call settings
-    recording_enabled: bool = Field(default=False, description="Enable call recording")
     max_call_duration_minutes: int = Field(default=30, ge=1, le=120, description="Maximum call duration in minutes")
     
     # Rate limiting
@@ -249,8 +248,8 @@ class AzureSpeechConfig(BaseSettings):
     """Azure Speech Services configuration with validation."""
     
     # Core Speech settings
-    speech_key: SecretStr = Field(..., description="Azure Speech Services API key")
-    speech_region: str = Field(..., description="Azure Speech Services region")
+    speech_key: SecretStr = Field(default="test_speech_key_32_characters_long", description="Azure Speech Services API key")
+    speech_region: str = Field(default="eastus", description="Azure Speech Services region")
     
     # STT settings
     stt_language_primary: str = Field(default="en-US", description="Primary STT language")
@@ -291,16 +290,16 @@ class AzureOpenAIConfig(BaseSettings):
     """Azure OpenAI configuration with validation."""
     
     # Core OpenAI settings
-    endpoint: str = Field(..., description="Azure OpenAI endpoint")
-    api_key: SecretStr = Field(..., description="Azure OpenAI API key")
+    endpoint: str = Field(default="https://test.openai.azure.com/", description="Azure OpenAI endpoint")
+    api_key: SecretStr = Field(default="test_key", description="Azure OpenAI API key")
     api_version: str = Field(default="2024-02-15-preview", description="Azure OpenAI API version")
-    deployment_name: str = Field(..., description="Azure OpenAI deployment name")
+    deployment_name: str = Field(default="test_deployment", description="Azure OpenAI deployment name")
     
     # Conversation settings
     max_tokens: int = Field(default=500, ge=1, le=4000, description="Maximum tokens per response")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="Response creativity (0-2)")
-    system_prompt_en: str = Field(..., description="English system prompt for healthcare context")
-    system_prompt_es: str = Field(..., description="Spanish system prompt for healthcare context")
+    system_prompt_en: str = Field(default="You are a helpful medical receptionist assistant.", description="English system prompt for healthcare context")
+    system_prompt_es: str = Field(default="Eres un asistente útil de recepción médica.", description="Spanish system prompt for healthcare context")
     
     # History settings
     enable_conversation_history: bool = Field(default=True, description="Enable conversation history")
@@ -343,6 +342,48 @@ class AzureOpenAIConfig(BaseSettings):
     )
 
 
+class RedisCacheConfig(BaseSettings):
+    """Redis cache configuration with validation."""
+    
+    # Connection settings
+    host: str = Field(default="localhost", description="Redis host")
+    port: int = Field(default=6379, ge=1, le=65535, description="Redis port")
+    db: int = Field(default=0, ge=0, le=15, description="Redis database number")
+    password: Optional[SecretStr] = Field(default=None, description="Redis password")
+    
+    # Connection pooling
+    max_connections: int = Field(default=50, ge=1, le=200, description="Maximum Redis connections")
+    socket_timeout: int = Field(default=5, ge=1, le=60, description="Socket timeout in seconds")
+    socket_connect_timeout: int = Field(default=5, ge=1, le=60, description="Socket connect timeout in seconds")
+    retry_on_timeout: bool = Field(default=True, description="Retry on timeout")
+    health_check_interval: int = Field(default=30, ge=5, le=300, description="Health check interval in seconds")
+    
+    # Cache settings
+    default_ttl: int = Field(default=300, ge=60, le=86400, description="Default TTL in seconds")
+    key_prefix: str = Field(default="callcenter:", description="Key prefix for all cache keys")
+    
+    @field_validator('host')
+    @classmethod
+    def validate_host(cls, v):
+        """Validate Redis host."""
+        if not v or not v.strip():
+            raise ValueError("Redis host cannot be empty")
+        return v.strip()
+    
+    @field_validator('key_prefix')
+    @classmethod
+    def validate_key_prefix(cls, v):
+        """Validate key prefix format."""
+        if not v.endswith(':'):
+            v = v + ':'
+        return v
+    
+    model_config = SettingsConfigDict(
+        env_prefix="REDIS_",
+        case_sensitive=False
+    )
+
+
 class AzureConfig(BaseSettings):
     """Azure configuration with validation."""
     
@@ -352,8 +393,8 @@ class AzureConfig(BaseSettings):
     openai: AzureOpenAIConfig = Field(default_factory=AzureOpenAIConfig)
     
     # Storage
-    storage_account_name: str = Field(..., description="Azure Storage account name")
-    storage_account_key: SecretStr = Field(..., description="Azure Storage account key")
+    storage_account_name: str = Field(default="teststorageaccount", description="Azure Storage account name")
+    storage_account_key: SecretStr = Field(default="test_storage_key_64_characters_long_for_development_purposes_only", description="Azure Storage account key")
     storage_container_name: str = Field(default="callcenter", description="Azure Storage container name")
     
     model_config = SettingsConfigDict(
@@ -398,6 +439,7 @@ class ApplicationConfig(BaseSettings):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     google_calendar: GoogleCalendarConfig = Field(default_factory=GoogleCalendarConfig)
     azure: AzureConfig = Field(default_factory=AzureConfig)
+    redis_cache: RedisCacheConfig = Field(default_factory=RedisCacheConfig)
     
     model_config = SettingsConfigDict(
         env_prefix="APP_",
@@ -555,7 +597,7 @@ def validate_configuration() -> Dict[str, Any]:
             "database_configured": bool(settings.database.password),
             "security_configured": bool(settings.security.encryption_key),
             "google_calendar_configured": bool(settings.google_calendar.client_id),
-            "azure_configured": bool(settings.azure.acs_connection_string)
+            "azure_configured": bool(settings.azure.communication.connection_string)
         }
         
         # Check for common configuration issues
@@ -602,7 +644,14 @@ def get_redis_url() -> str:
         str: Redis URL
     """
     settings = get_settings()
-    return f"redis://{settings.database.host}:6379/0"
+    redis_config = settings.redis_cache
+    
+    # Build Redis URL with authentication if password is provided
+    if redis_config.password:
+        password = redis_config.password.get_secret_value()
+        return f"redis://:{password}@{redis_config.host}:{redis_config.port}/{redis_config.db}"
+    else:
+        return f"redis://{redis_config.host}:{redis_config.port}/{redis_config.db}"
 
 
 def get_environment_info() -> Dict[str, Any]:

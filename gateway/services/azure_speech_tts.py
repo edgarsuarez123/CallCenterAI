@@ -13,7 +13,7 @@ import asyncio
 import io
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -207,7 +207,7 @@ class TextToSpeechService:
                 language=voice_config.language,
                 text=text,
                 ssml=ssml,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 result_id=result_id,
                 success=True
             )
@@ -254,7 +254,7 @@ class TextToSpeechService:
                 language=language,
                 text=text,
                 ssml=None,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 result_id=f"tts_error_{int(time.time() * 1000)}",
                 success=False,
                 error_message=str(e)
@@ -333,8 +333,8 @@ class TextToSpeechService:
             raise AzureCommunicationError("synthesis_error", str(e))
     
     @log_performance("tts_stream_synthesis")
-    async def stream_synthesis(self, text: str, language: str = "en", 
-                             call_id: str, chunk_callback: Optional[Callable] = None) -> bool:
+    async def stream_synthesis(self, text: str, call_id: str, language: str = "en", 
+                             chunk_callback: Optional[Callable] = None) -> bool:
         """
         Stream text-to-speech synthesis in chunks.
         
@@ -370,7 +370,7 @@ class TextToSpeechService:
                 "language": language,
                 "voice_config": voice_config,
                 "ssml": ssml,
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "chunk_callback": chunk_callback
             }
             
@@ -437,7 +437,7 @@ class TextToSpeechService:
                             language=voice_config.language,
                             text=session["text"],
                             ssml=ssml,
-                            timestamp=datetime.utcnow(),
+                            timestamp=datetime.now(timezone.utc),
                             result_id=f"chunk_{int(time.time() * 1000)}",
                             success=True
                         )
@@ -475,7 +475,7 @@ class TextToSpeechService:
                             language=voice_config.language,
                             text=session["text"],
                             ssml=ssml,
-                            timestamp=datetime.utcnow(),
+                            timestamp=datetime.now(timezone.utc),
                             result_id=f"final_{int(time.time() * 1000)}",
                             success=True
                         )
@@ -590,7 +590,7 @@ class TextToSpeechService:
                 language=voice_config.language,
                 text="",  # No plain text for SSML
                 ssml=ssml,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 result_id=result_id,
                 success=True
             )
@@ -629,7 +629,7 @@ class TextToSpeechService:
                 language=language,
                 text="",
                 ssml=ssml,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 result_id=f"ssml_error_{int(time.time() * 1000)}",
                 success=False,
                 error_message=str(e)
@@ -644,7 +644,7 @@ class TextToSpeechService:
         """Update synthesis statistics."""
         if call_id not in self.synthesis_stats:
             self.synthesis_stats[call_id] = {
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "total_syntheses": 0,
                 "successful_syntheses": 0,
                 "total_audio_duration": 0,
@@ -697,7 +697,7 @@ class TextToSpeechService:
             return None
         
         stats = self.synthesis_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.utcnow() - stats["start_time"]).total_seconds()
+        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
         if stats["total_syntheses"] > 0:
             stats["success_rate"] = stats["successful_syntheses"] / stats["total_syntheses"]
@@ -749,7 +749,7 @@ class TextToSpeechService:
     async def cleanup_expired_sessions(self):
         """Clean up expired synthesis sessions."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             for call_id, stats in self.synthesis_stats.items():

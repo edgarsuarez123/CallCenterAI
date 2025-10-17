@@ -12,7 +12,7 @@ This service provides:
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Union, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -112,12 +112,26 @@ class HybridNLPService:
         
         # Caching for performance
         self.intent_cache: Dict[str, HybridIntentResult] = {}
-        self.cache_ttl_seconds = 300  # 5 minutes
+        
+        # Tiered TTL strategy for different intent types
+        self.cache_ttl_mapping = {
+            "greeting": 86400,      # 24 hours
+            "goodbye": 86400,       # 24 hours
+            "appointment_booking": 3600,    # 1 hour
+            "appointment_inquiry": 3600,    # 1 hour
+            "provider_inquiry": 3600,       # 1 hour
+            "clinic_inquiry": 3600,         # 1 hour
+            "billing_inquiry": 3600,        # 1 hour
+            "general_inquiry": 3600,        # 1 hour
+            "specific": 300,                # 5 minutes
+            "default": 300                  # 5 minutes
+        }
+        self.default_ttl = 300  # 5 minutes
         
         # Service health tracking
         self.azure_health = True
         self.local_health = True
-        self.last_health_check = datetime.utcnow()
+        self.last_health_check = datetime.now(timezone.utc)
         self.health_check_interval = 60  # seconds
         
         self.logger.info(
@@ -126,9 +140,22 @@ class HybridNLPService:
             extra_data={
                 "default_strategy": self.default_strategy.value,
                 "confidence_threshold": self.confidence_threshold,
-                "cache_ttl_seconds": self.cache_ttl_seconds
+                "cache_ttl_mapping": self.cache_ttl_mapping,
+                "default_ttl": self.default_ttl
             }
         )
+    
+    def _get_ttl_for_intent(self, intent: str) -> int:
+        """
+        Get TTL for given intent type.
+        
+        Args:
+            intent: Intent type string
+            
+        Returns:
+            int: TTL in seconds
+        """
+        return self.cache_ttl_mapping.get(intent, self.default_ttl)
     
     @log_performance("hybrid_process_input")
     async def process_input(self, user_input: str, call_id: str,
@@ -160,7 +187,9 @@ class HybridNLPService:
             cache_key = f"{call_id}:{hash(user_input)}:{language.value}"
             if cache_key in self.intent_cache:
                 cached_result = self.intent_cache[cache_key]
-                if (datetime.utcnow() - cached_result.timestamp).total_seconds() < self.cache_ttl_seconds:
+                # Use tiered TTL based on intent
+                intent_ttl = self._get_ttl_for_intent(cached_result.intent.value if cached_result.intent else "default")
+                if (datetime.now(timezone.utc) - cached_result.timestamp).total_seconds() < intent_ttl:
                     self.logger.debug(f"Using cached intent result for call {call_id}")
                     return cached_result
                 else:
@@ -601,11 +630,11 @@ class HybridNLPService:
             intent = LocalIntentType.APPOINTMENT_BOOKING
         elif any(word in user_input_lower for word in ["cancel", "cancelar"]):
             intent = LocalIntentType.APPOINTMENT_CANCELLATION
-        elif any(word in user_input_lower for word in ["reschedule", "reagendar", "change", "cambiar"]):
+        elif any(word in user_input_lower for word in ["reschedule appointment", "reagendar cita", "change appointment", "cambiar cita"]):
             intent = LocalIntentType.APPOINTMENT_RESCHEDULING
-        elif any(word in user_input_lower for word in ["hello", "hi", "hola", "buenos"]):
+        elif any(word in user_input_lower for word in ["hello", "hi", "hola", "buenas tardes", "buenas noches, buenos dias"]):
             intent = LocalIntentType.GREETING
-        elif any(word in user_input_lower for word in ["bye", "goodbye", "adios", "hasta"]):
+        elif any(word in user_input_lower for word in ["bye", "goodbye", "adios", "hasta luego", "chao"]):
             intent = LocalIntentType.GOODBYE
         else:
             intent = LocalIntentType.GENERAL_INQUIRY
@@ -622,7 +651,7 @@ class HybridNLPService:
     async def _check_service_health(self):
         """Check the health of both services."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             if (current_time - self.last_health_check).total_seconds() < self.health_check_interval:
                 return  # Skip health check if too recent
             
@@ -686,11 +715,13 @@ class HybridNLPService:
     async def _cleanup_cache(self):
         """Clean up expired cache entries."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_keys = []
             
             for key, result in self.intent_cache.items():
-                if (current_time - result.timestamp).total_seconds() > self.cache_ttl_seconds:
+                # Use tiered TTL based on intent
+                intent_ttl = self._get_ttl_for_intent(result.intent.value if result.intent else "default")
+                if (current_time - result.timestamp).total_seconds() > intent_ttl:
                     expired_keys.append(key)
             
             for key in expired_keys:
@@ -745,7 +776,8 @@ class HybridNLPService:
                 },
                 "cache_stats": {
                     "cache_size": len(self.intent_cache),
-                    "cache_ttl_seconds": self.cache_ttl_seconds
+                    "cache_ttl_mapping": self.cache_ttl_mapping,
+                    "default_ttl": self.default_ttl
                 }
             }
     
@@ -753,12 +785,12 @@ class HybridNLPService:
         """Clean up expired data and statistics."""
         try:
             # Clean up old call statistics
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             for call_id, stats in self.call_stats.items():
                 # Remove stats for calls older than 1 hour
-                if stats.total_requests == 0 or (current_time - datetime.utcnow()).total_seconds() > 3600:
+                if stats.total_requests == 0 or (current_time - datetime.now(timezone.utc)).total_seconds() > 3600:
                     expired_calls.append(call_id)
             
             for call_id in expired_calls:

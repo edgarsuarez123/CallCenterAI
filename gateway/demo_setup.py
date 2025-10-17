@@ -6,6 +6,7 @@ Creates demo data for the CallCenterAI system including clinic, providers, and a
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import logging
+import random
 
 from services.database import SessionLocal, engine
 from services.clinic_management import ClinicManagementService
@@ -21,80 +22,78 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def create_demo_clinic(db: Session) -> str:
-    """Create demo clinic for St. Peters Medical."""
+def create_custom_clinic(db: Session) -> str:
+    """Create a new clinic with unique clinic_id. Each run creates a new clinic."""
     clinic_service = ClinicManagementService(db)
     
-    # Try to find existing clinic first
-    from models.models import Clinic
-    existing_clinic = db.query(Clinic).first()
-    if existing_clinic:
-        logger.info(f"Found existing clinic: {existing_clinic.clinic_id}")
-        return existing_clinic.clinic_id
+    # Always create a new clinic (removed existing clinic check)
+    # Each run will create a new clinic with a unique clinic_id
+    
+    # ============================================================================
+    # CUSTOMIZE YOUR CLINIC INFORMATION HERE
+    # ============================================================================
+    # Generate unique phone number for each clinic using UUID
+    import uuid
+    uuid_suffix = str(uuid.uuid4()).replace('-', '')[:10]  # First 10 chars of UUID
+    unique_phone = f"+1{uuid_suffix}"
     
     clinic_data = ClinicCreateRequest(
-        clinic_name="St. Peters Medical Center",
-        address="123 Medical Drive, Orlando, FL 32801",
-        phone_number="+14071234567",
-        email="info@stpetersmedical.com",
-        timezone="America/New_York",
-        ehr_system="Google Calendar",
-        business_hours={
-            "monday": {"open": "08:00", "close": "17:00"},
-            "tuesday": {"open": "08:00", "close": "17:00"},
-            "wednesday": {"open": "08:00", "close": "17:00"},
-            "thursday": {"open": "08:00", "close": "17:00"},
-            "friday": {"open": "08:00", "close": "17:00"},
-            "saturday": {"open": "09:00", "close": "13:00"},
-            "sunday": {"open": "closed", "close": "closed"}
-        },
-        emergency_keywords=["emergency", "urgent", "chest pain", "can't breathe", "severe pain"],
-        ai_model_settings={
-            "model": "gpt-4",
-            "temperature": 0.7,
-            "max_tokens": 500
-        },
-        subscription_status="active"
+        clinic_name="St Peters Medical",  # Change this to your clinic name
+        phone_number=unique_phone,  # Unique phone number for each clinic
+        timezone="America/New_York",  # Change this to your timezone
+        default_language="en",  # Change this to your default language
+        supported_languages="en,es",  # Change this to your supported languages
+        ehr_system="Google Calendar",  # Keep this for Google Calendar integration
+        ehr_api_endpoint=None,  # Optional: your EHR API endpoint
+        ehr_credentials_vault_key=None,  # Optional: your EHR credentials vault key
+        max_concurrent_calls=10,  # Change this to your max concurrent calls
+        queue_timeout_seconds=45,  # Change this to your queue timeout
+        subscription_tier="professional"  # Change this to your subscription tier
     )
     
     try:
         clinic = clinic_service.create_clinic(clinic_data)
-        logger.info(f"Created demo clinic: {clinic.clinic_id}")
+        logger.info(f"Created new clinic: {clinic.clinic_id} with phone: {unique_phone}")
         return clinic.clinic_id
     except Exception as e:
         logger.error(f"Failed to create clinic: {str(e)}")
         raise
 
 
-def create_demo_providers(db: Session, clinic_id: str) -> list:
-    """Create demo providers for the clinic."""
+def create_custom_providers(db: Session, clinic_id: str) -> list:
+    """Create your custom providers. Modify the providers_data below to match your providers."""
     provider_service = ProviderManagementService(db)
     
+    # ============================================================================
+    # CUSTOMIZE YOUR PROVIDERS HERE
+    # Add, remove, or modify providers as needed
+    # ============================================================================
     providers_data = [
         {
-            "name_token": "Dr. Sarah Johnson",
-            "title": "Dr.",
-            "specialty": "Family Medicine",
-            "phone": "+14071234568",
-            "email": "sarah.johnson@stpetersmedical.com",
-            "is_available": "yes"
+            "name_token": "Dr. Miriam Rivera",  # Change this to your provider's name
+            "title": "Dr.",  # Dr., Mr., Ms., etc.
+            "specialty": "Family Medicine",  # Change this to their specialty
+            "email": "dr.smith@yourclinic.com"  # Change this to their email
         },
         {
-            "name_token": "Dr. Michael Smith",
+            "name_token": "Dr. Jane Doe",  # Add more providers as needed
             "title": "Dr.",
-            "specialty": "Internal Medicine",
-            "phone": "+14071234569",
-            "email": "michael.smith@stpetersmedical.com",
-            "is_available": "yes"
+            "specialty": "Cardiology",
+            "email": "dr.doe@yourclinic.com"
         },
         {
-            "name_token": "Dr. Emily Davis",
+            "name_token": "Dr. Robert Johnson",  # Add more providers as needed
             "title": "Dr.",
             "specialty": "Pediatrics",
-            "phone": "+14071234570",
-            "email": "emily.davis@stpetersmedical.com",
-            "is_available": "yes"
+            "email": "dr.johnson@yourclinic.com"
         }
+        # Add more providers here if needed
+        # {
+        #     "name_token": "Dr. Another Provider",
+        #     "title": "Dr.",
+        #     "specialty": "Dermatology",
+        #     "email": "dr.another@yourclinic.com"
+        # }
     ]
     
     created_providers = []
@@ -104,7 +103,8 @@ def create_demo_providers(db: Session, clinic_id: str) -> list:
             provider_request = ProviderCreateRequest(
                 name_token=provider_data["name_token"],
                 title=provider_data["title"],
-                specialty=provider_data["specialty"]
+                specialty=provider_data["specialty"],
+                email=provider_data["email"]
             )
             
             provider = provider_service.add_provider(clinic_id, provider_request)
@@ -117,94 +117,65 @@ def create_demo_providers(db: Session, clinic_id: str) -> list:
     return created_providers
 
 
-def create_demo_appointment_slots(db: Session, providers: list):
-    """Create demo appointment slots for the next 14 days."""
+def create_demo_appointment_slots(db: Session, providers: list, clinic_id: str):
+    """Create demo appointment slots for business hours (9 AM to 5 PM, Monday to Friday) for the entire year."""
     provider_service = ProviderManagementService(db)
     
-    # Create slots for the next 14 days
+    # Create slots for the entire year (365 days)
     start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    end_date = start_date + timedelta(days=365)  # One year from tomorrow
+    
+    total_slots_created = 0
     
     for provider in providers:
-        logger.info(f"Creating appointment slots for {provider.name_token}")
+        logger.info(f"Creating appointment slots for {provider.name_token} for the entire year")
+        provider_slots = 0
         
         # Create slots for each day
-        for day_offset in range(14):
-            current_date = start_date + timedelta(days=day_offset)
+        current_date = start_date
+        while current_date < end_date:
+            # Skip weekends (Saturday=5, Sunday=6)
+            if current_date.weekday() < 5:  # Monday=0, Friday=4
+                # Create slots from 9 AM to 5 PM (Monday to Friday)
+                # 9:00, 9:30, 10:00, 10:30, 11:00, 11:30, 12:00, 12:30, 1:00, 1:30, 2:00, 2:30, 3:00, 3:30, 4:00, 4:30
+                for hour in range(9, 17):  # 9 AM to 5 PM (17:00)
+                    for minute in [0, 30]:  # Every 30 minutes
+                        slot_time = current_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        
+                        try:
+                            slot_request = AppointmentSlotCreateRequest(
+                                provider_id=provider.provider_id,
+                                slot_datetime=slot_time,
+                                duration_minutes=30,
+                                clinic_id=clinic_id
+                            )
+                            
+                            slot = provider_service.create_appointment_slot(slot_request)
+                            provider_slots += 1
+                            total_slots_created += 1
+                            
+                            # Log progress every 100 slots
+                            if provider_slots % 100 == 0:
+                                logger.info(f"Created {provider_slots} slots for {provider.name_token} up to {current_date.strftime('%Y-%m-%d')}")
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to create slot for {provider.name_token} at {slot_time}: {str(e)}")
             
-            # Skip Sundays (day 6)
-            if current_date.weekday() == 6:
-                continue
-            
-            # Create slots from 9 AM to 4 PM (30-minute slots)
-            for hour in range(9, 16):
-                slot_time = current_date.replace(hour=hour, minute=0, second=0, microsecond=0)
-                
-                try:
-                    slot_request = AppointmentSlotCreateRequest(
-                        provider_id=provider.provider_id,
-                        slot_datetime=slot_time,
-                        duration_minutes=30,
-                        is_booked="no"
-                    )
-                    
-                    slot = provider_service.create_appointment_slot(slot_request)
-                    logger.debug(f"Created slot: {slot.slot_id} at {slot_time}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to create slot for {provider.name_token} at {slot_time}: {str(e)}")
+            # Move to next day
+            current_date += timedelta(days=1)
+        
+        logger.info(f"Finished creating {provider_slots} slots for {provider.name_token}")
     
-    logger.info("Finished creating appointment slots")
+    logger.info(f"Finished creating {total_slots_created} total appointment slots for the year")
 
 
-def create_demo_patients(db: Session, clinic_id: str):
-    """Create some demo patients for testing."""
-    from models.models import Patient
-    from services.crypto import make_ulid_token
-    
-    demo_patients = [
-        {
-            "name": "John Smith",
-            "phone": "+14071234571",
-            "email": "john.smith@email.com",
-            "dob": "1985-03-15",
-            "insurance_provider": "Blue Cross Blue Shield",
-            "insurance_member_id": "BC123456789"
-        },
-        {
-            "name": "Jane Doe",
-            "phone": "+14071234572",
-            "email": "jane.doe@email.com",
-            "dob": "1990-07-22",
-            "insurance_provider": "Aetna",
-            "insurance_member_id": "AET987654321"
-        }
-    ]
-    
-    for patient_data in demo_patients:
-        try:
-            patient = Patient(
-                patient_id=f"PATIENT_{make_ulid_token('PATIENT')[:12]}",
-                name_token=patient_data["name"],
-                phone_token=patient_data["phone"],
-                email_token=patient_data["email"],
-                dob_token=patient_data["dob"],
-                insurance_provider_token=patient_data["insurance_provider"],
-                insurance_member_id_token=patient_data["insurance_member_id"],
-                insurance_plan_type="PPO"
-            )
-            
-            db.add(patient)
-            logger.info(f"Created demo patient: {patient.patient_id} - {patient.name_token}")
-            
-        except Exception as e:
-            logger.error(f"Failed to create patient {patient_data['name']}: {str(e)}")
-    
-    db.commit()
+# Note: Patients are created dynamically when they call the system
+# The AI will collect their information and create patient records automatically
 
 
 def main():
     """Main setup function."""
-    logger.info("Starting demo setup...")
+    logger.info("Starting custom clinic setup...")
     
     # Create database tables
     Base.metadata.create_all(bind=engine)
@@ -214,30 +185,26 @@ def main():
     db = SessionLocal()
     
     try:
-        # Create demo clinic
-        logger.info("Creating demo clinic...")
-        clinic_id = create_demo_clinic(db)
+        # Create custom clinic
+        logger.info("Creating custom clinic...")
+        clinic_id = create_custom_clinic(db)
         
-        # Create demo providers
-        logger.info("Creating demo providers...")
-        providers = create_demo_providers(db, clinic_id)
+        # Create custom providers
+        logger.info("Creating custom providers...")
+        providers = create_custom_providers(db, clinic_id)
         
-        # Create demo appointment slots
-        logger.info("Creating demo appointment slots...")
-        create_demo_appointment_slots(db, providers)
+        # Create appointment slots for the entire year
+        logger.info("Creating appointment slots for the entire year...")
+        create_demo_appointment_slots(db, providers, clinic_id)
         
-        # Create demo patients
-        logger.info("Creating demo patients...")
-        create_demo_patients(db, clinic_id)
-        
-        logger.info("Demo setup completed successfully!")
+        logger.info("Custom clinic setup completed successfully!")
         logger.info(f"Clinic ID: {clinic_id}")
         logger.info(f"Created {len(providers)} providers")
-        logger.info("Created appointment slots for the next 14 days")
-        logger.info("Created 2 demo patients")
+        logger.info("Created appointment slots for the entire year")
+        logger.info("Patients will be created automatically when they call")
         
     except Exception as e:
-        logger.error(f"Demo setup failed: {str(e)}")
+        logger.error(f"Clinic setup failed: {str(e)}")
         db.rollback()
         raise
     finally:

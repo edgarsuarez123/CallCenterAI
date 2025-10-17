@@ -13,7 +13,7 @@ Key Features:
 - Data minimization while maintaining compliance
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Type
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -93,7 +93,7 @@ class SoftDeleteService:
             
             # Perform soft delete
             record.is_deleted = 'yes'
-            record.deleted_at = datetime.utcnow()
+            record.deleted_at = datetime.now(timezone.utc)
             record.deleted_by = deleted_by
             record.deletion_reason = deletion_reason
             
@@ -146,7 +146,7 @@ class SoftDeleteService:
                 getattr(model_class, primary_key_column).in_(record_ids)
             ).all()
             
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             
             for record in records:
                 record_id = getattr(record, primary_key_column)
@@ -328,7 +328,7 @@ class SoftDeleteService:
         Returns:
             Dictionary with retention policy enforcement results
         """
-        cutoff_date = datetime.utcnow() - timedelta(days=self.HIPAA_RETENTION_DAYS)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=self.HIPAA_RETENTION_DAYS)
         results = {}
         
         for table_name, model_class in self.SOFT_DELETE_MODELS.items():
@@ -375,7 +375,7 @@ class SoftDeleteService:
         """Log deletion in audit trail."""
         try:
             audit_log = AuditLog(
-                log_id=f"AUDIT_DELETE_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{record_id}",
+                log_id=f"AUDIT_DELETE_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{record_id}",
                 user_id=deleted_by,
                 action_type='soft_delete',
                 table_name=table_name,
@@ -398,7 +398,7 @@ class SoftDeleteService:
         """Log recovery in audit trail."""
         try:
             audit_log = AuditLog(
-                log_id=f"AUDIT_RECOVER_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{record_id}",
+                log_id=f"AUDIT_RECOVER_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{record_id}",
                 user_id=recovered_by,
                 action_type='recover',
                 table_name=table_name,
@@ -420,7 +420,7 @@ class SoftDeleteService:
         """Log retention policy enforcement in audit trail."""
         try:
             audit_log = AuditLog(
-                log_id=f"AUDIT_RETENTION_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+                log_id=f"AUDIT_RETENTION_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
                 user_id='system',
                 action_type='retention_policy',
                 table_name=table_name,
@@ -465,7 +465,7 @@ class SoftDeleteQueryMixin:
         """Soft delete this record instance."""
         if hasattr(self, 'is_deleted'):
             self.is_deleted = 'yes'
-            self.deleted_at = datetime.utcnow()
+            self.deleted_at = datetime.now(timezone.utc)
             self.deleted_by = deleted_by
             self.deletion_reason = deletion_reason
             db_session.commit()

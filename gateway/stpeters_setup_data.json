@@ -17,29 +17,25 @@
       "name_token": "PROVIDER_DR_SMITH_001",
       "title": "Dr.",
       "specialty": "Internal Medicine",
-      "license_number": "FL123456",
-      "npi_number": "1234567890"
+      "email": "dr.smith@stpetersmedical.com"
     },
     {
       "name_token": "PROVIDER_DR_JOHNSON_001",
       "title": "Dr.",
       "specialty": "Cardiology",
-      "license_number": "FL789012",
-      "npi_number": "0987654321"
+      "email": "dr.johnson@stpetersmedical.com"
     },
     {
       "name_token": "PROVIDER_DR_GARCIA_001",
       "title": "Dr.",
       "specialty": "Family Medicine",
-      "license_number": "FL345678",
-      "npi_number": "1122334455"
+      "email": "dr.garcia@stpetersmedical.com"
     },
     {
       "name_token": "PROVIDER_NURSE_WILSON_001",
       "title": "RN",
       "specialty": "Nursing",
-      "license_number": "RN901234",
-      "npi_number": "5566778899"
+      "email": "nurse.wilson@stpetersmedical.com"
     }
   ],
   "system_configs": [

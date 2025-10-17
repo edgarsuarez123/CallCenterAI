@@ -13,7 +13,7 @@ This service provides:
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -497,7 +497,7 @@ class CallRouter:
                 capacity = self.provider_capacities[provider_id]
                 capacity.current_calls += 1
                 capacity.available_capacity = capacity.max_concurrent_calls - capacity.current_calls
-                capacity.last_updated = datetime.utcnow()
+                capacity.last_updated = datetime.now(timezone.utc)
                 
                 # Update total system load
                 self.current_load += 1
@@ -563,7 +563,7 @@ class CallRouter:
             queue.calls.append({
                 "call_id": call_id,
                 "caller_info": caller_info,
-                "queued_at": datetime.utcnow(),
+                "queued_at": datetime.now(timezone.utc),
                 "routing_rule": routing_rule
             })
             queue.current_size += 1
@@ -688,14 +688,14 @@ class CallRouter:
                 available_capacity=max_calls - current_calls,
                 skills=skills or [],
                 languages=languages or [],
-                last_updated=datetime.utcnow(),
+                last_updated=datetime.now(timezone.utc),
                 is_available=is_available
             )
             
             # Update total capacity
             old_capacity = self.provider_capacities.get(provider_id, ProviderCapacity(
                 provider_id=provider_id, max_concurrent_calls=0, current_calls=0,
-                available_capacity=0, skills=[], languages=[], last_updated=datetime.utcnow()
+                available_capacity=0, skills=[], languages=[], last_updated=datetime.now(timezone.utc)
             ))
             
             self.total_capacity = self.total_capacity - old_capacity.max_concurrent_calls + max_calls
@@ -807,7 +807,7 @@ class CallRouter:
     async def cleanup_expired_queues(self):
         """Clean up expired calls in queues."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             
             for queue_id, queue in self.call_queues.items():
                 expired_calls = []

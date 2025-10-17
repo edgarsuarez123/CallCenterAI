@@ -6,7 +6,7 @@ Handles all business logic for clinic operations including creation, updates, an
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import uuid
 
 from models.models import Clinic, ClinicLicense, SystemConfig, AuditLog
@@ -14,7 +14,7 @@ from models.schemas import (
     ClinicCreateRequest, ClinicUpdateRequest, ClinicSearchRequest,
     ClinicResponse, SystemConfigCreateRequest
 )
-from services.crypto import make_ulid_token
+from services.crypto import make_ulid_token, make_unique_audit_log_id
 
 
 class ClinicManagementService:
@@ -130,7 +130,7 @@ class ClinicManagementService:
             if hasattr(clinic, field):
                 setattr(clinic, field, value)
         
-        clinic.updated_at = datetime.utcnow()
+        clinic.updated_at = datetime.now(timezone.utc)
         
         # Log the update
         self._log_audit("clinics", clinic_id, "UPDATE", old_values, update_data)
@@ -184,7 +184,7 @@ class ClinicManagementService:
         
         old_values = {"is_active": clinic.is_active}
         clinic.is_active = "no"
-        clinic.updated_at = datetime.utcnow()
+        clinic.updated_at = datetime.now(timezone.utc)
         
         # Log the deactivation
         self._log_audit("clinics", clinic_id, "DEACTIVATE", old_values, {"is_active": "no"})
@@ -216,7 +216,7 @@ class ClinicManagementService:
         # Update clinic tier
         old_clinic_tier = clinic.subscription_tier
         clinic.subscription_tier = tier
-        clinic.updated_at = datetime.utcnow()
+        clinic.updated_at = datetime.now(timezone.utc)
         
         # Update license with new tier configuration
         license_data = self._get_license_config(tier)
@@ -233,7 +233,7 @@ class ClinicManagementService:
         license.max_concurrent_calls = license_data['max_concurrent_calls']
         license.max_providers = license_data['max_providers']
         license.monthly_fee_usd = license_data['monthly_fee_usd']
-        license.updated_at = datetime.utcnow()
+        license.updated_at = datetime.now(timezone.utc)
         
         # Log the changes
         self._log_audit("clinics", clinic_id, "UPDATE_TIER", 
@@ -275,7 +275,7 @@ class ClinicManagementService:
             old_value = existing_config.config_value
             existing_config.config_value = config_value
             existing_config.description = description or existing_config.description
-            existing_config.updated_at = datetime.utcnow()
+            existing_config.updated_at = datetime.now(timezone.utc)
             
             self._log_audit("system_config", existing_config.config_id, "UPDATE",
                            {"config_value": old_value}, {"config_value": config_value})
@@ -335,7 +335,7 @@ class ClinicManagementService:
     
     def _get_billing_cycle_start(self) -> datetime:
         """Get start of current billing cycle."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
     def _get_billing_cycle_end(self) -> datetime:
@@ -402,7 +402,7 @@ class ClinicManagementService:
             details += f"New values: {new_values}"
         
         audit_log = AuditLog(
-            log_id=f"LOG_{make_ulid_token('AUDIT')[:8]}",
+            log_id=make_unique_audit_log_id(),
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,

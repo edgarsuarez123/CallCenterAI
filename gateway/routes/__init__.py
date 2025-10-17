@@ -13,6 +13,7 @@ from .call_simulator import router as call_simulator_router
 from .background_jobs import router as background_jobs_router
 from .azure_communication import router as azure_communication_router
 from .reminders import router as reminders_router
+from .tokens import router as tokens_router
 
 # Get configuration
 settings = get_settings()
@@ -29,6 +30,7 @@ api_router.include_router(call_simulator_router)
 api_router.include_router(background_jobs_router)
 api_router.include_router(azure_communication_router)
 api_router.include_router(reminders_router)
+api_router.include_router(tokens_router)
 
 # Export the main router
 __all__ = ["api_router"]

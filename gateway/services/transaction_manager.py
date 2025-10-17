@@ -17,7 +17,7 @@ import logging
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Type, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from enum import Enum
 
 from sqlalchemy import text, and_, or_
@@ -419,8 +419,9 @@ class TransactionManager:
                    old_values: Optional[Dict], new_values: Optional[Dict]):
         """Log audit information for the transaction."""
         try:
+            from services.crypto import make_unique_audit_log_id
             audit_log = AuditLog(
-                log_id=f"AUDIT_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{record_id}",
+                log_id=make_unique_audit_log_id(),
                 user_id='system',
                 action_type=action_type,
                 table_name=table_name,
@@ -534,30 +535,3 @@ def get_transaction_manager(db_session: Session) -> TransactionManager:
     return TransactionManager(db_session)
 
 
-# Decorator for automatic transaction management
-def atomic_operation(isolation_level: IsolationLevel = IsolationLevel.READ_COMMITTED):
-    """
-    Decorator to automatically wrap a function in an atomic transaction.
-    
-    Args:
-        isolation_level: Database isolation level for the transaction
-    """
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            # Extract db_session from args or kwargs
-            db_session = None
-            if args and hasattr(args[0], 'db'):
-                db_session = args[0].db
-            elif 'db' in kwargs:
-                db_session = kwargs['db']
-            
-            if not db_session:
-                raise TransactionError("No database session found for atomic operation")
-            
-            transaction_manager = TransactionManager(db_session)
-            
-            with transaction_manager.atomic_transaction(isolation_level):
-                return func(*args, **kwargs)
-        
-        return wrapper
-    return decorator

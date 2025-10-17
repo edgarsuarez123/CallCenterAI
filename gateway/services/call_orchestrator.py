@@ -13,13 +13,13 @@ This service provides:
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
 
-from services.azure_speech_stt import get_stt_service, AzureSpeechToTextService
-from services.azure_speech_tts import get_tts_service, TextToSpeechService
+from services.azure_speech_stt import get_speech_to_text_service, SpeechToTextService
+from services.azure_speech_tts import get_text_to_speech_service, TextToSpeechService
 from services.azure_openai_service import get_azure_openai_service, AzureOpenAIService, IntentType
 from services.hybrid_nlp_service import get_hybrid_nlp_service, HybridNLPService
 from services.bilingual_manager import get_bilingual_manager, LanguageCode
@@ -107,8 +107,8 @@ class CallOrchestrator:
         self.logger = logger
         
         # Service dependencies
-        self.stt_service = get_stt_service()
-        self.tts_service = get_tts_service()
+        self.stt_service = get_speech_to_text_service()
+        self.tts_service = get_text_to_speech_service()
         self.openai_service = get_azure_openai_service()
         self.hybrid_nlp = get_hybrid_nlp_service()
         self.bilingual_manager = get_bilingual_manager()
@@ -188,8 +188,8 @@ class CallOrchestrator:
                 call_type=call_type,
                 state=CallState.INITIALIZING,
                 language=language,
-                start_time=datetime.utcnow(),
-                last_activity=datetime.utcnow(),
+                start_time=datetime.now(timezone.utc),
+                last_activity=datetime.now(timezone.utc),
                 audio_stream_handler=audio_stream_handler,
                 call_metadata=call_metadata or {}
             )
@@ -197,7 +197,7 @@ class CallOrchestrator:
             # Create call metrics
             call_metrics = CallMetrics(
                 call_id=call_id,
-                start_time=datetime.utcnow()
+                start_time=datetime.now(timezone.utc)
             )
             
             # Store call context and metrics
@@ -213,7 +213,7 @@ class CallOrchestrator:
             
             # Update state
             call_context.state = CallState.CONNECTED
-            call_context.last_activity = datetime.utcnow()
+            call_context.last_activity = datetime.now(timezone.utc)
             
             # Update statistics
             self.orchestration_stats["total_calls"] += 1
@@ -277,7 +277,7 @@ class CallOrchestrator:
             
             # Update call state
             call_context.state = CallState.PROCESSING
-            call_context.last_activity = datetime.utcnow()
+            call_context.last_activity = datetime.now(timezone.utc)
             
             # Detect language
             detected_lang = LanguageCode.ENGLISH if detected_language.startswith("en") else LanguageCode.SPANISH
@@ -314,7 +314,7 @@ class CallOrchestrator:
             call_context.conversation_history.append({
                 "role": "user",
                 "content": text,
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.now(timezone.utc),
                 "intent": intent_result.intent.value if hasattr(intent_result.intent, 'value') else str(intent_result.intent),
                 "confidence": intent_result.confidence,
                 "language": language.value
@@ -353,13 +353,13 @@ class CallOrchestrator:
             call_context.conversation_history.append({
                 "role": "assistant",
                 "content": response_result.response_text,
-                "timestamp": datetime.utcnow(),
+                "timestamp": datetime.now(timezone.utc),
                 "language": call_context.language.value
             })
             
             # Update call state
             call_context.state = CallState.SPEAKING
-            call_context.last_activity = datetime.utcnow()
+            call_context.last_activity = datetime.now(timezone.utc)
             
             # Synthesize and play response
             await self._synthesize_response(call_context, response_result.response_text)
@@ -476,7 +476,7 @@ class CallOrchestrator:
         try:
             # Simple recovery: return to listening state
             call_context.state = CallState.LISTENING
-            call_context.last_activity = datetime.utcnow()
+            call_context.last_activity = datetime.now(timezone.utc)
             
             # Send a generic error message
             error_message = "I'm sorry, I didn't catch that. Could you please repeat?"
@@ -491,18 +491,22 @@ class CallOrchestrator:
     async def _monitor_call_timeout(self, call_id: str):
         """Monitor call for timeout."""
         try:
-            while call_id in self.active_calls:
+            max_iterations = 7200  # 2 hours at 5 second intervals
+            iteration = 0
+            
+            while call_id in self.active_calls and iteration < max_iterations:
+                iteration += 1
                 call_context = self.active_calls[call_id]
                 
                 # Check for timeout
-                time_since_activity = (datetime.utcnow() - call_context.last_activity).total_seconds()
+                time_since_activity = (datetime.now(timezone.utc) - call_context.last_activity).total_seconds()
                 if time_since_activity > self.silence_timeout_seconds:
                     self.logger.warning(f"Call {call_id} timed out due to inactivity")
                     await self.end_call(call_id, "timeout")
                     break
                 
                 # Check for maximum call duration
-                call_duration = (datetime.utcnow() - call_context.start_time).total_seconds()
+                call_duration = (datetime.now(timezone.utc) - call_context.start_time).total_seconds()
                 if call_duration > (self.call_timeout_minutes * 60):
                     self.logger.warning(f"Call {call_id} exceeded maximum duration")
                     await self.end_call(call_id, "max_duration")
@@ -515,6 +519,9 @@ class CallOrchestrator:
                     break
                 
                 await asyncio.sleep(5)  # Check every 5 seconds
+            
+            if iteration >= max_iterations:
+                self.logger.warning(f"Call {call_id} monitoring reached max iterations")
                 
         except Exception as e:
             self.logger.error(f"Call timeout monitoring failed for call {call_id}: {e}")
@@ -544,7 +551,7 @@ class CallOrchestrator:
                 await call_context.audio_stream_handler.stop_streaming()
             
             # Update metrics
-            call_metrics.end_time = datetime.utcnow()
+            call_metrics.end_time = datetime.now(timezone.utc)
             call_metrics.total_duration_seconds = (call_metrics.end_time - call_metrics.start_time).total_seconds()
             
             if call_metrics.total_interactions > 0:
@@ -641,7 +648,7 @@ class CallOrchestrator:
     async def cleanup_expired_calls(self):
         """Clean up expired call data."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             # Find expired calls (older than 1 hour)

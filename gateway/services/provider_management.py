@@ -6,15 +6,16 @@ Handles all business logic for provider operations including creation, schedulin
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import uuid
 
 from models.models import Provider, AppointmentSlot, Clinic, AuditLog
+from models.enums import YesNo
 from models.schemas import (
     ProviderCreateRequest, ProviderUpdateRequest, ProviderSearchRequest,
     ProviderResponse, AppointmentSlotCreateRequest
 )
-from services.crypto import make_ulid_token
+from services.crypto import make_ulid_token, make_unique_audit_log_id
 
 
 class ProviderManagementService:
@@ -57,8 +58,6 @@ class ProviderManagementService:
                 name_token=provider_data.name_token,
                 title=provider_data.title,
                 specialty=provider_data.specialty,
-                license_number=provider_data.license_number,
-                npi_number=provider_data.npi_number,
                 email=provider_data.email,
                 is_available="yes"
             )
@@ -74,7 +73,7 @@ class ProviderManagementService:
             
         except IntegrityError as e:
             self.db.rollback()
-            raise ValueError(f"Provider with NPI {provider_data.npi_number} already exists")
+            raise ValueError(f"Provider already exists")
         except Exception as e:
             self.db.rollback()
             raise ValueError(f"Failed to add provider: {str(e)}")
@@ -103,8 +102,7 @@ class ProviderManagementService:
             "name_token": provider.name_token,
             "title": provider.title,
             "specialty": provider.specialty,
-            "license_number": provider.license_number,
-            "npi_number": provider.npi_number,
+            "email": provider.email,
             "is_available": provider.is_available
         }
         
@@ -114,7 +112,7 @@ class ProviderManagementService:
             if hasattr(provider, field):
                 setattr(provider, field, value)
         
-        provider.updated_at = datetime.utcnow()
+        provider.updated_at = datetime.now(timezone.utc)
         
         # Log the update
         self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
@@ -168,7 +166,7 @@ class ProviderManagementService:
         
         old_status = provider.is_available
         provider.is_available = "yes" if is_available else "no"
-        provider.updated_at = datetime.utcnow()
+        provider.updated_at = datetime.now(timezone.utc)
         
         # Log the change
         self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
@@ -233,6 +231,56 @@ class ProviderManagementService:
         self.db.commit()
         return created_slots
     
+    def create_appointment_slot(self, slot_data: AppointmentSlotCreateRequest) -> AppointmentSlot:
+        """
+        Create a single appointment slot.
+        
+        Args:
+            slot_data: Slot creation request
+            
+        Returns:
+            Created appointment slot
+            
+        Raises:
+            ValueError: If provider or clinic not found
+        """
+        # Verify provider exists
+        provider = self.get_provider(slot_data.provider_id)
+        if not provider:
+            raise ValueError(f"Provider {slot_data.provider_id} not found")
+        
+        # Verify clinic exists
+        clinic = self.db.query(Clinic).filter_by(clinic_id=slot_data.clinic_id).first()
+        if not clinic:
+            raise ValueError(f"Clinic {slot_data.clinic_id} not found")
+        
+        # Generate slot ID
+        slot_id = make_ulid_token('SLOT')
+        
+        # Create slot
+        slot = AppointmentSlot(
+            slot_id=slot_id,
+            provider_id=slot_data.provider_id,
+            clinic_id=slot_data.clinic_id,
+            slot_datetime=slot_data.slot_datetime,
+            duration_minutes=slot_data.duration_minutes,
+            is_booked="no"
+        )
+        
+        self.db.add(slot)
+        self.db.commit()
+        self.db.refresh(slot)
+        
+        # Log the creation
+        self._log_audit("appointment_slots", slot_id, "CREATE", None, {
+            "provider_id": slot_data.provider_id,
+            "clinic_id": slot_data.clinic_id,
+            "slot_datetime": slot_data.slot_datetime.isoformat(),
+            "duration_minutes": slot_data.duration_minutes
+        })
+        
+        return slot
+    
     def get_available_slots(self, provider_id: str, start_date: datetime, 
                            end_date: datetime) -> List[AppointmentSlot]:
         """
@@ -250,7 +298,7 @@ class ProviderManagementService:
             AppointmentSlot.provider_id == provider_id,
             AppointmentSlot.slot_datetime >= start_date,
             AppointmentSlot.slot_datetime <= end_date,
-            AppointmentSlot.is_booked == "no"
+            AppointmentSlot.is_booked == YesNo.NO.value
         ).order_by(AppointmentSlot.slot_datetime).all()
     
     def book_appointment_slot(self, slot_id: str, appointment_id: str) -> bool:
@@ -265,7 +313,7 @@ class ProviderManagementService:
             True if successful, False if slot not available
         """
         slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
-        if not slot or slot.is_booked == "yes":
+        if not slot or slot.is_booked == YesNo.YES.value:
             return False
         
         old_values = {
@@ -275,7 +323,7 @@ class ProviderManagementService:
         
         slot.is_booked = "yes"
         slot.booked_by_appointment_id = appointment_id
-        slot.updated_at = datetime.utcnow()
+        slot.updated_at = datetime.now(timezone.utc)
         
         # Log the booking
         self._log_audit("appointment_slots", slot_id, "BOOK", 
@@ -305,7 +353,7 @@ class ProviderManagementService:
         
         slot.is_booked = "no"
         slot.booked_by_appointment_id = None
-        slot.updated_at = datetime.utcnow()
+        slot.updated_at = datetime.now(timezone.utc)
         
         # Log the release
         self._log_audit("appointment_slots", slot_id, "RELEASE", 
@@ -358,8 +406,13 @@ class ProviderManagementService:
             start_hour = int(start_str.split(':')[0])
             end_hour = int(end_str.split(':')[0])
             return start_hour, end_hour
-        except:
-            return 8, 17  # Default hours
+        except (ValueError, IndexError) as e:
+            from services.exceptions import ValidationError
+            raise ValidationError(
+                "business_hours",
+                hours_str,
+                "Invalid hours format. Expected format: 'HH:MM-HH:MM'"
+            )
     
     def _create_day_slots(self, provider_id: str, clinic_id: str, date: datetime,
                          start_hour: int, end_hour: int, duration_minutes: int) -> List[AppointmentSlot]:
@@ -397,7 +450,7 @@ class ProviderManagementService:
             details += f"New values: {new_values}"
         
         audit_log = AuditLog(
-            log_id=f"LOG_{make_ulid_token('AUDIT')[:8]}",
+            log_id=make_unique_audit_log_id(),
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,

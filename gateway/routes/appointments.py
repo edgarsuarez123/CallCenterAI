@@ -6,20 +6,40 @@ REST endpoints for appointment operations including booking, scheduling, and Goo
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import os
+import html
+import re
 
 from services.database import get_db
 from services.appointment_service import AppointmentService
 from services.google_calendar_service import GoogleCalendarIntegrationService, GoogleCalendarConfig
+from services.structured_logging import get_logger
+
+# Initialize logger
+logger = get_logger("appointments")
+
+def sanitize_input(text: str) -> str:
+    """Sanitize user input to prevent XSS and injection attacks."""
+    if not text:
+        return text
+    # Remove HTML tags and escape special characters
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html.escape(text)
+    # Remove potential SQL injection patterns
+    text = re.sub(r'[;\'"\\]', '', text)
+    return text.strip()
 from models.schemas import (
     AppointmentCreateRequest, AppointmentUpdateRequest, AppointmentResponse,
-    AppointmentSearchRequest, SuccessResponse, ErrorResponse
+    AppointmentSearchRequest, SuccessResponse, ErrorResponse,
+    AppointmentCreateResponse, AppointmentUpdateResponse, 
+    NextAvailableSlotResponse, AppointmentStatisticsResponse
 )
 
-router = APIRouter(prefix="/v1/appointments", tags=["appointment-management"])
+router = APIRouter(prefix="/appointments", tags=["appointment-management"])
 
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=AppointmentCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_appointment(
     appointment_data: AppointmentCreateRequest,
     patient_name: Optional[str] = None,
@@ -41,38 +61,50 @@ async def create_appointment(
         # Initialize Google Calendar service (if available)
         google_calendar_service = None
         try:
-            # In production, these would come from environment variables
-            config = GoogleCalendarConfig(
-                client_id="your_google_client_id",
-                client_secret="your_google_client_secret",
-                redirect_uri="http://localhost:8000/auth/callback"
-            )
-            google_calendar_service = GoogleCalendarIntegrationService(
-                GoogleCalendarService(config)
-            )
+            # Get credentials from environment variables
+            client_id = os.getenv('GOOGLE_CLIENT_ID')
+            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            
+            if client_id and client_secret:
+                config = GoogleCalendarConfig(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri
+                )
+                google_calendar_service = GoogleCalendarIntegrationService(
+                    GoogleCalendarService(config, db)
+                )
         except ImportError:
             # Google Calendar API not available
             pass
+        except Exception as e:
+            # Log Google Calendar service initialization failure but don't fail the appointment update
+            logger.warning(f"Failed to initialize Google Calendar service: {e}")
+            google_calendar_service = None
+        except Exception as e:
+            # Log Google Calendar service initialization failure but don't fail the appointment creation
+            logger.warning(f"Failed to initialize Google Calendar service: {e}")
+            google_calendar_service = None
         
         service = AppointmentService(db, google_calendar_service)
         appointment, google_event_id = await service.create_appointment(appointment_data, patient_name)
         
-        response_data = {
-            "appointment": AppointmentResponse.from_orm(appointment),
-            "google_calendar_event_id": google_event_id,
-            "message": "Appointment created successfully"
-        }
-        
-        return response_data
+        return AppointmentCreateResponse(
+            appointment=AppointmentResponse.model_validate(appointment),
+            google_event_id=google_event_id,
+            message="Appointment created successfully"
+        )
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        logger.error(f"Failed to create appointment: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create appointment: {str(e)}"
+            detail="Failed to create appointment. Please try again later."
         )
 
 
@@ -96,11 +128,12 @@ def list_appointments(
     try:
         service = AppointmentService(db)
         appointments = service.list_appointments(search)
-        return [AppointmentResponse.from_orm(appointment) for appointment in appointments]
+        return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
+        logger.error(f"Failed to list appointments: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to list appointments: {str(e)}"
+            detail="Failed to retrieve appointments. Please try again later."
         )
 
 
@@ -128,7 +161,7 @@ def get_appointment(
                 detail=f"Appointment {appointment_id} not found"
             )
         
-        return AppointmentResponse.from_orm(appointment)
+        return AppointmentResponse.model_validate(appointment)
     except HTTPException:
         raise
     except Exception as e:
@@ -161,14 +194,20 @@ def update_appointment(
         # Initialize Google Calendar service (if available)
         google_calendar_service = None
         try:
-            config = GoogleCalendarConfig(
-                client_id="your_google_client_id",
-                client_secret="your_google_client_secret",
-                redirect_uri="http://localhost:8000/auth/callback"
-            )
-            google_calendar_service = GoogleCalendarIntegrationService(
-                GoogleCalendarService(config)
-            )
+            # Get credentials from environment variables
+            client_id = os.getenv('GOOGLE_CLIENT_ID')
+            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            
+            if client_id and client_secret:
+                config = GoogleCalendarConfig(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri
+                )
+                google_calendar_service = GoogleCalendarIntegrationService(
+                    GoogleCalendarService(config, db)
+                )
         except ImportError:
             pass
         
@@ -184,7 +223,7 @@ def update_appointment(
             )
         
         response_data = {
-            "appointment": AppointmentResponse.from_orm(appointment),
+            "appointment": AppointmentResponse.model_validate(appointment),
             "google_calendar_updated": google_calendar_updated,
             "message": "Appointment updated successfully"
         }
@@ -222,14 +261,20 @@ def cancel_appointment(
         # Initialize Google Calendar service (if available)
         google_calendar_service = None
         try:
-            config = GoogleCalendarConfig(
-                client_id="your_google_client_id",
-                client_secret="your_google_client_secret",
-                redirect_uri="http://localhost:8000/auth/callback"
-            )
-            google_calendar_service = GoogleCalendarIntegrationService(
-                GoogleCalendarService(config)
-            )
+            # Get credentials from environment variables
+            client_id = os.getenv('GOOGLE_CLIENT_ID')
+            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
+            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            
+            if client_id and client_secret:
+                config = GoogleCalendarConfig(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=redirect_uri
+                )
+                google_calendar_service = GoogleCalendarIntegrationService(
+                    GoogleCalendarService(config, db)
+                )
         except ImportError:
             pass
         
@@ -348,7 +393,7 @@ def get_patient_appointment_history(
         )
         
         appointments = service.list_appointments(search)
-        return [AppointmentResponse.from_orm(appointment) for appointment in appointments]
+        return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -381,7 +426,7 @@ def get_provider_schedule(
         )
         
         appointments = service.list_appointments(search)
-        return [AppointmentResponse.from_orm(appointment) for appointment in appointments]
+        return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -26,7 +26,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 from functools import wraps
@@ -173,7 +173,7 @@ class StructuredLogger:
         self.logger.addHandler(console_handler)
         
         # File handler for persistent logs
-        file_handler = logging.FileHandler('logs/callcenter_ai.log')
+        file_handler = logging.FileHandler('/app/logs/callcenter_ai.log')
         file_handler.setFormatter(StructuredFormatter())
         self.logger.addHandler(file_handler)
     
@@ -633,15 +633,6 @@ def get_logger(name: str = None) -> StructuredLogger:
         return StructuredLogger(name)
     return logger
 
-def log_request_context(correlation_id: str = None, user_id: str = None, clinic_id: str = None):
-    """Decorator to add request context to function calls."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            with RequestContextManager(correlation_id, user_id, clinic_id):
-                return func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 def log_performance(operation_name: str = None):
     """Decorator to log function performance."""

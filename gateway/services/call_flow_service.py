@@ -6,11 +6,13 @@ appointment booking, and Google Calendar integration.
 
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta, date
+from datetime import datetime, timezone, date
 import logging
 import re
 
 from models.models import Call, Patient, Provider, AppointmentSlot, Clinic
+from models.enums import YesNo
+from models.enums import CallStatus
 from models.call_flow_models import (
     CallFlowState, CallFlowResponse, CallFlowContext, 
     PatientIdentificationResult, ProviderOption, TimeSlotOption, DateOption,
@@ -23,6 +25,8 @@ from services.google_calendar_service import GoogleCalendarIntegrationService, G
 from services.natural_language_processor import NaturalLanguageProcessor, IntentType, ExtractedEntities
 from services.tokens import tokenize_text
 from services.crypto import make_ulid_token
+from services.response_cache import get_response_cache_service
+from services.response_templates import get_response_templates
 from models.schemas import AppointmentCreateRequest
 from services.call_store import store_call, get_call, remove_call, list_calls
 import os
@@ -37,6 +41,10 @@ class CallFlowService:
         
         # Initialize Natural Language Processor
         self.nlp = NaturalLanguageProcessor()
+        
+        # Initialize cache services
+        self.response_cache = get_response_cache_service()
+        self.response_templates = get_response_templates()
         
         # Initialize Google Calendar service
         google_calendar_service = None
@@ -64,7 +72,7 @@ class CallFlowService:
         self.provider_service = ProviderManagementService(db)
         self.clinic_service = ClinicManagementService(db)
     
-    def initialize_call(self, call_sid: str, caller_phone: str, clinic_id: str) -> CallFlowResponse:
+    async def initialize_call(self, call_sid: str, caller_phone: str, clinic_id: str) -> CallFlowResponse:
         """
         Initialize a new call and start the conversation flow.
         
@@ -82,7 +90,7 @@ class CallFlowService:
                 call_sid=call_sid,
                 call_id=f"CALL_{make_ulid_token('CALL')[:12]}",
                 caller_phone_token=self._tokenize_phone(caller_phone),
-                status="active"
+                status=CallStatus.ACTIVE.value
             )
             self.db.add(call)
             self.db.flush()
@@ -102,9 +110,14 @@ class CallFlowService:
             # Store context
             store_call(call_sid, context)
             
-            # Generate greeting message
+            # Generate greeting message using cache
             clinic_name = clinic.clinic_name
-            message = f"Hello! Thank you for calling {clinic_name}. How can I help you today?"
+            cached_message = await self._get_cached_message(
+                intent="greeting",
+                language="en",  # Default to English, could be dynamic based on caller
+                variables={"clinic_name": clinic_name}
+            )
+            message = cached_message or f"Hello! Thank you for calling {clinic_name}. How can I help you today?"
             
             return CallFlowResponse(
                 next_state=CallFlowState.GET_INTENT,
@@ -116,7 +129,7 @@ class CallFlowService:
             self.logger.error(f"Failed to initialize call {call_sid}: {str(e)}")
             raise ValueError(f"Failed to initialize call: {str(e)}")
     
-    def process_user_input(self, call_sid: str, user_input: str) -> CallFlowResponse:
+    async def process_user_input(self, call_sid: str, user_input: str) -> CallFlowResponse:
         """
         Process user input and determine next conversation step.
         
@@ -135,30 +148,30 @@ class CallFlowService:
             
             # Add to conversation history
             context.conversation_history.append({
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "user_input": user_input,
                 "state": context.current_state
             })
             
             # Process based on current state
             if context.current_state == CallFlowState.GET_INTENT:
-                response = self._process_intent(context, user_input)
+                response = await self._process_intent(context, user_input)
             elif context.current_state == CallFlowState.IDENTIFY_PATIENT:
                 response = self._process_patient_identification(context, user_input)
             elif context.current_state == CallFlowState.NEW_PATIENT_INFO:
                 response = self._process_new_patient_info(context, user_input)
             elif context.current_state == CallFlowState.RETURNING_PATIENT_INFO:
-                response = self._process_returning_patient_info(context, user_input)
+                response = await self._process_returning_patient_info(context, user_input)
             elif context.current_state == CallFlowState.SELECT_PROVIDER:
-                response = self._process_provider_selection(context, user_input)
+                response = await self._process_provider_selection(context, user_input)
             elif context.current_state == CallFlowState.SELECT_DATE:
                 response = self._process_date_selection(context, user_input)
             elif context.current_state == CallFlowState.SELECT_TIME:
                 response = self._process_time_selection(context, user_input)
             elif context.current_state == CallFlowState.CONFIRM_DETAILS:
-                response = self._process_confirmation(context, user_input)
+                response = await self._process_confirmation(context, user_input)
             elif context.current_state == CallFlowState.POST_BOOKING_HELP:
-                response = self._process_post_booking_help(context, user_input)
+                response = await self._process_post_booking_help(context, user_input)
             elif context.current_state == CallFlowState.CANCEL_APPOINTMENT:
                 response = self._process_cancellation(context, user_input)
             elif context.current_state == CallFlowState.INSURANCE_INQUIRY:
@@ -182,7 +195,7 @@ class CallFlowService:
             
             # Update context state
             context.current_state = response.next_state
-            context.updated_at = datetime.utcnow()
+            context.updated_at = datetime.now(timezone.utc)
             
             return response
                 
@@ -194,7 +207,7 @@ class CallFlowService:
                 is_complete=True
             )
     
-    def _process_intent(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_intent(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """
         Process user intent using natural language processing.
         
@@ -215,7 +228,7 @@ class CallFlowService:
         else:  # Low confidence or unclear
             return self._handle_unclear_intent(result, context)
 
-    def _handle_high_confidence_intent(self, result, context: CallFlowContext) -> CallFlowResponse:
+    async def _handle_high_confidence_intent(self, result, context: CallFlowContext) -> CallFlowResponse:
         """Handle high confidence intent detection"""
         if result.intent == IntentType.APPOINTMENT_BOOKING:
             context.call_type = "appointment_booking"
@@ -228,9 +241,16 @@ class CallFlowService:
                     data={"intent": "appointment_booking", "name": result.entities.name}
                 )
             else:
+                # Use cached message for appointment booking
+                cached_message = await self._get_cached_message(
+                    intent="appointment_booking",
+                    language="en"
+                )
+                message = cached_message or "I'd be happy to help you book an appointment. What's your name?"
+                
                 return CallFlowResponse(
                     next_state=CallFlowState.IDENTIFY_PATIENT,
-                    message="I'd be happy to help you book an appointment. What's your name?",
+                    message=message,
                     data={"intent": "appointment_booking"}
                 )
         
@@ -362,7 +382,7 @@ class CallFlowService:
             data={"patient_name": name}
         )
     
-    def _process_returning_patient_info(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_returning_patient_info(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process returning patient response and get appointment details."""
         # Use natural language processor to understand response
         result = self.nlp.process_input(user_input)
@@ -374,9 +394,16 @@ class CallFlowService:
             patient_result = self._identify_patient(context.patient_name)
             if patient_result.is_found:
                 context.patient_id = patient_result.patient_id
+                # Use cached message for provider selection
+                cached_message = await self._get_cached_message(
+                    intent="provider_inquiry",
+                    language="en"
+                )
+                message = cached_message or f"Great! I found you in our system. Which doctor would you like to see?"
+                
                 return CallFlowResponse(
                     next_state=CallFlowState.SELECT_PROVIDER,
-                    message=f"Great! I found you in our system. Which doctor would you like to see?",
+                    message=message,
                     data={"patient_found": True}
                 )
             else:
@@ -448,7 +475,7 @@ class CallFlowService:
                 data={"new_patient_info_complete": True}
             )
     
-    def _process_provider_selection(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_provider_selection(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process provider selection."""
         # Get available providers
         providers = self._get_available_providers(context.clinic_id)
@@ -473,9 +500,16 @@ class CallFlowService:
         else:
             # Show available providers
             provider_options = [f"{p.name} - {p.specialty}" for p in providers]
+            # Use cached message for provider selection
+            cached_message = await self._get_cached_message(
+                intent="provider_inquiry",
+                language="en"
+            )
+            message = cached_message or "Which doctor would you like to see?"
+            
             return CallFlowResponse(
                 next_state=CallFlowState.SELECT_PROVIDER,
-                message="Which doctor would you like to see?",
+                message=message,
                 options=provider_options,
                 data={"available_providers": [p.dict() for p in providers]}
             )
@@ -632,7 +666,7 @@ class CallFlowService:
                     requires_input=True
                 )
     
-    def _process_confirmation(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_confirmation(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process appointment confirmation."""
         user_input_lower = user_input.lower()
         
@@ -655,9 +689,16 @@ class CallFlowService:
                 )
         
         elif "no" in user_input_lower or "change" in user_input_lower:
+            # Use cached message for provider selection
+            cached_message = await self._get_cached_message(
+                intent="provider_inquiry",
+                language="en"
+            )
+            message = cached_message or "No problem! Let's start over. Which doctor would you like to see?"
+            
             return CallFlowResponse(
                 next_state=CallFlowState.SELECT_PROVIDER,
-                message="No problem! Let's start over. Which doctor would you like to see?",
+                message=message,
                 data={"restart_booking": True}
             )
         
@@ -678,7 +719,7 @@ class CallFlowService:
                 }}
             )
     
-    def _process_post_booking_help(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_post_booking_help(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process post-booking help requests."""
         # Use natural language processor to understand response
         result = self.nlp.process_input(user_input)
@@ -795,7 +836,7 @@ class CallFlowService:
     def _get_available_providers(self, clinic_id: str) -> List[ProviderOption]:
         """Get available providers for the clinic."""
         providers = self.db.query(Provider).filter(
-            Provider.is_available == "yes"
+            Provider.is_available == YesNo.YES.value
         ).all()
         
         return [
@@ -826,7 +867,7 @@ class CallFlowService:
                     AppointmentSlot.provider_id == provider_id,
                     AppointmentSlot.slot_datetime >= current_date,
                     AppointmentSlot.slot_datetime < current_date + timedelta(days=1),
-                    AppointmentSlot.is_booked == "no"
+                    AppointmentSlot.is_booked == YesNo.NO.value
                 ).count()
                 
                 if slots > 0:
@@ -1183,7 +1224,7 @@ class CallFlowService:
             call = self.db.query(Call).filter_by(call_sid=call_sid).first()
             if call:
                 call.status = "completed"
-                call.ended_at = datetime.utcnow()
+                call.ended_at = datetime.now(timezone.utc)
                 self.db.commit()
             
             # Remove from active calls
@@ -1193,3 +1234,72 @@ class CallFlowService:
         except Exception as e:
             self.logger.error(f"Failed to end call {call_sid}: {str(e)}")
             return False
+    
+    async def _get_cached_message(
+        self, 
+        intent: str, 
+        language: str = "en", 
+        variables: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """
+        Get cached message for given intent and language.
+        
+        Args:
+            intent: Intent type
+            language: Language code
+            variables: Template variables
+            
+        Returns:
+            Optional[str]: Cached message if found, None otherwise
+        """
+        try:
+            # Map string intent to IntentType enum
+            intent_mapping = {
+                "greeting": IntentType.GREETING,
+                "appointment_booking": IntentType.APPOINTMENT_BOOKING,
+                "appointment_inquiry": IntentType.APPOINTMENT_INQUIRY,
+                "provider_inquiry": IntentType.PROVIDER_INQUIRY,
+                "clinic_inquiry": IntentType.CLINIC_INQUIRY,
+                "billing_inquiry": IntentType.BILLING_INQUIRY,
+                "general_inquiry": IntentType.GENERAL_INQUIRY,
+                "goodbye": IntentType.GOODBYE
+            }
+            
+            intent_type = intent_mapping.get(intent)
+            if not intent_type:
+                return None
+            
+            # Map language string to LanguageCode enum
+            from services.bilingual_manager import LanguageCode
+            language_code = LanguageCode.ENGLISH if language == "en" else LanguageCode.SPANISH
+            
+            # Check if template exists
+            if self.response_templates.has_template(intent_type, language_code):
+                # Use template with variable substitution
+                template_response = self.response_templates.substitute_variables(
+                    intent_type, language_code, variables or {}
+                )
+                if template_response:
+                    # Cache the response
+                    await self.response_cache.cache_response(
+                        intent=intent,
+                        language=language,
+                        response=template_response,
+                        template=self.response_templates.get_template(intent_type, language_code).template,
+                        variables=variables,
+                        source="template"
+                    )
+                    return template_response
+            
+            # Try cache for existing responses
+            cached_response = await self.response_cache.get_cached_response(
+                intent=intent,
+                language=language,
+                variables=variables
+            )
+            
+            return cached_response
+            
+        except Exception as e:
+            self.logger.warning(f"Error getting cached message: {e}")
+            return None

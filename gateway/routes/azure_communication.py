@@ -10,12 +10,12 @@ Provides REST endpoints for:
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from services.azure_communication_service import get_azure_communication_service
@@ -27,6 +27,7 @@ from services.exceptions import (
     ValidationError,
     ExternalServiceUnavailableError
 )
+from models.enums import CallStatus
 from services.database import get_db
 
 
@@ -41,13 +42,15 @@ class CallInitiateRequest(BaseModel):
     clinic_id: str = Field(..., description="ID of the clinic handling the call")
     call_type: str = Field(default="outbound", description="Type of call (inbound/outbound)")
     
-    @validator('phone_number')
+    @field_validator('phone_number')
+    @classmethod
     def validate_phone_number(cls, v):
         if not v.startswith('+'):
             raise ValueError('Phone number must include country code (e.g., +1234567890)')
         return v
     
-    @validator('call_type')
+    @field_validator('call_type')
+    @classmethod
     def validate_call_type(cls, v):
         if v not in ['inbound', 'outbound']:
             raise ValueError('Call type must be either "inbound" or "outbound"')
@@ -62,8 +65,8 @@ class CallInitiateResponse(BaseModel):
     message: str
 
 
-class CallStatusResponse(BaseModel):
-    """Response model for call status."""
+class AzureCallStatusResponse(BaseModel):
+    """Response model for Azure call status."""
     call_id: str
     acs_call_id: Optional[str]
     clinic_id: str
@@ -134,7 +137,7 @@ async def initiate_call(
         return CallInitiateResponse(
             call_id=call_id,
             acs_call_id=acs_call_id,
-            status="initiated",
+            status=CallStatus.INITIATED.value,
             message="Call initiated successfully"
         )
         
@@ -295,7 +298,7 @@ async def end_call(
         )
 
 
-@router.get("/calls/{call_id}/status", response_model=CallStatusResponse)
+@router.get("/calls/{call_id}/status", response_model=AzureCallStatusResponse)
 async def get_call_status(
     call_id: str,
     db: Session = Depends(get_db)
@@ -318,7 +321,7 @@ async def get_call_status(
                 detail=f"Call not found: {call_id}"
             )
         
-        return CallStatusResponse(**call_status)
+        return AzureCallStatusResponse(**call_status)
         
     except HTTPException:
         raise
@@ -612,6 +615,124 @@ async def get_acs_health():
             exception=e
         )
         
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
+@router.get("/cache/statistics", response_model=Dict[str, Any])
+async def get_cache_statistics():
+    """
+    Get cache performance statistics.
+    
+    Returns:
+        Dict[str, Any]: Cache statistics including hit rates, memory usage, and performance metrics
+    """
+    try:
+        from services.response_cache import get_response_cache_service
+        from services.hybrid_nlp_service import get_hybrid_nlp_service
+        
+        # Get response cache statistics
+        response_cache = get_response_cache_service()
+        await response_cache.initialize()
+        cache_stats = await response_cache.get_cache_statistics()
+        
+        # Get NLP cache statistics
+        nlp_service = get_hybrid_nlp_service()
+        nlp_stats = nlp_service.get_processing_statistics()
+        
+        # Calculate estimated token savings
+        total_requests = cache_stats.get("statistics", {}).get("total_requests", 0)
+        cache_hits = cache_stats.get("statistics", {}).get("hits", 0)
+        hit_rate = cache_stats.get("statistics", {}).get("hit_rate", 0.0)
+        
+        # Estimate token savings (rough calculation)
+        estimated_tokens_saved = cache_hits * 50  # Assume 50 tokens saved per cache hit
+        estimated_cost_savings = estimated_tokens_saved * 0.0001  # Rough cost per token
+        
+        return {
+            "response_cache": cache_stats,
+            "nlp_cache": nlp_stats,
+            "performance_metrics": {
+                "total_requests": total_requests,
+                "cache_hits": cache_hits,
+                "hit_rate": hit_rate,
+                "estimated_tokens_saved": estimated_tokens_saved,
+                "estimated_cost_savings_usd": round(estimated_cost_savings, 4)
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get cache statistics: {e}", LogCategory.CACHE)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve cache statistics: {str(e)}"
+        )
+
+
+@router.post("/cache/clear", response_model=Dict[str, Any])
+async def clear_cache(pattern: Optional[str] = None):
+    """
+    Clear cache entries (admin only).
+    
+    Args:
+        pattern: Optional pattern to match keys (default: all response keys)
+        
+    Returns:
+        Dict[str, Any]: Clear operation results
+    """
+    try:
+        from services.response_cache import get_response_cache_service
+        
+        response_cache = get_response_cache_service()
+        await response_cache.initialize()
+        
+        # Clear cache
+        success = await response_cache.clear_cache(pattern)
+        
+        if success:
+            return {
+                "message": "Cache cleared successfully",
+                "pattern": pattern,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to clear cache"
+            )
+            
+    except Exception as e:
+        logger.error(f"Failed to clear cache: {e}", LogCategory.CACHE)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to clear cache: {str(e)}"
+        )
+
+
+@router.get("/cache/health", response_model=Dict[str, Any])
+async def get_cache_health():
+    """
+    Get cache service health status.
+    
+    Returns:
+        Dict[str, Any]: Cache health information
+    """
+    try:
+        from services.response_cache import get_response_cache_service
+        
+        response_cache = get_response_cache_service()
+        await response_cache.initialize()
+        
+        health_status = await response_cache.health_check()
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Failed to get cache health: {e}", LogCategory.CACHE)
         return {
             "status": "unhealthy",
             "error": str(e),

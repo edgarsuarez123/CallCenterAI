@@ -1,4 +1,5 @@
-﻿import re
+import re
+import logging
 from typing import Dict, List, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert
@@ -70,7 +71,7 @@ def tokenize_text(db: Session, call_id: str, text: str) -> Tuple[str, List[str],
         db.execute(stmt)
         db.commit()
 
-    # Basic residual check: if we still find phones/emails/names → residual true
+    # Basic residual check: if we still find phones/emails/names ? residual true
     if PHONE_RE.search(text) or EMAIL_RE.search(text) or NAME_RE.search(text):
         residual_phi = True
 
@@ -79,7 +80,7 @@ def tokenize_text(db: Session, call_id: str, text: str) -> Tuple[str, List[str],
 def hydrate_text(db: Session, text_tokenized: str) -> Tuple[str, List[str]]:
     """Replace tokens with original values from DB; returns hydrated text and missing list."""
     missing: List[str] = []
-    # Find tokens by pattern KIND_HEX… (we use 6+ uppercase hex chars)
+    # Find tokens by pattern KIND_HEX� (we use 6+ uppercase hex chars)
     token_candidates = set(re.findall(r"\b([A-Z]+_[A-F0-9]{6,})\b", text_tokenized))
     if not token_candidates:
         return text_tokenized, missing
@@ -95,7 +96,8 @@ def hydrate_text(db: Session, text_tokenized: str) -> Tuple[str, List[str]]:
         try:
             original = decrypt_str(m.value_nonce, m.value_ciphertext)
             result = result.replace(tok, original)
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Failed to decrypt token {tok}: {e}")  # ADD LOGGING
             missing.append(tok)
 
     return result, missing

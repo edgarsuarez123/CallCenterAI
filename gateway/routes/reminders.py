@@ -18,7 +18,7 @@ from services.database import get_db
 from services.reminder_service import get_reminder_service, ReminderService
 from services.structured_logging import get_logger, LogCategory
 from services.exceptions import (
-    ReminderServiceError, ResourceNotFoundError, ValidationError
+    CallCenterAIException, ValidationError
 )
 from models.models import Reminder, ReminderLog
 
@@ -121,7 +121,7 @@ async def schedule_reminder(
             completed_at=reminder.completed_at
         )
         
-    except ResourceNotFoundError as e:
+    except CallCenterAIException as e:
         logger.warning(f"Resource not found when scheduling reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -133,7 +133,7 @@ async def schedule_reminder(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=e.message
         )
-    except ReminderServiceError as e:
+    except CallCenterAIException as e:
         logger.error(f"Reminder service error when scheduling reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -280,13 +280,13 @@ async def execute_reminder(
             next_retry_time=result.get('next_retry_time')
         )
         
-    except ResourceNotFoundError as e:
+    except CallCenterAIException as e:
         logger.warning(f"Resource not found when executing reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=e.message
         )
-    except ReminderServiceError as e:
+    except CallCenterAIException as e:
         logger.error(f"Reminder service error when executing reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -328,13 +328,13 @@ async def cancel_reminder(
                        'reason': reason
                    })
         
-    except ResourceNotFoundError as e:
+    except CallCenterAIException as e:
         logger.warning(f"Resource not found when cancelling reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=e.message
         )
-    except ReminderServiceError as e:
+    except CallCenterAIException as e:
         logger.error(f"Reminder service error when cancelling reminder: {e.message}", LogCategory.REMINDER)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

@@ -1,8 +1,23 @@
-﻿from sqlalchemy import Column, String, LargeBinary, DateTime, ForeignKey, Integer, Float, Text, UniqueConstraint, Index, Boolean, text
+﻿from sqlalchemy import Column, String, LargeBinary, DateTime, ForeignKey, Integer, Float, Text, UniqueConstraint, Index, Boolean, text, Table
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from . import __init__  # keep package marker import happy
 from services.database import Base
+
+# Import CallStatus enum for default values
+from .enums import CallStatus
+
+# Association table for many-to-many relationship between providers and clinics
+provider_clinics = Table(
+    'provider_clinics',
+    Base.metadata,
+    Column('provider_id', String(64), ForeignKey('providers.provider_id', ondelete='CASCADE'), primary_key=True),
+    Column('clinic_id', String(64), ForeignKey('clinics.clinic_id', ondelete='CASCADE'), primary_key=True),
+    Column('assigned_at', DateTime(timezone=True), server_default=func.now(), nullable=False),
+    Column('is_active', String(10), default='yes', nullable=False),
+    Index('idx_provider_clinics_provider', 'provider_id'),
+    Index('idx_provider_clinics_clinic', 'clinic_id')
+)
 
 class Mapping(Base):
     __tablename__ = "mappings"
@@ -69,7 +84,7 @@ class Call(Base):
     # CALL STATUS TRACKING
     # ============================================================================
     
-    status = Column(String(20), default="initiated", nullable=False)
+    status = Column(String(20), default=CallStatus.INITIATED.value, nullable=False)
     # Current state of the call. Possible values:
     #   - "initiated": Call received, setting up
     #   - "active": Currently in conversation
@@ -109,7 +124,7 @@ class Call(Base):
     assigned_provider_id = Column(String(64), ForeignKey('providers.provider_id', ondelete='SET NULL'), nullable=True)
     # Provider assigned to handle this call
     
-    queue_id = Column(String(64), ForeignKey('call_queues.queue_id', ondelete='SET NULL'), nullable=True)
+    queue_id = Column(String(64), ForeignKey('call_queue.queue_id', ondelete='SET NULL'), nullable=True)
     # Queue this call was placed in (if any)
     
     routing_metadata = Column(Text, nullable=True)
@@ -126,7 +141,7 @@ class Call(Base):
     # Routing relationships
     routing_rule = relationship("RoutingRule", back_populates="calls")
     assigned_provider = relationship("Provider", foreign_keys=[assigned_provider_id])
-    queue = relationship("CallQueue", back_populates="calls")
+    queue = relationship("CallQueue", foreign_keys=[queue_id], uselist=False)
     queued_call = relationship("QueuedCall", back_populates="call", uselist=False)
     detection_logs = relationship("CallerDetectionLog", back_populates="call")
     
@@ -193,6 +208,10 @@ class Patient(Base):
     # Tokenized date of birth (e.g., "DATE_GHI789")
     # References Mapping table where actual DOB is encrypted
     
+    address_token = Column(String(64), nullable=True)
+    # Tokenized patient address (e.g., "ADDRESS_ABC123")
+    # References Mapping table where actual address is encrypted
+    
     # ============================================================================
     # INSURANCE (Most patients have one primary insurance)
     # ============================================================================
@@ -246,6 +265,7 @@ class Patient(Base):
         # Performance indexes for patient queries
         Index('idx_patients_phone_token', 'phone_token'),
         Index('idx_patients_email_token', 'email_token'),
+        Index('idx_patients_address_token', 'address_token'),
     )
 
 class Appointment(Base):
@@ -298,6 +318,9 @@ class Appointment(Base):
     status = Column(String(20), default="scheduled", nullable=False)
     # scheduled, confirmed, completed, cancelled, no_show
     
+    google_event_id = Column(String(255), nullable=True)
+    # Google Calendar event ID for syncing updates/deletions
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
@@ -324,7 +347,7 @@ class Appointment(Base):
     
     patient = relationship("Patient", back_populates="appointments")
     provider = relationship("Provider", back_populates="appointments")
-    call = relationship("Call")
+    call = relationship("Call", foreign_keys=[call_id])
     reminders = relationship("Reminder", back_populates="appointment")
 
 
@@ -409,8 +432,6 @@ class Provider(Base):
     
     title = Column(String(50), nullable=True)  # Dr., Nurse, etc.
     specialty = Column(String(100), nullable=True)  # Cardiology, General Practice, etc.
-    license_number = Column(String(50), nullable=True)  # Medical license number
-    npi_number = Column(String(20), nullable=True)  # National Provider Identifier
     email = Column(String(255), nullable=True)  # Provider email for Google Calendar integration
     
     # Availability for AI scheduling
@@ -431,6 +452,12 @@ class Provider(Base):
     google_calendar_credentials = relationship("GoogleCalendarCredentials", back_populates="provider", uselist=False)
     # One provider can have capacity information
     capacity = relationship("ProviderCapacity", back_populates="provider", uselist=False)
+    # Many-to-many relationship: providers can work at multiple clinics
+    clinics = relationship(
+        "Clinic",
+        secondary=provider_clinics,
+        back_populates="providers"
+    )
 
 
 class CallNotes(Base):
@@ -498,8 +525,8 @@ class CallNotes(Base):
     # RELATIONSHIPS
     # ============================================================================
     
-    call = relationship("Call")
-    patient = relationship("Patient")
+    call = relationship("Call", foreign_keys=[call_id])
+    patient = relationship("Patient", foreign_keys=[patient_id])
 
 
 class AuditLog(Base):
@@ -644,7 +671,7 @@ class CallQueue(Base):
     # RELATIONSHIPS
     # ============================================================================
     
-    call = relationship("Call")
+    call = relationship("Call", foreign_keys=[call_id])
 
 
 class SystemConfig(Base):
@@ -976,6 +1003,12 @@ class Clinic(Base):
     
     # One clinic has many usage records (one per billing period)
     usage_records = relationship("ClinicUsage", back_populates="clinic")
+    # Many-to-many relationship: clinics can have multiple providers
+    providers = relationship(
+        "Provider",
+        secondary=provider_clinics,
+        back_populates="clinics"
+    )
 
 
 class ClinicUsage(Base):
@@ -1475,7 +1508,7 @@ class CallerType(Base):
     
     # Relationships
     routing_rules = relationship("RoutingRule", back_populates="caller_type")
-    call_queues = relationship("CallQueue", back_populates="caller_type")
+    call_queues = relationship("CallQueueDefinition", back_populates="caller_type")
     
     # Indexes
     __table_args__ = (
@@ -1598,7 +1631,6 @@ class ProviderCapacity(Base):
     
     # Relationships
     provider = relationship("Provider", back_populates="capacity")
-    queued_calls = relationship("QueuedCall", back_populates="assigned_provider")
     
     # Indexes
     __table_args__ = (
@@ -1607,9 +1639,9 @@ class ProviderCapacity(Base):
     )
 
 
-class CallQueue(Base):
+class CallQueueDefinition(Base):
     """
-    Call queues for overload management and priority handling.
+    Call queue definitions for overload management and priority handling.
     """
     __tablename__ = "call_queues"
     
@@ -1639,7 +1671,6 @@ class CallQueue(Base):
     # Relationships
     caller_type = relationship("CallerType", back_populates="call_queues")
     queued_calls = relationship("QueuedCall", back_populates="queue")
-    calls = relationship("Call", back_populates="queue")
     
     # Indexes
     __table_args__ = (
@@ -1682,8 +1713,8 @@ class QueuedCall(Base):
     
     # Relationships
     call = relationship("Call", back_populates="queued_call")
-    queue = relationship("CallQueue", back_populates="queued_calls")
-    assigned_provider = relationship("ProviderCapacity", back_populates="queued_calls")
+    queue = relationship("CallQueueDefinition", back_populates="queued_calls")
+    assigned_provider = relationship("Provider", foreign_keys=[assigned_provider_id])
     
     # Indexes
     __table_args__ = (

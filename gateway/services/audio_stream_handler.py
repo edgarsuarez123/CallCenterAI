@@ -13,7 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Set, Callable
 from dataclasses import dataclass, field
 
@@ -61,7 +61,7 @@ class AudioStreamConnection:
     def add_audio_chunk(self, chunk: AudioChunk):
         """Add audio chunk to buffer, maintaining size limit."""
         self.audio_buffer.append(chunk)
-        self.last_activity = datetime.utcnow()
+        self.last_activity = datetime.now(timezone.utc)
         
         # Maintain buffer size limit
         if len(self.audio_buffer) > self.buffer_size:
@@ -131,8 +131,8 @@ class AudioStreamHandler:
                 call_id=call_id,
                 websocket=websocket,
                 connection_id=connection_id,
-                connected_at=datetime.utcnow(),
-                last_activity=datetime.utcnow()
+                connected_at=datetime.now(timezone.utc),
+                last_activity=datetime.now(timezone.utc)
             )
             
             # Store connection
@@ -189,7 +189,7 @@ class AudioStreamHandler:
                     # Create audio chunk
                     chunk = AudioChunk(
                         data=data,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         chunk_id=str(uuid.uuid4()),
                         sequence_number=len(connection.audio_buffer) + 1
                     )
@@ -255,7 +255,7 @@ class AudioStreamHandler:
             # Create audio chunk for outgoing data
             chunk = AudioChunk(
                 data=audio_data,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 chunk_id=str(uuid.uuid4()),
                 sequence_number=len(connection.audio_buffer) + 1,
                 audio_format=audio_format
@@ -265,7 +265,7 @@ class AudioStreamHandler:
             await connection.websocket.send_bytes(audio_data)
             
             # Update activity
-            connection.last_activity = datetime.utcnow()
+            connection.last_activity = datetime.now(timezone.utc)
             
             self.logger.debug(
                 f"Sent audio chunk: {chunk.chunk_id}",
@@ -485,7 +485,7 @@ class AudioStreamHandler:
             try:
                 await asyncio.sleep(self.cleanup_interval)
                 
-                current_time = datetime.utcnow()
+                current_time = datetime.now(timezone.utc)
                 inactive_connections = []
                 
                 for connection_id, connection in self.active_connections.items():

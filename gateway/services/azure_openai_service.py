@@ -13,7 +13,7 @@ This service provides:
 import asyncio
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Union, AsyncGenerator
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +30,8 @@ from services.exceptions import (
     AzureCommunicationError
 )
 from services.bilingual_manager import get_bilingual_manager, LanguageCode
+from services.response_cache import get_response_cache_service
+from services.response_templates import get_response_templates
 
 
 logger = get_logger("azure_openai_service")
@@ -61,9 +63,8 @@ class EntityType(Enum):
     APPOINTMENT_TYPE = "appointment_type"
     PROVIDER_NAME = "provider_name"
     CLINIC_NAME = "clinic_name"
-    SYMPTOMS = "symptoms"
-    MEDICATION = "medication"
     INSURANCE = "insurance"
+    ADDRESS = "address"  # Complete patient address
 
 
 @dataclass
@@ -112,6 +113,7 @@ class ResponseResult:
     language: LanguageCode
     streaming: bool = False
     fallback_used: bool = False
+    source: str = "ai_generated"  # "cache", "template", or "ai_generated"
 
 
 class AzureOpenAIService:
@@ -159,6 +161,11 @@ class AzureOpenAIService:
         
         # Initialize OpenAI client
         self._initialize_openai_client()
+        
+        # Initialize cache services
+        self.response_cache = get_response_cache_service()
+        self.response_templates = get_response_templates()
+        self.enable_response_caching = True  # Configuration flag for caching
         
         # Conversation storage
         self.conversations: Dict[str, List[ConversationMessage]] = {}
@@ -255,7 +262,7 @@ class AzureOpenAIService:
                     entities=[],
                     raw_response="Intent classification disabled",
                     processing_time_ms=0,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     language=language,
                     fallback_used=True
                 )
@@ -306,7 +313,7 @@ class AzureOpenAIService:
                         entities=entities,
                         raw_response=response_text,
                         processing_time_ms=processing_time_ms,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         language=language
                     )
                     
@@ -385,7 +392,7 @@ class AzureOpenAIService:
             entities=[],
             raw_response="Fallback classification",
             processing_time_ms=processing_time_ms,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             language=language,
             fallback_used=True
         )
@@ -396,7 +403,7 @@ class AzureOpenAIService:
                               intent: Optional[IntentType] = None,
                               entities: Optional[List[Dict[str, Any]]] = None) -> ResponseResult:
         """
-        Generate a response to user input.
+        Generate a response to user input with caching support.
         
         Args:
             user_input: Text input from user
@@ -419,34 +426,46 @@ class AzureOpenAIService:
             
             start_time = time.time()
             
-            # Get system prompt for language
-            system_prompt = self.system_prompt_en if language == LanguageCode.ENGLISH else self.system_prompt_es
+            # Check cache first if caching is enabled and intent is available
+            if self.enable_response_caching and intent:
+                cached_response = await self._get_cached_response(intent, language, entities, call_id)
+                if cached_response:
+                    processing_time_ms = int((time.time() - start_time) * 1000)
+                    
+                    # Create result from cache
+                    result = ResponseResult(
+                        response_text=cached_response,
+                        intent=intent,
+                        entities=entities or [],
+                        processing_time_ms=processing_time_ms,
+                        timestamp=datetime.now(timezone.utc),
+                        language=language,
+                        source="cache"
+                    )
+                    
+                    # Update statistics
+                    self._update_response_stats(call_id, result)
+                    
+                    # Store in conversation history
+                    await self._add_to_conversation(call_id, "assistant", cached_response, language, intent, entities or [])
+                    
+                    self.logger.info(
+                        f"Cached response used for call {call_id}",
+                        LogCategory.AZURE_OPENAI,
+                        extra_data={
+                            "call_id": call_id,
+                            "response_length": len(cached_response),
+                            "processing_time_ms": processing_time_ms,
+                            "language": language.value,
+                            "intent": intent.value,
+                            "source": "cache"
+                        }
+                    )
+                    
+                    return result
             
-            # Build conversation context
-            messages = [{"role": "system", "content": system_prompt}]
-            
-            if self.enable_context_awareness and call_id in self.conversations:
-                # Add recent conversation history
-                recent_messages = self.conversations[call_id][-self.context_window_size:]
-                for msg in recent_messages:
-                    messages.append({
-                        "role": msg.role,
-                        "content": msg.content
-                    })
-            
-            # Add current user input
-            messages.append({"role": "user", "content": user_input})
-            
-            # Generate response
-            response = await self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                timeout=self.response_timeout_seconds
-            )
-            
-            response_text = response.choices[0].message.content
+            # Generate new response using Azure OpenAI
+            response_text = await self._generate_ai_response(user_input, call_id, language, intent, entities)
             processing_time_ms = int((time.time() - start_time) * 1000)
             
             # Extract entities from response if enabled
@@ -460,9 +479,14 @@ class AzureOpenAIService:
                 intent=intent,
                 entities=response_entities,
                 processing_time_ms=processing_time_ms,
-                timestamp=datetime.utcnow(),
-                language=language
+                timestamp=datetime.now(timezone.utc),
+                language=language,
+                source="ai_generated"
             )
+            
+            # Cache the response if caching is enabled and intent is available
+            if self.enable_response_caching and intent:
+                await self._cache_ai_response(intent, language, response_text, entities, call_id)
             
             # Update statistics
             self._update_response_stats(call_id, result)
@@ -471,14 +495,15 @@ class AzureOpenAIService:
             await self._add_to_conversation(call_id, "assistant", response_text, language, intent, response_entities)
             
             self.logger.info(
-                f"Response generated for call {call_id}",
+                f"AI response generated for call {call_id}",
                 LogCategory.AZURE_OPENAI,
                 extra_data={
                     "call_id": call_id,
                     "response_length": len(response_text),
                     "processing_time_ms": processing_time_ms,
                     "language": language.value,
-                    "intent": intent.value if intent else None
+                    "intent": intent.value if intent else None,
+                    "source": "ai_generated"
                 }
             )
             
@@ -493,6 +518,203 @@ class AzureOpenAIService:
             
             # Return fallback response
             return self._create_fallback_response(call_id, language)
+    
+    async def _get_cached_response(
+        self, 
+        intent: IntentType, 
+        language: LanguageCode, 
+        entities: Optional[List[Dict[str, Any]]], 
+        call_id: str
+    ) -> Optional[str]:
+        """
+        Get cached response for intent and language.
+        
+        Args:
+            intent: Intent type
+            language: Language code
+            entities: Extracted entities
+            call_id: Call ID for context
+            
+        Returns:
+            Optional[str]: Cached response if found, None otherwise
+        """
+        try:
+            # Check if template exists first
+            if self.response_templates.has_template(intent, language):
+                # Extract variables from entities
+                variables = self._extract_variables_from_entities(entities)
+                
+                # Try to get template response
+                template_response = self.response_templates.substitute_variables(intent, language, variables)
+                if template_response:
+                    # Cache the template response
+                    await self.response_cache.cache_response(
+                        intent=intent.value,
+                        language=language.value,
+                        response=template_response,
+                        template=self.response_templates.get_template(intent, language).template,
+                        variables=variables,
+                        source="template"
+                    )
+                    return template_response
+            
+            # Try cache for AI-generated responses
+            variables = self._extract_variables_from_entities(entities)
+            cached_response = await self.response_cache.get_cached_response(
+                intent=intent.value,
+                language=language.value,
+                variables=variables
+            )
+            
+            return cached_response
+            
+        except Exception as e:
+            self.logger.warning(
+                f"Error getting cached response: {e}",
+                LogCategory.AZURE_OPENAI,
+                extra_data={"intent": intent.value, "language": language.value}
+            )
+            return None
+    
+    async def _cache_ai_response(
+        self, 
+        intent: IntentType, 
+        language: LanguageCode, 
+        response_text: str, 
+        entities: Optional[List[Dict[str, Any]]], 
+        call_id: str
+    ) -> bool:
+        """
+        Cache AI-generated response.
+        
+        Args:
+            intent: Intent type
+            language: Language code
+            response_text: Generated response text
+            entities: Extracted entities
+            call_id: Call ID for context
+            
+        Returns:
+            bool: True if cached successfully, False otherwise
+        """
+        try:
+            # Only cache certain types of responses
+            cacheable_intents = {
+                IntentType.GREETING,
+                IntentType.GOODBYE,
+                IntentType.APPOINTMENT_BOOKING,
+                IntentType.APPOINTMENT_INQUIRY,
+                IntentType.PROVIDER_INQUIRY,
+                IntentType.CLINIC_INQUIRY,
+                IntentType.BILLING_INQUIRY,
+                IntentType.GENERAL_INQUIRY
+            }
+            
+            if intent not in cacheable_intents:
+                return False
+            
+            # Extract variables from entities
+            variables = self._extract_variables_from_entities(entities)
+            
+            # Cache the response
+            return await self.response_cache.cache_response(
+                intent=intent.value,
+                language=language.value,
+                response=response_text,
+                variables=variables,
+                source="ai_generated"
+            )
+            
+        except Exception as e:
+            self.logger.warning(
+                f"Error caching AI response: {e}",
+                LogCategory.AZURE_OPENAI,
+                extra_data={"intent": intent.value, "language": language.value}
+            )
+            return False
+    
+    async def _generate_ai_response(
+        self, 
+        user_input: str, 
+        call_id: str, 
+        language: LanguageCode, 
+        intent: Optional[IntentType], 
+        entities: Optional[List[Dict[str, Any]]]
+    ) -> str:
+        """
+        Generate response using Azure OpenAI.
+        
+        Args:
+            user_input: User input text
+            call_id: Call ID
+            language: Language code
+            intent: Intent type
+            entities: Extracted entities
+            
+        Returns:
+            str: Generated response text
+        """
+        # Get system prompt for language
+        system_prompt = self.system_prompt_en if language == LanguageCode.ENGLISH else self.system_prompt_es
+        
+        # Build conversation context
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        if self.enable_context_awareness and call_id in self.conversations:
+            # Add recent conversation history
+            recent_messages = self.conversations[call_id][-self.context_window_size:]
+            for msg in recent_messages:
+                messages.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
+        
+        # Add current user input
+        messages.append({"role": "user", "content": user_input})
+        
+        # Generate response
+        response = await self.client.chat.completions.create(
+            model=self.deployment_name,
+            messages=messages,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            timeout=self.response_timeout_seconds
+        )
+        
+        return response.choices[0].message.content
+    
+    def _extract_variables_from_entities(self, entities: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """
+        Extract template variables from entities.
+        
+        Args:
+            entities: List of extracted entities
+            
+        Returns:
+            Dict[str, Any]: Variables for template substitution
+        """
+        variables = {}
+        
+        if not entities:
+            return variables
+        
+        for entity in entities:
+            entity_type = entity.get("type", "").lower()
+            entity_value = entity.get("value", "")
+            
+            # Map entity types to template variables
+            if entity_type in ["clinic_name", "clinic"]:
+                variables["clinic_name"] = entity_value
+            elif entity_type in ["patient_name", "name"]:
+                variables["patient_name"] = entity_value
+            elif entity_type in ["appointment_date", "date"]:
+                variables["date"] = entity_value
+            elif entity_type in ["appointment_time", "time"]:
+                variables["time"] = entity_value
+            elif entity_type in ["provider_name", "doctor"]:
+                variables["provider_name"] = entity_value
+        
+        return variables
     
     async def generate_streaming_response(self, user_input: str, call_id: str,
                                         language: LanguageCode = LanguageCode.ENGLISH,
@@ -584,7 +806,7 @@ class AzureOpenAIService:
             intent=None,
             entities=[],
             processing_time_ms=0,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             language=language,
             fallback_used=True
         )
@@ -678,7 +900,7 @@ class AzureOpenAIService:
             message = ConversationMessage(
                 role=role,
                 content=content,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 language=language,
                 intent=intent,
                 entities=entity_objects
@@ -697,7 +919,7 @@ class AzureOpenAIService:
         """Update intent classification statistics."""
         if call_id not in self.intent_stats:
             self.intent_stats[call_id] = {
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "total_classifications": 0,
                 "successful_classifications": 0,
                 "high_confidence_classifications": 0,
@@ -727,7 +949,7 @@ class AzureOpenAIService:
         """Update response generation statistics."""
         if call_id not in self.response_stats:
             self.response_stats[call_id] = {
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "total_responses": 0,
                 "successful_responses": 0,
                 "fallback_responses": 0,
@@ -776,7 +998,7 @@ class AzureOpenAIService:
             return None
         
         stats = self.intent_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.utcnow() - stats["start_time"]).total_seconds()
+        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
         if stats["total_classifications"] > 0:
             stats["success_rate"] = stats["successful_classifications"] / stats["total_classifications"]
@@ -805,7 +1027,7 @@ class AzureOpenAIService:
             return None
         
         stats = self.response_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.utcnow() - stats["start_time"]).total_seconds()
+        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
         if stats["total_responses"] > 0:
             stats["success_rate"] = stats["successful_responses"] / stats["total_responses"]
@@ -827,7 +1049,7 @@ class AzureOpenAIService:
     async def cleanup_expired_conversations(self):
         """Clean up expired conversations."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             for call_id, messages in self.conversations.items():

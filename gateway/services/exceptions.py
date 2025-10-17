@@ -13,7 +13,7 @@ This module provides a comprehensive exception system that:
 
 from typing import Optional, Dict, Any, List
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 import traceback
 
 
@@ -65,6 +65,7 @@ class ErrorCode(Enum):
     VALIDATION_ERROR = "validation_error"
     CONCURRENCY_ERROR = "concurrency_error"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
+    RESOURCE_NOT_FOUND = "resource_not_found"
     
     # External service errors
     GOOGLE_CALENDAR_ERROR = "google_calendar_error"
@@ -107,7 +108,7 @@ class CallCenterAIException(Exception):
         self.user_message = user_message or message
         self.context = context or {}
         self.original_exception = original_exception
-        self.timestamp = datetime.utcnow()
+        self.timestamp = datetime.now(timezone.utc)
         self.traceback = traceback.format_exc() if original_exception else None
     
     def to_dict(self) -> Dict[str, Any]:
