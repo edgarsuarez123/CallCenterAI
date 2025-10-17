@@ -3,11 +3,12 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_PASSWORD: ChangeThisNow_!
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     volumes:
-      - C:/Users/Edgar/Desktop/CallCenterAI/data/gateway/postgres:/var/lib/postgresql/data
+      - ./data/gateway/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U callcenterai -d callcenterai -h localhost"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME} -h localhost"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -15,63 +16,22 @@ services:
   
   gateway:
     build:
-      context: C:/Users/Edgar/Desktop/CallCenterAI/gateway
-      dockerfile: C:/Users/Edgar/Desktop/CallCenterAI/gateway/Dockerfile
+      context: ../gateway
+      dockerfile: Dockerfile
+    env_file:
+      - ../.env  # Load all environment variables from root .env file
     environment:
-       # Application Configuration
-       - APP_ENVIRONMENT=development
-       - APP_DEBUG=true
-       - APP_HOST=0.0.0.0
-       - APP_PORT=8000
-       - APP_WORKERS=1
-       - APP_API_PREFIX=/api/v1
-       - APP_API_VERSION=1.0.0
-       - APP_API_TITLE=CallCenter AI API
-       - APP_API_DESCRIPTION=AI-powered call center management system
-       
-       # Database Configuration
-       - DB_HOST=postgres
-       - DB_PORT=5432
-       - DB_NAME=callcenterai
-       - DB_USER=callcenterai
-       - DB_PASSWORD=ChangeThisNow_!
-       - DB_POOL_SIZE=5
-       - DB_MAX_OVERFLOW=10
-       - DB_POOL_TIMEOUT=30
-       - DB_POOL_RECYCLE=3600
-       - DB_POOL_PRE_PING=true
-       
-       # Security Configuration
-       - SECURITY_ENCRYPTION_KEY=Q2FsbENlbnRlckFJX0Rldl9IYW1jS2V5XzMyQnl0ZXM=
-       - SECURITY_JWT_SECRET=Q2FsbENlbnRlckFJX0Rldl9KVVRTZWNyZXRfMzJDaGFyYWN0ZXJz
-       - SECURITY_CORS_ORIGINS=["http://localhost:3000", "http://localhost:8000"]
-       - SECURITY_RATE_LIMIT_PER_MINUTE=1000
-       
-       # Logging Configuration
-       - LOG_LEVEL=DEBUG
-       - LOG_FORMAT=json
-       - LOG_STRUCTURED_ENABLED=true
-       - LOG_PHI_MASKING_ENABLED=true
-       - LOG_PERFORMANCE_LOGGING_ENABLED=true
-       
-       # Google Calendar Configuration
-       - GOOGLE_CLIENT_ID=182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com
-       - GOOGLE_CLIENT_SECRET=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
-       - GOOGLE_REDIRECT_URI=http://localhost:8000/auth/callback
-       
-       # Legacy Configuration (for backward compatibility)
-       - PYTHONPATH=/app
-       - APP_ENV=dev
-       - CLINIC_TOKEN_HMAC_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9IYW1jS2V5XzMyQnl0ZXM=
-       - AES_GCM_KEY_BASE64=Q2FsbENlbnRlckFJX0Rldl9BRVNfS2V5XzMyQnl0ZXM=
+      # Override for local development
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: postgres
     volumes:
-      # Mount source code for live editing
-      - C:/Users/Edgar/Desktop/CallCenterAI/gateway:/app:rw
+      # Mount source code for live editing (development only)
+      - ../gateway:/app:rw
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "8443:8443"
     restart: always
-    # Optional: Enable hot reload (if using uvicorn/fastapi)
+    # Enable hot reload for development
     command: uvicorn main:app --host 0.0.0.0 --port 8443 --reload

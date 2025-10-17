@@ -12,7 +12,7 @@ This service provides:
 import asyncio
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -176,7 +176,7 @@ class BilingualManager:
                 confidence=confidence,
                 confidence_level=confidence_level,
                 detection_method=detection_method,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 context=context
             )
             
@@ -300,15 +300,15 @@ class BilingualManager:
                         user_preference=None,
                         system_preference=None,
                         lock=None,
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow()
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
                     )
                 else:
                     # Update existing context
                     context = self.conversations[call_id]
                     context.detected_language = detection.detected_language
                     context.language_history.append(detection)
-                    context.updated_at = datetime.utcnow()
+                    context.updated_at = datetime.now(timezone.utc)
                     
                     # Limit history size
                     if len(context.language_history) > 50:
@@ -320,7 +320,7 @@ class BilingualManager:
                         if (last_detection.detected_language != detection.detected_language and
                             detection.confidence >= self.detection_threshold_medium):
                             context.total_switches += 1
-                            context.last_switch_time = datetime.utcnow()
+                            context.last_switch_time = datetime.now(timezone.utc)
                             
                             self.logger.info(
                                 f"Language switch detected for call {call_id}",
@@ -372,7 +372,7 @@ class BilingualManager:
                     if existing_lock.locked_language == language:
                         # Extend existing lock
                         existing_lock.lock_duration = duration
-                        existing_lock.lock_timestamp = datetime.utcnow()
+                        existing_lock.lock_timestamp = datetime.now(timezone.utc)
                         self.logger.info(f"Extended language lock for call {call_id}")
                         return True
                     else:
@@ -385,7 +385,7 @@ class BilingualManager:
                 language_lock = LanguageLock(
                     call_id=call_id,
                     locked_language=language,
-                    lock_timestamp=datetime.utcnow(),
+                    lock_timestamp=datetime.now(timezone.utc),
                     lock_duration=duration,
                     lock_reason=reason,
                     locked_by=locked_by,
@@ -492,7 +492,7 @@ class BilingualManager:
                 if call_id in self.language_locks:
                     lock = self.language_locks[call_id]
                     # Check if lock is still valid
-                    if (datetime.utcnow() - lock.lock_timestamp).total_seconds() < lock.lock_duration:
+                    if (datetime.now(timezone.utc) - lock.lock_timestamp).total_seconds() < lock.lock_duration:
                         return lock.locked_language
                     else:
                         # Lock expired, remove it
@@ -557,8 +557,8 @@ class BilingualManager:
                         user_preference=None,
                         system_preference=None,
                         lock=None,
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow()
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc)
                     )
                 
                 context = self.conversations[call_id]
@@ -571,7 +571,7 @@ class BilingualManager:
                     raise ValidationError("preference_type", preference_type, 
                                         "Preference type must be 'user' or 'system'")
                 
-                context.updated_at = datetime.utcnow()
+                context.updated_at = datetime.now(timezone.utc)
                 
                 self.logger.info(
                     f"Language preference set for call {call_id}",
@@ -642,7 +642,7 @@ class BilingualManager:
         """Update language detection statistics."""
         if call_id not in self.detection_stats:
             self.detection_stats[call_id] = {
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "total_detections": 0,
                 "high_confidence_detections": 0,
                 "medium_confidence_detections": 0,
@@ -675,7 +675,7 @@ class BilingualManager:
             return None
         
         stats = self.detection_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.utcnow() - stats["start_time"]).total_seconds()
+        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
         if stats["total_detections"] > 0:
             stats["high_confidence_rate"] = stats["high_confidence_detections"] / stats["total_detections"]
@@ -701,7 +701,7 @@ class BilingualManager:
     async def cleanup_expired_data(self):
         """Clean up expired conversations and locks."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             with self._lock:

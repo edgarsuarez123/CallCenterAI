@@ -5,7 +5,6 @@ This service provides:
 - Call initiation and management
 - Webhook handling for ACS events
 - Audio streaming coordination
-- Call recording management
 - Integration with existing call flow system
 """
 
@@ -15,7 +14,7 @@ import hmac
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlencode
 
@@ -31,8 +30,12 @@ from services.exceptions import (
     ValidationError,
     ExternalServiceUnavailableError
 )
-from models.models import Call, Clinic, ClinicLicense
+from models.models import Call, Clinic, ClinicLicense, Mapping
+from models.enums import CallStatus
 from services.database import get_db_session
+from services.crypto import make_hmac_token, normalize_phone, encrypt_str
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import func
 
 
 logger = get_logger("azure_communication_service")
@@ -46,10 +49,9 @@ class CallState:
         self.clinic_id = clinic_id
         self.caller_phone = caller_phone
         self.acs_call_id: Optional[str] = None
-        self.status = "initiated"
-        self.start_time = datetime.utcnow()
+        self.status = CallStatus.INITIATED.value
+        self.start_time = datetime.now(timezone.utc)
         self.end_time: Optional[datetime] = None
-        self.recording_id: Optional[str] = None
         self.websocket_connected = False
         self.audio_stream_active = False
         self.language_detected: Optional[str] = None
@@ -69,7 +71,9 @@ class AzureCommunicationService:
         self.settings = get_settings()
         self.logger = logger
         self.active_calls: Dict[str, CallState] = {}
+        self._calls_lock = asyncio.Lock()  # ADD LOCK FOR THREAD SAFETY
         self.http_client = httpx.AsyncClient(timeout=30.0)
+        self._closed = False
         
         # ACS configuration
         self.connection_string = self.settings.azure.communication.connection_string.get_secret_value()
@@ -139,7 +143,7 @@ class AzureCommunicationService:
                 raise ValidationError("clinic_id", clinic_id, "Clinic ID is required")
             
             # Generate unique call ID
-            call_id = f"CALL_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8].upper()}"
+            call_id = f"CALL_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8].upper()}"
             
             # Check clinic capacity
             await self._check_clinic_capacity(clinic_id)
@@ -147,7 +151,8 @@ class AzureCommunicationService:
             # Create call state
             call_state = CallState(call_id, clinic_id, phone_number)
             call_state.status = "initiating"
-            self.active_calls[call_id] = call_state
+            async with self._calls_lock:
+                self.active_calls[call_id] = call_state
             
             # Prepare ACS call request
             if call_type == "outbound":
@@ -157,7 +162,7 @@ class AzureCommunicationService:
                 acs_call_id = None
             
             call_state.acs_call_id = acs_call_id
-            call_state.status = "active"
+            call_state.status = CallStatus.ACTIVE.value
             
             # Store call in database
             await self._store_call_record(call_id, phone_number, clinic_id, call_type)
@@ -211,14 +216,6 @@ class AzureCommunicationService:
                     "audioChannelType": "mixed"
                 }
             }
-            
-            # Add recording if enabled
-            if self.settings.azure.communication.recording_enabled:
-                payload["recordingConfiguration"] = {
-                    "recordingContent": "audio",
-                    "recordingChannel": "mixed",
-                    "recordingFormat": "wav"
-                }
             
             # Make API call to ACS
             url = f"{self.endpoint}calling/callConnections"
@@ -280,16 +277,36 @@ class AzureCommunicationService:
             raise AzureCommunicationError("capacity_check_failed", str(e))
     
     async def _store_call_record(self, call_id: str, phone_number: str, clinic_id: str, call_type: str):
-        """Store call record in database."""
+        """Store call record in database with tokenized phone number."""
         try:
             with get_db_session() as db:
-                # Create call record
+                # Tokenize phone number for HIPAA compliance
+                normalized_phone = normalize_phone(phone_number)
+                phone_token = make_hmac_token("PHONE", normalized_phone)
+                
+                # Store encrypted phone in mappings table
+                nonce, ct = encrypt_str(normalized_phone)
+                
+                stmt = insert(Mapping).values({
+                    'token': phone_token,
+                    'value_nonce': nonce,
+                    'value_ciphertext': ct,
+                    'value_type': 'PHONE',
+                    'call_id': call_id
+                })
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=['token'],
+                    set_={'last_used_at': func.now()}
+                )
+                db.execute(stmt)
+                
+                # Create call record with tokenized phone
                 call_record = Call(
                     call_sid=call_id,  # Using our call_id as call_sid for now
                     call_id=call_id,
-                    caller_phone_token=phone_number,  # In production, this would be tokenized
-                    status="active",
-                    started_at=datetime.utcnow()
+                    caller_phone_token=phone_token,  # Now properly tokenized
+                    status=CallStatus.ACTIVE.value,
+                    started_at=datetime.now(timezone.utc)
                 )
                 
                 db.add(call_record)
@@ -314,7 +331,8 @@ class AzureCommunicationService:
             AzureCommunicationError: If answering fails
         """
         try:
-            call_state = self.active_calls.get(call_id)
+            async with self._calls_lock:
+                call_state = self.active_calls.get(call_id)
             if not call_state:
                 raise CallNotFoundError(call_id)
             
@@ -342,7 +360,7 @@ class AzureCommunicationService:
                         f"ACS API returned {response.status_code}: {error_text.decode()}"
                     )
             
-            call_state.status = "answered"
+            call_state.status = CallStatus.ANSWERED.value
             
             self.logger.info(
                 f"Call answered successfully: {call_id}",
@@ -395,7 +413,7 @@ class AzureCommunicationService:
             
             # Update call state
             call_state.status = "ended"
-            call_state.end_time = datetime.utcnow()
+            call_state.end_time = datetime.now(timezone.utc)
             
             # Update database
             await self._update_call_record(call_id, "completed", call_state.end_time)
@@ -404,7 +422,8 @@ class AzureCommunicationService:
             await self._decrement_clinic_capacity(call_state.clinic_id)
             
             # Remove from active calls
-            del self.active_calls[call_id]
+            async with self._calls_lock:
+                del self.active_calls[call_id]
             
             self.logger.info(
                 f"Call ended successfully: {call_id}",
@@ -594,8 +613,6 @@ class AzureCommunicationService:
             # Handle different event types
             if event_type == "CallConnectionStateChanged":
                 await self._handle_call_state_change(call_state, payload)
-            elif event_type == "CallRecordingStateChanged":
-                await self._handle_recording_state_change(call_state, payload)
             elif event_type == "MediaStreamingStarted":
                 await self._handle_media_streaming_started(call_state, payload)
             elif event_type == "MediaStreamingStopped":
@@ -620,12 +637,6 @@ class AzureCommunicationService:
         
         if new_state == "Disconnected":
             await self.end_call(call_state.call_id, "disconnected")
-    
-    async def _handle_recording_state_change(self, call_state: CallState, payload: Dict[str, Any]):
-        """Handle recording state change events."""
-        recording_state = payload.get("recordingState")
-        if recording_state == "active":
-            call_state.recording_id = payload.get("recordingId")
     
     async def _handle_media_streaming_started(self, call_state: CallState, payload: Dict[str, Any]):
         """Handle media streaming started events."""
@@ -661,8 +672,7 @@ class AzureCommunicationService:
             "websocket_connected": call_state.websocket_connected,
             "audio_stream_active": call_state.audio_stream_active,
             "language_detected": call_state.language_detected,
-            "language_locked": call_state.language_locked,
-            "recording_id": call_state.recording_id
+            "language_locked": call_state.language_locked
         }
     
     def get_active_calls_count(self) -> int:
@@ -672,13 +682,13 @@ class AzureCommunicationService:
     def get_clinic_active_calls_count(self, clinic_id: str) -> int:
         """Get count of active calls for a specific clinic."""
         return sum(1 for call_state in self.active_calls.values() 
-                  if call_state.clinic_id == clinic_id and call_state.status == "active")
+                  if call_state.clinic_id == clinic_id and call_state.status == CallStatus.ACTIVE.value)
     
     async def cleanup_expired_calls(self):
         """Clean up calls that have exceeded maximum duration."""
         try:
             max_duration = timedelta(minutes=self.settings.azure.communication.max_call_duration_minutes)
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             
             expired_calls = []
             for call_id, call_state in self.active_calls.items():
@@ -691,6 +701,14 @@ class AzureCommunicationService:
                 
         except Exception as e:
             self.logger.error(f"Failed to cleanup expired calls: {e}")
+
+
+    async def close(self):
+        """Clean up resources."""
+        if not self._closed and self.http_client:
+            await self.http_client.aclose()
+            self._closed = True
+            self.logger.info("Azure Communication Service HTTP client closed")
 
 
 # Global service instance

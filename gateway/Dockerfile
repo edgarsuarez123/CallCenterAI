@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code
 COPY . /app
 
+# Create logs directory and log file
+RUN mkdir -p /app/logs && touch /app/logs/callcenter_ai.log
+
 # Make startup script executable
 RUN chmod +x start.sh
 

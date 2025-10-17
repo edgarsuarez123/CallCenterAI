@@ -6,7 +6,7 @@ REST endpoints for provider operations including creation, scheduling, and avail
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.database import get_db
 from services.provider_management import ProviderManagementService
@@ -16,7 +16,7 @@ from models.schemas import (
     SuccessResponse, ErrorResponse
 )
 
-router = APIRouter(prefix="/v1/providers", tags=["provider-management"])
+router = APIRouter(prefix="/providers", tags=["provider-management"])
 
 
 @router.post("/", response_model=ProviderResponse, status_code=status.HTTP_201_CREATED)
@@ -37,7 +37,7 @@ def add_provider(
     try:
         service = ProviderManagementService(db)
         provider = service.add_provider(clinic_id, provider_data)
-        return ProviderResponse.from_orm(provider)
+        return ProviderResponse.model_validate(provider)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -68,7 +68,7 @@ def list_providers(
     try:
         service = ProviderManagementService(db)
         providers = service.list_providers(search)
-        return [ProviderResponse.from_orm(provider) for provider in providers]
+        return [ProviderResponse.model_validate(provider) for provider in providers]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -100,7 +100,7 @@ def get_provider(
                 detail=f"Provider {provider_id} not found"
             )
         
-        return ProviderResponse.from_orm(provider)
+        return ProviderResponse.model_validate(provider)
     except HTTPException:
         raise
     except Exception as e:
@@ -137,7 +137,7 @@ def update_provider(
                 detail=f"Provider {provider_id} not found"
             )
         
-        return ProviderResponse.from_orm(provider)
+        return ProviderResponse.model_validate(provider)
     except HTTPException:
         raise
     except ValueError as e:
@@ -218,7 +218,7 @@ def create_appointment_slots(
         slots = service.create_appointment_slots(
             provider_id, clinic_id, start_date, end_date, duration_minutes, business_hours
         )
-        return [AppointmentSlotResponse.from_orm(slot) for slot in slots]
+        return [AppointmentSlotResponse.model_validate(slot) for slot in slots]
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -247,7 +247,7 @@ def get_available_slots(
     try:
         service = ProviderManagementService(db)
         slots = service.get_available_slots(provider_id, start_date, end_date)
-        return [AppointmentSlotResponse.from_orm(slot) for slot in slots]
+        return [AppointmentSlotResponse.model_validate(slot) for slot in slots]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -270,7 +270,7 @@ def get_provider_schedule(
     try:
         service = ProviderManagementService(db)
         slots = service.get_provider_schedule(provider_id, date)
-        return [AppointmentSlotResponse.from_orm(slot) for slot in slots]
+        return [AppointmentSlotResponse.model_validate(slot) for slot in slots]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -386,8 +386,7 @@ def get_provider_stats(
             "name_token": provider.name_token,
             "title": provider.title,
             "specialty": provider.specialty,
-            "license_number": provider.license_number,
-            "npi_number": provider.npi_number,
+            "email": provider.email,
             "is_available": provider.is_available,
             "statistics": {
                 "available_slots_next_30_days": len(available_slots),

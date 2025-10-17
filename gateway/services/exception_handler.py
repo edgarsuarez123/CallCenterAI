@@ -13,25 +13,17 @@ from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError
 from typing import Union
 import traceback
 import logging
-
 from .exceptions import (
     CallCenterAIException,
+    ErrorCode,
     ExceptionMapper,
     DatabaseError,
     ValidationError,
     ConnectionError,
-    ConcurrencyError,
     AuthenticationFailedError,
     AuthorizationDeniedError,
-    InvalidTokenError,
-    TokenExpiredError,
     RateLimitExceededError,
-    GoogleCalendarError,
-    AzureCommunicationError,
     ExternalServiceUnavailableError,
-    BusinessRuleViolationError,
-    OperationNotAllowedError,
-    ResourceLimitExceededError,
     MaintenanceModeError
 )
 from .structured_logging import get_logger, LogCategory
@@ -81,7 +73,7 @@ class ExceptionHandler:
         elif exc.status_code == 404:
             callcenter_exc = CallCenterAIException(
                 message=str(exc.detail),
-                error_code=CallCenterAIException.error_code,
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
                 http_status=404,
                 user_message="The requested resource could not be found."
             )
@@ -92,7 +84,7 @@ class ExceptionHandler:
         else:
             callcenter_exc = CallCenterAIException(
                 message=str(exc.detail),
-                error_code=CallCenterAIException.error_code,
+                error_code=ErrorCode.VALIDATION_ERROR,
                 http_status=exc.status_code,
                 user_message=str(exc.detail)
             )
@@ -148,7 +140,7 @@ class ExceptionHandler:
         # Create a generic CallCenterAI exception
         generic_exc = CallCenterAIException(
             message=f"Internal server error: {type(exc).__name__}",
-            error_code=CallCenterAIException.error_code,
+            error_code=ErrorCode.DATABASE_ERROR,
             http_status=500,
             user_message="An unexpected error occurred. Please try again later.",
             original_exception=exc
@@ -224,104 +216,5 @@ def handle_external_service_exceptions(service: str):
     return decorator
 
 
-# Utility functions for common exception scenarios
-def raise_slot_unavailable(slot_id: str, clinic_id: str, reason: str = "Slot is already booked"):
-    """Raise a slot unavailable exception."""
-    from .exceptions import SlotUnavailableError
-    raise SlotUnavailableError(slot_id, clinic_id, reason)
-
-
-def raise_appointment_not_found(appointment_id: str):
-    """Raise an appointment not found exception."""
-    from .exceptions import AppointmentNotFoundError
-    raise AppointmentNotFoundError(appointment_id)
-
-
-def raise_patient_not_found(patient_id: str):
-    """Raise a patient not found exception."""
-    from .exceptions import PatientNotFoundError
-    raise PatientNotFoundError(patient_id)
-
-
-def raise_provider_not_found(provider_id: str):
-    """Raise a provider not found exception."""
-    from .exceptions import ProviderNotFoundError
-    raise ProviderNotFoundError(provider_id)
-
-
-def raise_clinic_not_found(clinic_id: str):
-    """Raise a clinic not found exception."""
-    from .exceptions import ClinicNotFoundError
-    raise ClinicNotFoundError(clinic_id)
-
-
-def raise_clinic_license_suspended(clinic_id: str, reason: str):
-    """Raise a clinic license suspended exception."""
-    from .exceptions import ClinicLicenseSuspendedError
-    raise ClinicLicenseSuspendedError(clinic_id, reason)
-
-
-def raise_clinic_license_expired(clinic_id: str, expiry_date: str):
-    """Raise a clinic license expired exception."""
-    from .exceptions import ClinicLicenseExpiredError
-    raise ClinicLicenseExpiredError(clinic_id, expiry_date)
-
-
-def raise_authentication_failed(reason: str = "Invalid credentials"):
-    """Raise an authentication failed exception."""
-    from .exceptions import AuthenticationFailedError
-    raise AuthenticationFailedError(reason)
-
-
-def raise_authorization_denied(resource: str, action: str, reason: str = "Insufficient permissions"):
-    """Raise an authorization denied exception."""
-    from .exceptions import AuthorizationDeniedError
-    raise AuthorizationDeniedError(resource, action, reason)
-
-
-def raise_validation_error(field: str, value: any, reason: str):
-    """Raise a validation error exception."""
-    from .exceptions import ValidationError
-    raise ValidationError(field, value, reason)
-
-
-def raise_business_rule_violation(rule: str, reason: str, context: dict = None):
-    """Raise a business rule violation exception."""
-    from .exceptions import BusinessRuleViolationError
-    raise BusinessRuleViolationError(rule, reason, context)
-
-
-def raise_concurrency_error(resource: str, reason: str):
-    """Raise a concurrency error exception."""
-    from .exceptions import ConcurrencyError
-    raise ConcurrencyError(resource, reason)
-
-
-def raise_rate_limit_exceeded(limit: int, window: str, retry_after: int):
-    """Raise a rate limit exceeded exception."""
-    from .exceptions import RateLimitExceededError
-    raise RateLimitExceededError(limit, window, retry_after)
-
-
-def raise_google_calendar_error(operation: str, reason: str, original_exception: Exception = None):
-    """Raise a Google Calendar error exception."""
-    from .exceptions import GoogleCalendarError
-    raise GoogleCalendarError(operation, reason, original_exception)
-
-
-def raise_azure_communication_error(operation: str, reason: str, original_exception: Exception = None):
-    """Raise an Azure Communication error exception."""
-    from .exceptions import AzureCommunicationError
-    raise AzureCommunicationError(operation, reason, original_exception)
-
-
-def raise_external_service_unavailable(service: str, reason: str):
-    """Raise an external service unavailable exception."""
-    from .exceptions import ExternalServiceUnavailableError
-    raise ExternalServiceUnavailableError(service, reason)
-
-
-def raise_maintenance_mode(maintenance_window: str, reason: str):
-    """Raise a maintenance mode exception."""
-    from .exceptions import MaintenanceModeError
-    raise MaintenanceModeError(maintenance_window, reason)
+# Removed unused exception helper functions - they were never called in the codebase
+# These functions were defined but never used, so they have been removed to clean up the code

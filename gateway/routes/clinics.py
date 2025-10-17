@@ -6,7 +6,7 @@ REST endpoints for clinic operations including creation, updates, and configurat
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.database import get_db
 from services.clinic_management import ClinicManagementService
@@ -17,7 +17,7 @@ from models.schemas import (
 )
 from models.models import Clinic
 
-router = APIRouter(prefix="/v1/clinics", tags=["clinic-management"])
+router = APIRouter(prefix="/clinics", tags=["clinic-management"])
 
 
 @router.post("/", response_model=ClinicResponse, status_code=status.HTTP_201_CREATED)
@@ -37,7 +37,7 @@ def create_clinic(
     try:
         service = ClinicManagementService(db)
         clinic = service.create_clinic(clinic_data)
-        return ClinicResponse.from_orm(clinic)
+        return ClinicResponse.model_validate(clinic)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -69,7 +69,7 @@ def list_clinics(
     try:
         service = ClinicManagementService(db)
         clinics = service.list_clinics(search)
-        return [ClinicResponse.from_orm(clinic) for clinic in clinics]
+        return [ClinicResponse.model_validate(clinic) for clinic in clinics]
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -101,7 +101,7 @@ def get_clinic(
                 detail=f"Clinic {clinic_id} not found"
             )
         
-        return ClinicResponse.from_orm(clinic)
+        return ClinicResponse.model_validate(clinic)
     except HTTPException:
         raise
     except Exception as e:
@@ -139,7 +139,7 @@ def update_clinic(
                 detail=f"Clinic {clinic_id} not found"
             )
         
-        return ClinicResponse.from_orm(clinic)
+        return ClinicResponse.model_validate(clinic)
     except HTTPException:
         raise
     except ValueError as e:
@@ -214,7 +214,7 @@ def get_clinic_license(
                 detail=f"License for clinic {clinic_id} not found"
             )
         
-        return ClinicLicenseResponse.from_orm(license)
+        return ClinicLicenseResponse.model_validate(license)
     except HTTPException:
         raise
     except Exception as e:

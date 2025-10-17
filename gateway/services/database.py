@@ -45,7 +45,6 @@ engine = create_engine(
     connect_args={
         "connect_timeout": settings.database.connect_timeout,  # Connection timeout in seconds
         "application_name": settings.database.application_name, # Identify connections in PostgreSQL
-        "options": f"-c default_transaction_isolation={settings.database.default_transaction_isolation}"
     },
     
     # Performance Configuration

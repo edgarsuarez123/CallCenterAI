@@ -268,12 +268,12 @@ def validate_azure_configuration():
         settings = get_settings()
         
         # Check Communication Services
-        if settings.azure.acs_connection_string.get_secret_value():
+        if settings.azure.communication.connection_string.get_secret_value():
             print_success("ACS Connection String is configured")
         else:
             print_warning("ACS Connection String is not configured")
         
-        if settings.azure.acs_phone_number:
+        if settings.azure.communication.phone_number:
             print_success("ACS Phone Number is configured")
         else:
             print_warning("ACS Phone Number is not configured")

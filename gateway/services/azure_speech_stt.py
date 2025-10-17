@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -188,7 +188,7 @@ class SpeechToTextService:
             # Initialize status
             self.recognition_status[call_id] = TranscriptionStatus.DETECTING_LANGUAGE
             self.transcription_stats[call_id] = {
-                "start_time": datetime.utcnow(),
+                "start_time": datetime.now(timezone.utc),
                 "total_transcriptions": 0,
                 "final_transcriptions": 0,
                 "language_detections": 0,
@@ -270,7 +270,7 @@ class SpeechToTextService:
                             self.primary_language
                         ),
                         is_final=False,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         duration_ms=0,  # Will be calculated from audio
                         offset_ms=0,    # Will be calculated from audio
                         result_id=f"partial_{int(time.time() * 1000)}"
@@ -323,7 +323,7 @@ class SpeechToTextService:
                             self.primary_language
                         ),
                         is_final=True,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(timezone.utc),
                         duration_ms=0,  # Will be calculated from audio
                         offset_ms=0,    # Will be calculated from audio
                         result_id=f"final_{int(time.time() * 1000)}"
@@ -488,7 +488,7 @@ class SpeechToTextService:
                             detected_language=detected_language,
                             confidence=confidence,
                             alternatives=[(self.primary_language, 1.0 - confidence)],
-                            timestamp=datetime.utcnow()
+                            timestamp=datetime.now(timezone.utc)
                         )
                         
                         self.logger.info(
@@ -693,7 +693,7 @@ class SpeechToTextService:
             return None
         
         stats = self.transcription_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.utcnow() - stats["start_time"]).total_seconds()
+        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         return stats
     
     def get_active_calls_count(self) -> int:
@@ -703,7 +703,7 @@ class SpeechToTextService:
     async def cleanup_expired_sessions(self):
         """Clean up expired recognition sessions."""
         try:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
             expired_calls = []
             
             for call_id, stats in self.transcription_stats.items():

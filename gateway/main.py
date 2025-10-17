@@ -5,6 +5,8 @@ from fastapi.staticfiles import StaticFiles
 import os
 import logging
 import time
+from collections import defaultdict
+from datetime import datetime, timedelta
 from services.database import Base, engine, get_database_health, test_database_connection, ConnectionPoolMonitor
 from services.structured_logging import (
     get_logger, RequestContextManager, log_performance, 
@@ -39,6 +41,35 @@ app.add_middleware(
     allow_methods=settings.security.cors_methods,
     allow_headers=settings.security.cors_headers,
 )
+
+# Simple in-memory rate limiting
+request_counts = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Simple rate limiting middleware - 100 requests per minute per IP."""
+    client_ip = request.client.host
+    current_time = datetime.now()
+    
+    # Clean old requests (older than 1 minute)
+    request_counts[client_ip] = [
+        req_time for req_time in request_counts[client_ip] 
+        if current_time - req_time < timedelta(minutes=1)
+    ]
+    
+    # Check if rate limit exceeded
+    if len(request_counts[client_ip]) >= 100:
+        logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Maximum 100 requests per minute."
+        )
+    
+    # Add current request
+    request_counts[client_ip].append(current_time)
+    
+    response = await call_next(request)
+    return response
 
 # Add request logging middleware
 @app.middleware("http")
@@ -260,6 +291,38 @@ def call_simulator():
 # Register exception handlers
 register_exception_handlers(app)
 
+# Health check endpoints
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint."""
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+@app.get("/health/detailed")
+async def detailed_health_check():
+    """Detailed health check with database and service status."""
+    try:
+        db_healthy = test_database_connection()
+        return {
+            "status": "healthy" if db_healthy else "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "database": "connected" if db_healthy else "disconnected",
+            "services": {
+                "database": db_healthy,
+                "background_jobs": "running"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e)
+        }
+
+@app.get("/ping")
+async def ping():
+    """Simple ping endpoint for load balancers."""
+    return {"pong": datetime.now().isoformat()}
+
 # Include all routers
-app.include_router(tokens_router)  # Existing tokenization endpoints
-app.include_router(api_router)     # New comprehensive API endpoints
+app.include_router(api_router)     # Comprehensive API endpoints

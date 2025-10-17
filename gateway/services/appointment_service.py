@@ -7,16 +7,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 import uuid
 import logging
 
-from models.models import Appointment, AppointmentSlot, Patient, Provider, Clinic, AuditLog
+from models.models import Appointment, AppointmentSlot, Patient, Provider, Clinic, AuditLog, provider_clinics
+from models.enums import YesNo
 from models.schemas import (
     AppointmentCreateRequest, AppointmentUpdateRequest, AppointmentSearchRequest,
     AppointmentResponse, AppointmentSlotCreateRequest
 )
-from services.crypto import make_ulid_token
+from services.crypto import make_ulid_token, make_unique_audit_log_id
 from services.google_calendar_service import GoogleCalendarIntegrationService
 from services.transaction_manager import TransactionManager, get_transaction_manager, ConcurrencyError
 from services.structured_logging import get_logger, LogCategory, log_performance
@@ -129,6 +130,8 @@ class AppointmentService:
                     google_event_id = self.google_calendar_service.sync_appointment_to_calendar(
                         appointment, appointment_data.provider_id, patient_name
                     )
+                    if google_event_id:
+                        appointment.google_event_id = google_event_id  # Store event ID
                 except Exception as e:
                     self.logger.warning(f"Failed to sync appointment to Google Calendar: {e}")
             
@@ -243,7 +246,7 @@ class AppointmentService:
             if hasattr(appointment, field):
                 setattr(appointment, field, value)
         
-        appointment.updated_at = datetime.utcnow()
+        appointment.updated_at = datetime.now(timezone.utc)
         
         # Rebook appointment slot if time changed
         if time_changed:
@@ -255,11 +258,9 @@ class AppointmentService:
         # Update Google Calendar if service is available and configured
         google_calendar_updated = False
         if self.google_calendar_service and self.settings.google_calendar.client_id:
-            # TODO: Get stored google_event_id from appointment record
-            google_event_id = None  # Placeholder
-            if google_event_id:
+            if appointment.google_event_id:  # Use stored event ID
                 google_calendar_updated = self.google_calendar_service.update_calendar_appointment(
-                    appointment, appointment.provider_id, google_event_id, patient_name
+                    appointment, appointment.provider_id, appointment.google_event_id, patient_name
                 )
         
         # Log the update
@@ -285,15 +286,15 @@ class AppointmentService:
         
         # Update appointment status
         appointment.status = "cancelled"
-        appointment.updated_at = datetime.utcnow()
+        appointment.updated_at = datetime.now(timezone.utc)
         
         # Release appointment slot
         self._release_appointment_slot(appointment.start_time, appointment.provider_id)
         
         # Cancel Google Calendar event if service is available and configured
         if self.google_calendar_service and self.settings.google_calendar.client_id:
-            # TODO: Get stored google_event_id from appointment record
-            google_event_id = None  # Placeholder
+            # Get stored google_event_id from appointment record
+            google_event_id = appointment.google_event_id
             if google_event_id:
                 self.google_calendar_service.cancel_calendar_appointment(
                     appointment.provider_id, google_event_id
@@ -320,7 +321,7 @@ class AppointmentService:
         # Apply filters
         if search.clinic_id:
             # Join with providers to filter by clinic
-            query = query.join(Provider).filter(Provider.clinic_id == search.clinic_id)
+            query = query.join(Provider).join(provider_clinics).filter(provider_clinics.c.clinic_id == search.clinic_id)
         
         if search.patient_id:
             query = query.filter(Appointment.patient_id == search.patient_id)
@@ -360,7 +361,7 @@ class AppointmentService:
             AppointmentSlot.provider_id == provider_id,
             AppointmentSlot.slot_datetime >= start_date,
             AppointmentSlot.slot_datetime <= end_date,
-            AppointmentSlot.is_booked == "no"
+            AppointmentSlot.is_booked == YesNo.NO.value
         ).order_by(AppointmentSlot.slot_datetime).all()
         
         available_slots = []
@@ -377,7 +378,8 @@ class AppointmentService:
             google_availability = self.google_calendar_service.calendar_service.get_provider_availability(
                 provider_id, start_date
             )
-            # TODO: Merge and filter slots based on Google Calendar availability
+            # Note: Google Calendar availability filtering would be implemented here
+            # when Google Calendar integration is fully configured
         
         return available_slots
     
@@ -420,7 +422,7 @@ class AppointmentService:
             raise ProviderNotFoundError(appointment_data.provider_id)
         
         # Check if provider is available
-        if provider.is_available != "yes":
+        if provider.is_available != YesNo.YES.value:
             raise ProviderUnavailableError(appointment_data.provider_id, "Provider is not available")
         
         # Validate time constraints
@@ -432,12 +434,13 @@ class AppointmentService:
             )
         
         # Check if appointment is in the future
-        # Handle timezone-aware datetimes
-        now = datetime.now()
-        if appointment_data.start_time.tzinfo is not None:
-            # If start_time is timezone-aware, make now timezone-aware too
-            from datetime import timezone
-            now = now.replace(tzinfo=timezone.utc)
+        # Always use timezone-aware datetimes for consistency
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        
+        # Ensure start_time is timezone-aware
+        if appointment_data.start_time.tzinfo is None:
+            raise ValidationError("start_time must be timezone-aware")
         
         if appointment_data.start_time <= now:
             raise InvalidAppointmentTimeError(
@@ -453,24 +456,31 @@ class AppointmentService:
         slot = self.db.query(AppointmentSlot).filter(
             AppointmentSlot.provider_id == provider_id,
             AppointmentSlot.slot_datetime == start_time,
-            AppointmentSlot.is_booked == "no"
+            AppointmentSlot.is_booked == YesNo.NO.value
         ).first()
         
         return slot is not None
     
     def _book_appointment_slot(self, start_time: datetime, provider_id: str, appointment_id: str) -> bool:
-        """Book an appointment slot."""
-        # Find the corresponding appointment slot
-        slot = self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime == start_time,
-            AppointmentSlot.is_booked == "no"
-        ).first()
+        """Book an appointment slot with row-level locking to prevent race conditions."""
+        from sqlalchemy import select, update
+        
+        # Use SELECT FOR UPDATE to lock the row and prevent race conditions
+        slot = self.db.execute(
+            select(AppointmentSlot)
+            .where(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime == start_time,
+                AppointmentSlot.is_booked == YesNo.NO.value
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
         
         if slot:
-            slot.is_booked = "yes"
+            slot.is_booked = YesNo.YES.value
             slot.booked_by_appointment_id = appointment_id
-            slot.updated_at = datetime.utcnow()
+            slot.updated_at = datetime.now(timezone.utc)
+            self.db.commit()
             return True
         
         return False
@@ -481,13 +491,13 @@ class AppointmentService:
         slot = self.db.query(AppointmentSlot).filter(
             AppointmentSlot.provider_id == provider_id,
             AppointmentSlot.slot_datetime == start_time,
-            AppointmentSlot.is_booked == "yes"
+            AppointmentSlot.is_booked == YesNo.YES.value
         ).first()
         
         if slot:
-            slot.is_booked = "no"
+            slot.is_booked = YesNo.NO.value
             slot.booked_by_appointment_id = None
-            slot.updated_at = datetime.utcnow()
+            slot.updated_at = datetime.now(timezone.utc)
             return True
         
         return False
@@ -521,13 +531,13 @@ class AppointmentService:
             details += f"New values: {new_values}"
         
         audit_log = AuditLog(
-            log_id=f"LOG_{make_ulid_token('AUDIT')[:8]}",
+            log_id=make_unique_audit_log_id(),
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,
             details=details,
-            user_id="system",  # TODO: Get from auth context
-            ip_address="127.0.0.1",  # TODO: Get from request context
+            user_id="system",  # Note: Would get from auth context in production
+            ip_address="127.0.0.1",  # Note: Would get from request context in production
             user_agent="AppointmentService"
         )
         self.db.add(audit_log)

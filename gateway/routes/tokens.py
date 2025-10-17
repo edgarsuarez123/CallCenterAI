@@ -8,7 +8,7 @@ from services.tokens import tokenize_text, hydrate_text
 # Ensure tables exist (idempotent)
 Base.metadata.create_all(bind=engine)
 
-router = APIRouter(prefix="/v1", tags=["phi-proxy"])
+router = APIRouter(prefix="/tokens", tags=["phi-proxy"])
 
 @router.post("/tokenize", response_model=TokenizeResponse)
 def post_tokenize(req: TokenizeRequest, db: Session = Depends(get_db)):

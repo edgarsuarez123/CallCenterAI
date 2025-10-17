@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import hashlib
 import hmac
 import os
@@ -26,9 +26,20 @@ def make_hmac_token(kind: str, normalized_value: str) -> str:
 
 def make_ulid_token(kind: str) -> str:
     """ULID-like sortable token for one-off items (names, appointment instances)."""
-    # Lightweight ULID: 26 base32 chars — here we’ll approximate with 20 hex chars for demo simplicity
+    # Lightweight ULID: 26 base32 chars � here we�ll approximate with 20 hex chars for demo simplicity
     rnd = secrets.token_hex(10).upper()
     return f"{to_token_class_name(kind)}_{rnd}"
+
+def make_unique_audit_log_id() -> str:
+    """Generate a truly unique audit log ID using timestamp + random."""
+    import time
+    import uuid
+    
+    # Use timestamp for uniqueness and UUID for additional randomness
+    timestamp = str(int(time.time() * 1000))  # milliseconds for better uniqueness
+    uuid_part = str(uuid.uuid4()).replace('-', '')[:8]  # First 8 chars of UUID
+    
+    return f"LOG_AUDIT_{timestamp}_{uuid_part}"
 
 # ---------- Normalizers ----------
 def normalize_phone(value: str) -> str:

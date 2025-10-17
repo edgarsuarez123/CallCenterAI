@@ -12,7 +12,7 @@ Critical for patient engagement and reducing no-shows.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -21,15 +21,15 @@ from models.models import (
     Reminder, ReminderLog, Appointment, Patient, Clinic, 
     Mapping, ClinicUsage
 )
-from services.azure_communication_service import get_acs_service, AzureCommunicationService
-from services.azure_speech_tts import get_tts_service, AzureTextToSpeechService
+from services.azure_communication_service import get_azure_communication_service, AzureCommunicationService
+from services.azure_speech_tts import get_text_to_speech_service, TextToSpeechService
 from services.bilingual_manager import get_bilingual_manager, BilingualManager
 from services.crypto import make_ulid_token
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.configuration import get_settings
 from services.exceptions import (
-    ReminderServiceError, AzureCommunicationError, AzureSpeechError,
-    ResourceNotFoundError, ValidationError
+    AzureCommunicationError, ExternalServiceUnavailableError,
+    ValidationError, CallCenterAIException
 )
 
 
@@ -48,8 +48,8 @@ class ReminderService:
     def __init__(self):
         self.logger = get_logger("reminder_service")
         self.settings = get_settings()
-        self.acs_service: AzureCommunicationService = get_acs_service()
-        self.tts_service: AzureTextToSpeechService = get_tts_service()
+        self.acs_service: AzureCommunicationService = get_azure_communication_service()
+        self.tts_service: TextToSpeechService = get_text_to_speech_service()
         self.bilingual_manager: BilingualManager = get_bilingual_manager()
         
         # Reminder call templates
@@ -94,7 +94,7 @@ class ReminderService:
             ).first()
             
             if not appointment:
-                raise ResourceNotFoundError(f"Appointment {appointment_id} not found")
+                raise CallCenterAIException(f"Appointment {appointment_id} not found")
             
             # Get clinic settings
             clinic = db.query(Clinic).join(Patient).filter(
@@ -103,12 +103,12 @@ class ReminderService:
             ).first()
             
             if not clinic:
-                raise ResourceNotFoundError(f"Clinic not found for appointment {appointment_id}")
+                raise CallCenterAIException(f"Clinic not found for appointment {appointment_id}")
             
             # Check if reminders are enabled for this clinic
             if clinic.reminders_enabled != 'yes':
                 self.logger.info(f"Reminders disabled for clinic {clinic.clinic_id}, skipping reminder for appointment {appointment_id}", LogCategory.REMINDER)
-                raise ReminderServiceError("Reminders are disabled for this clinic")
+                raise CallCenterAIException("Reminders are disabled for this clinic")
             
             # Calculate scheduled time
             if custom_scheduled_time:
@@ -153,9 +153,9 @@ class ReminderService:
         except Exception as e:
             db.rollback()
             self.logger.error(f"Failed to schedule reminder for appointment {appointment_id}: {e}", LogCategory.REMINDER, exception=e)
-            if isinstance(e, (ResourceNotFoundError, ValidationError, ReminderServiceError)):
+            if isinstance(e, (CallCenterAIException, ValidationError, CallCenterAIException)):
                 raise
-            raise ReminderServiceError(f"Failed to schedule reminder: {e}")
+            raise CallCenterAIException(f"Failed to schedule reminder: {e}")
     
     @log_performance("reminder_execution")
     async def execute_reminder(self, db: Session, reminder_id: str) -> Dict[str, Any]:
@@ -177,10 +177,10 @@ class ReminderService:
             ).first()
             
             if not reminder:
-                raise ResourceNotFoundError(f"Reminder {reminder_id} not found")
+                raise CallCenterAIException(f"Reminder {reminder_id} not found")
             
             if reminder.status not in ['scheduled', 'failed']:
-                raise ReminderServiceError(f"Reminder {reminder_id} is not in a valid state for execution (current: {reminder.status})")
+                raise CallCenterAIException(f"Reminder {reminder_id} is not in a valid state for execution (current: {reminder.status})")
             
             # Get appointment and patient data
             appointment = db.query(Appointment).join(Patient).filter(
@@ -189,7 +189,7 @@ class ReminderService:
             ).first()
             
             if not appointment:
-                raise ResourceNotFoundError(f"Appointment {reminder.appointment_id} not found")
+                raise CallCenterAIException(f"Appointment {reminder.appointment_id} not found")
             
             # Get patient's phone number
             phone_mapping = db.query(Mapping).filter(
@@ -198,7 +198,7 @@ class ReminderService:
             ).first()
             
             if not phone_mapping:
-                raise ResourceNotFoundError(f"Phone number not found for patient {appointment.patient_id}")
+                raise CallCenterAIException(f"Phone number not found for patient {appointment.patient_id}")
             
             patient_phone = phone_mapping.actual_value
             
@@ -282,9 +282,9 @@ class ReminderService:
         except Exception as e:
             db.rollback()
             self.logger.error(f"Failed to execute reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
-            if isinstance(e, (ResourceNotFoundError, ReminderServiceError)):
+            if isinstance(e, (CallCenterAIException, CallCenterAIException)):
                 raise
-            raise ReminderServiceError(f"Failed to execute reminder: {e}")
+            raise CallCenterAIException(f"Failed to execute reminder: {e}")
     
     async def _generate_reminder_message(self, appointment: Appointment, reminder_type: str) -> str:
         """
@@ -321,7 +321,7 @@ class ReminderService:
             audio_bytes = self.tts_service.synthesize_speech(message, "en-US")
             
             if not audio_bytes:
-                raise AzureSpeechError("Failed to generate TTS audio for reminder message")
+                raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
             
             # Make outbound call using ACS
             call_result = await self.acs_service.make_outbound_call(
@@ -351,7 +351,7 @@ class ReminderService:
                 'error_code': 'acs_error',
                 'error_message': e.message
             }
-        except AzureSpeechError as e:
+        except ExternalServiceUnavailableError as e:
             self.logger.error(f"TTS error for reminder call: {e.message}", LogCategory.REMINDER, exception=e)
             return {
                 'status': 'failed',
@@ -425,7 +425,7 @@ class ReminderService:
             
         except Exception as e:
             self.logger.error(f"Failed to get due reminders: {e}", LogCategory.REMINDER, exception=e)
-            raise ReminderServiceError(f"Failed to get due reminders: {e}")
+            raise CallCenterAIException(f"Failed to get due reminders: {e}")
     
     async def cancel_reminder(self, db: Session, reminder_id: str, reason: str = "cancelled_by_user") -> bool:
         """
@@ -438,7 +438,7 @@ class ReminderService:
             ).first()
             
             if not reminder:
-                raise ResourceNotFoundError(f"Reminder {reminder_id} not found")
+                raise CallCenterAIException(f"Reminder {reminder_id} not found")
             
             if reminder.status in ['completed', 'cancelled']:
                 self.logger.warning(f"Reminder {reminder_id} is already {reminder.status}", LogCategory.REMINDER)
@@ -456,9 +456,9 @@ class ReminderService:
         except Exception as e:
             db.rollback()
             self.logger.error(f"Failed to cancel reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
-            if isinstance(e, ResourceNotFoundError):
+            if isinstance(e, CallCenterAIException):
                 raise
-            raise ReminderServiceError(f"Failed to cancel reminder: {e}")
+            raise CallCenterAIException(f"Failed to cancel reminder: {e}")
 
 
 # Global instance for dependency injection
