@@ -32,13 +32,34 @@ target_metadata = Base.metadata
 
 
 def get_database_url():
-    """Get database URL from environment variables or config."""
-    # Try environment variables first (for production)
-    db_user = os.getenv("POSTGRES_USER", "callcenterai")
-    db_pass = os.getenv("POSTGRES_PASSWORD", "ChangeThisNow_!")
-    db_name = os.getenv("POSTGRES_DB", "callcenterai")
-    db_host = os.getenv("POSTGRES_HOST", "postgres")
-    db_port = os.getenv("POSTGRES_PORT", "5432")
+    """Get database URL from environment variables with Azure support."""
+    # Try DATABASE_URL first (for Azure and production)
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return database_url
+    
+    # Try DB_* variables (Azure naming convention)
+    db_host = os.getenv("DB_HOST")
+    db_port = os.getenv("DB_PORT")
+    db_name = os.getenv("DB_NAME")
+    db_user = os.getenv("DB_USER")
+    db_pass = os.getenv("DB_PASSWORD")
+    
+    # Fall back to POSTGRES_* variables (local Docker naming)
+    if not db_host:
+        db_host = os.getenv("POSTGRES_HOST", "postgres")
+    if not db_port:
+        db_port = os.getenv("POSTGRES_PORT", "5432")
+    if not db_name:
+        db_name = os.getenv("POSTGRES_DB", "callcenterai")
+    if not db_user:
+        db_user = os.getenv("POSTGRES_USER", "callcenterai")
+    if not db_pass:
+        db_pass = os.getenv("POSTGRES_PASSWORD", "ChangeThisNow_!")
+    
+    # Add SSL mode for Azure PostgreSQL
+    if 'azure.com' in db_host or 'postgres.database.azure.com' in db_host:
+        return f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}?sslmode=require"
     
     return f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
 
