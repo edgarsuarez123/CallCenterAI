@@ -1,11 +1,13 @@
 import os
 import logging
+import time
 from typing import Generator
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.engine import Engine
 from contextlib import contextmanager
+from urllib.parse import quote_plus
 from services.configuration import get_settings
 
 # Configure logging
@@ -28,7 +30,28 @@ POOL_TIMEOUT = settings.database.pool_timeout
 POOL_RECYCLE = settings.database.pool_recycle
 POOL_PRE_PING = settings.database.pool_pre_ping
 
-DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+# Auto-detect SSL requirement based on database host
+is_azure = "azure.com" in DB_HOST or "database.windows.net" in DB_HOST
+is_local = DB_HOST in ["localhost", "postgres", "127.0.0.1", "db"]
+
+if is_azure:
+    ssl_mode = "require"
+    logger.info(f"Detected Azure database ({DB_HOST}), SSL required")
+elif is_local:
+    ssl_mode = "disable"
+    logger.info(f"Detected local database ({DB_HOST}), SSL disabled")
+else:
+    # Default to prefer (tries SSL, falls back to non-SSL)
+    ssl_mode = "prefer"
+    logger.info(f"Unknown database type ({DB_HOST}), using SSL prefer mode")
+
+# URL encode password to handle special characters
+DB_PASS_ENCODED = quote_plus(DB_PASS)
+
+# Build connection string with appropriate SSL mode
+DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS_ENCODED}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={ssl_mode}"
+
+logger.info(f"Database connection: postgresql://{DB_USER}:***@{DB_HOST}:{DB_PORT}/{DB_NAME} (SSL: {ssl_mode})")
 
 # Create engine with comprehensive connection pooling
 engine = create_engine(
@@ -114,7 +137,8 @@ def receive_connect(dbapi_connection, connection_record):
 @event.listens_for(engine, "checkout")
 def receive_checkout(dbapi_connection, connection_record, connection_proxy):
     """Log when connections are checked out from pool."""
-    logger.debug(f"Connection checked out from pool")
+    pool_status = ConnectionPoolMonitor.get_pool_status()
+    logger.debug(f"Connection checked out from pool - Pool utilization: {pool_status['utilization_percent']}%")
 
 @event.listens_for(engine, "checkin")
 def receive_checkin(dbapi_connection, connection_record):
@@ -144,6 +168,28 @@ def get_db() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+
+def get_db_with_retry(max_retries: int = 3) -> Generator[Session, None, None]:
+    """
+    Get database session with retry logic for connection failures.
+    
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+    
+    Yields:
+        Database session with automatic retry on connection failures
+    """
+    for attempt in range(max_retries):
+        try:
+            db = SessionLocal()
+            yield db
+            return
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Database connection failed after {max_retries} attempts: {e}")
+                raise
+            logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
+            time.sleep(1)  # Wait before retry
 
 @contextmanager
 def get_db_session():
@@ -202,7 +248,9 @@ def get_database_health() -> dict:
                 "max_overflow": MAX_OVERFLOW,
                 "pool_timeout": POOL_TIMEOUT,
                 "pool_recycle": POOL_RECYCLE,
-                "pool_pre_ping": POOL_PRE_PING
+                "pool_pre_ping": POOL_PRE_PING,
+                "ssl_mode": ssl_mode,
+                "database_host": DB_HOST
             }
         }
     except Exception as e:
