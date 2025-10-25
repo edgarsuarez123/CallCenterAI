@@ -6,13 +6,18 @@ appointment booking, and Google Calendar integration.
 
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 import logging
 import re
 
 from models.models import Call, Patient, Provider, AppointmentSlot, Clinic
 from models.enums import YesNo
 from models.enums import CallStatus
+from services.configuration import get_settings
+
+# Get configuration
+settings = get_settings()
+
 from models.call_flow_models import (
     CallFlowState, CallFlowResponse, CallFlowContext, 
     PatientIdentificationResult, ProviderOption, TimeSlotOption, DateOption,
@@ -49,9 +54,9 @@ class CallFlowService:
         # Initialize Google Calendar service
         google_calendar_service = None
         try:
-            client_id = os.getenv('GOOGLE_CLIENT_ID')
-            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            client_id = settings.google_calendar.client_id
+            client_secret = settings.google_calendar.client_secret.get_secret_value()
+            redirect_uri = settings.google_calendar.redirect_uri
             
             if client_id and client_secret:
                 config = GoogleCalendarConfig(

@@ -6,7 +6,7 @@ Handles all business logic for provider operations including creation, schedulin
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uuid
 
 from models.models import Provider, AppointmentSlot, Clinic, AuditLog
@@ -16,6 +16,7 @@ from models.schemas import (
     ProviderResponse, AppointmentSlotCreateRequest
 )
 from services.crypto import make_ulid_token, make_unique_audit_log_id
+from services.auth_context import get_request_context
 
 
 class ProviderManagementService:
@@ -449,14 +450,15 @@ class ProviderManagementService:
         if new_values:
             details += f"New values: {new_values}"
         
+        ctx = get_request_context()
         audit_log = AuditLog(
             log_id=make_unique_audit_log_id(),
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,
             details=details,
-            user_id="system",  # TODO: Get from auth context
-            ip_address="127.0.0.1",  # TODO: Get from request context
+            user_id=ctx.user_id,
+            ip_address=ctx.ip_address,
             user_agent="ProviderManagementService"
         )
         self.db.add(audit_log)

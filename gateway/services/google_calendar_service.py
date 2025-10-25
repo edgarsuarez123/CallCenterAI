@@ -9,6 +9,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from services.configuration import get_settings
+
+# Get configuration
+settings = get_settings()
 
 # Google Calendar API imports
 try:
@@ -165,7 +169,7 @@ class GoogleCalendarService:
             provider_email = self._get_provider_email(provider_id)
             
             # Prepare event data
-            hipaa_compliant = os.getenv('GOOGLE_WORKSPACE_HIPAA_COMPLIANT', 'false').lower() == 'true'
+            hipaa_compliant = settings.google_calendar.hipaa_compliant
             
             if hipaa_compliant and patient_name:
                 # With BAA: Show patient name in summary
@@ -413,7 +417,9 @@ class GoogleCalendarService:
             description += f"Phone: {clinic_info['phone_number']}\n"
         
         # HIPAA-compliant patient identification
-        hipaa_compliant = os.getenv('GOOGLE_WORKSPACE_HIPAA_COMPLIANT', 'false').lower() == 'true'
+        from services.configuration import get_settings
+        settings = get_settings()
+        hipaa_compliant = settings.google_calendar.hipaa_compliant
         
         if hipaa_compliant and patient_name:
             # With Google Workspace BAA: Show patient name

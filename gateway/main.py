@@ -71,6 +71,22 @@ async def rate_limit_middleware(request: Request, call_next):
     response = await call_next(request)
     return response
 
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Set request context for audit logging."""
+    from services.auth_context import set_request_context
+    import uuid
+    
+    request_id = str(uuid.uuid4())
+    client_ip = request.client.host if request.client else "unknown"
+    user_id = "anonymous"  # TODO: Extract from JWT token when auth is implemented
+    
+    set_request_context(user_id=user_id, ip_address=client_ip, request_id=request_id)
+    
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
 # Add request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

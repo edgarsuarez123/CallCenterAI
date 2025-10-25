@@ -152,7 +152,7 @@ class TransactionManager:
             except (DeadlockError, LockTimeoutError, ConcurrencyError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
-                    delay = self.deadlock_retry_delay * (2 ** attempt)  # Exponential backoff
+                    delay = min(self.deadlock_retry_delay * (2 ** attempt), 60)  # Cap at 60 seconds
                     logger.warning(f"Retry {attempt + 1}/{self.max_retries} after {e.__class__.__name__}: {e}")
                     time.sleep(delay)
                 else:

@@ -115,6 +115,30 @@ class SecurityConfig(BaseSettings):
     )
 
 
+class CryptoConfig(BaseSettings):
+    """Cryptographic keys configuration."""
+    clinic_token_hmac_key_base64: SecretStr = Field(..., description="HMAC key for clinic tokens (base64)")
+    aes_gcm_key_base64: SecretStr = Field(..., description="AES-GCM key for encryption (base64)")
+    
+    @field_validator('clinic_token_hmac_key_base64', 'aes_gcm_key_base64')
+    @classmethod
+    def validate_base64_key(cls, v):
+        if not v:
+            raise ValueError("Crypto key is required")
+        try:
+            decoded = base64.b64decode(v.get_secret_value())
+            if len(decoded) == 0:
+                raise ValueError("Crypto key cannot be empty")
+        except Exception as e:
+            raise ValueError(f"Invalid base64 key: {e}")
+        return v
+    
+    model_config = SettingsConfigDict(
+        env_prefix="",  # No prefix, use exact names
+        case_sensitive=False  # Allow lowercase env vars
+    )
+
+
 class LoggingConfig(BaseSettings):
     """Logging configuration with validation."""
     
@@ -130,8 +154,8 @@ class LoggingConfig(BaseSettings):
         description="Log format (json or text)"
     )
     
-    # File logging
-    file_enabled: bool = Field(default=True, description="Enable file logging")
+    # File logging (disabled for Azure Log Analytics)
+    file_enabled: bool = Field(default=False, description="Enable file logging")
     file_path: str = Field(default="logs/app.log", description="Log file path")
     file_max_size_mb: int = Field(default=100, ge=1, le=1000, description="Max log file size in MB")
     file_backup_count: int = Field(default=5, ge=1, le=20, description="Number of backup files")
@@ -158,11 +182,12 @@ class GoogleCalendarConfig(BaseSettings):
     
     # OAuth settings
     client_id: str = Field(default="182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com", description="Google OAuth client ID")
-    client_secret: SecretStr = Field(..., description="Google OAuth client secret")
-    redirect_uri: str = Field(default="http://localhost:8000/auth/callback", description="Google OAuth redirect URI")
+    client_secret: SecretStr = Field(default="", description="Google OAuth client secret")
+    redirect_uri: str = Field(default="http://localhost:8443/auth/callback", description="Google OAuth redirect URI")
     
     # API settings
-    api_key: SecretStr = Field(..., description="Google Calendar API key")
+    api_key: SecretStr = Field(default="", description="Google Calendar API key")
+    hipaa_compliant: bool = Field(default=False, description="HIPAA compliant workspace")
     scopes: List[str] = Field(
         default=["https://www.googleapis.com/auth/calendar"],
         description="Google Calendar API scopes"
@@ -416,7 +441,7 @@ class ApplicationConfig(BaseSettings):
     
     # Server settings
     host: str = Field(default="0.0.0.0", description="Server host")
-    port: int = Field(default=8000, ge=1, le=65535, description="Server port")
+    port: int = Field(default=8443, ge=1, le=65535, description="Server port")
     workers: int = Field(default=1, ge=1, le=32, description="Number of worker processes")
     
     # API settings
@@ -436,6 +461,7 @@ class ApplicationConfig(BaseSettings):
     # Sub-configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    crypto: CryptoConfig = Field(default_factory=CryptoConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     google_calendar: GoogleCalendarConfig = Field(default_factory=GoogleCalendarConfig)
     azure: AzureConfig = Field(default_factory=AzureConfig)
@@ -614,6 +640,48 @@ def validate_configuration() -> Dict[str, Any]:
         
         if settings.database.pool_size > 20 and settings.environment == "development":
             validation_results["warnings"].append("Large pool size for development environment")
+        
+        # Add checks for crypto keys:
+        try:
+            if not settings.crypto.clinic_token_hmac_key_base64:
+                validation_results["errors"].append("Clinic token HMAC key not configured")
+                validation_results["valid"] = False
+            
+            if not settings.crypto.aes_gcm_key_base64:
+                validation_results["errors"].append("AES-GCM key not configured")
+                validation_results["valid"] = False
+        except Exception as e:
+            validation_results["errors"].append(f"Crypto configuration error: {e}")
+            validation_results["valid"] = False
+
+        # Add checks for Google Calendar (if client_id is set, require secret):
+        if settings.google_calendar.client_id:
+            if not settings.google_calendar.client_secret.get_secret_value():
+                validation_results["warnings"].append("Google Calendar client ID set but client secret missing")
+            if not settings.google_calendar.api_key.get_secret_value():
+                validation_results["warnings"].append("Google Calendar client ID set but API key missing")
+
+        # Add checks for Azure services:
+        if not settings.azure.communication.webhook_secret.get_secret_value():
+            validation_results["warnings"].append("ACS webhook secret not configured - webhooks will fail")
+
+        # Check for test/placeholder values in production:
+        if settings.environment == "production":
+            if "test" in settings.azure.communication.connection_string.get_secret_value().lower():
+                validation_results["errors"].append("Test Azure Communication Services connection string in production")
+                validation_results["valid"] = False
+            
+            if settings.azure.openai.api_key.get_secret_value() == "test_key":
+                validation_results["errors"].append("Test Azure OpenAI API key in production")
+                validation_results["valid"] = False
+            
+            if "your_" in settings.google_calendar.api_key.get_secret_value().lower():
+                validation_results["warnings"].append("Placeholder Google API key detected")
+
+        # CORS validation:
+        if settings.environment == "production" and "*" in settings.security.cors_origins:
+            validation_results["errors"].append("Wildcard CORS origins not allowed in production")
+            validation_results["valid"] = False
         
         logger.info("Configuration validation completed", extra=validation_results)
         

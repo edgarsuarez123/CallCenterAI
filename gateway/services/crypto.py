@@ -7,12 +7,11 @@ from typing import Tuple
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# Load keys from env; in Azure Mode, load from Key Vault (CMK) or managed identity
-_CLINIC_HMAC_KEY = base64.b64decode(os.getenv("CLINIC_TOKEN_HMAC_KEY_BASE64", ""))
-_AES_KEY = base64.b64decode(os.getenv("AES_GCM_KEY_BASE64", ""))
-
-if not _CLINIC_HMAC_KEY or not _AES_KEY:
-    raise RuntimeError("Missing crypto keys. Set CLINIC_TOKEN_HMAC_KEY_BASE64 and AES_GCM_KEY_BASE64")
+# Load keys from configuration system
+from services.configuration import get_settings
+settings = get_settings()
+_CLINIC_HMAC_KEY = base64.b64decode(settings.crypto.clinic_token_hmac_key_base64.get_secret_value())
+_AES_KEY = base64.b64decode(settings.crypto.aes_gcm_key_base64.get_secret_value())
 
 # ---------- Token classes ----------
 def to_token_class_name(kind: str) -> str:

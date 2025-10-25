@@ -211,21 +211,33 @@ def get_db_session():
     finally:
         db.close()
 
-def test_database_connection() -> bool:
-    """Test database connectivity and pool health."""
-    try:
-        with get_db_session() as db:
-            # Simple query to test connection
-            result = db.execute("SELECT 1").scalar()
-            if result == 1:
-                logger.info("Database connection test successful")
-                return True
-            else:
-                logger.error("Database connection test failed: unexpected result")
-                return False
-    except Exception as e:
-        logger.error(f"Database connection test failed: {e}")
-        return False
+def test_database_connection(max_retries: int = 5) -> bool:
+    """Test database connection with retry limit."""
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            with get_db_session() as db:
+                # Simple query to test connection
+                result = db.execute("SELECT 1").scalar()
+                if result == 1:
+                    logger.info("Database connection test successful")
+                    return True
+                else:
+                    logger.error("Database connection test failed: unexpected result")
+                    return False
+        except Exception as e:
+            retry_count += 1
+            last_error = e
+            if retry_count >= max_retries:
+                logger.error(f"Database connection failed after {max_retries} retries: {e}")
+                raise
+            wait_time = min(2 ** retry_count, 30)  # Exponential backoff with 30s cap
+            logger.warning(f"Database connection attempt {retry_count} failed, retrying in {wait_time}s...")
+            time.sleep(wait_time)
+    
+    return False
 
 def get_database_health() -> dict:
     """Get comprehensive database health information."""

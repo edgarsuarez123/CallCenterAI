@@ -23,36 +23,31 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 def get_database_url():
-    """Get database URL from environment variables with Azure support."""
-    # Try DATABASE_URL first (for Azure and production)
+    """Get database URL from configuration system."""
+    # Check for explicit DATABASE_URL first
     database_url = os.getenv('DATABASE_URL')
     if database_url:
         return database_url
     
-    # Try DB_* variables (Azure naming convention)
-    db_host = os.getenv('DB_HOST')
-    db_port = os.getenv('DB_PORT')
-    db_name = os.getenv('DB_NAME')
-    db_user = os.getenv('DB_USER')
-    db_password = os.getenv('DB_PASSWORD')
+    # Use configuration system
+    from services.configuration import get_settings
+    from urllib.parse import quote_plus
     
-    # Fall back to POSTGRES_* variables (local Docker naming)
-    if not db_host:
-        db_host = os.getenv('POSTGRES_HOST', 'postgres')
-    if not db_port:
-        db_port = os.getenv('POSTGRES_PORT', '5432')
-    if not db_name:
-        db_name = os.getenv('POSTGRES_DB', 'callcenterai')
-    if not db_user:
-        db_user = os.getenv('POSTGRES_USER', 'callcenterai')
-    if not db_password:
-        db_password = os.getenv('POSTGRES_PASSWORD', 'ChangeThisNow_!')
+    settings = get_settings()
+    db_host = settings.database.host
+    db_port = settings.database.port
+    db_name = settings.database.name
+    db_user = settings.database.user
+    db_password = settings.database.password.get_secret_value()
     
-    # Add SSL mode for Azure PostgreSQL
-    if 'azure.com' in db_host or 'postgres.database.azure.com' in db_host:
-        return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
+    # URL encode password
+    db_password_encoded = quote_plus(db_password)
     
-    return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    # Auto-detect SSL
+    is_azure = "azure.com" in db_host or "database.windows.net" in db_host
+    ssl_mode = "require" if is_azure else "disable"
+    
+    return f"postgresql://{db_user}:{db_password_encoded}@{db_host}:{db_port}/{db_name}?sslmode={ssl_mode}"
 
 def run_alembic_command(command, *args):
     """Run an alembic command with proper environment setup."""
@@ -62,19 +57,13 @@ def run_alembic_command(command, *args):
     database_url = get_database_url()
     
     # Set up environment variables for database connection
-    # Support both DB_* and POSTGRES_* naming conventions
     env.update({
         'DATABASE_URL': database_url,
-        'POSTGRES_USER': os.getenv('DB_USER', os.getenv('POSTGRES_USER', 'callcenterai')),
-        'POSTGRES_PASSWORD': os.getenv('DB_PASSWORD', os.getenv('POSTGRES_PASSWORD', 'ChangeThisNow_!')),
-        'POSTGRES_DB': os.getenv('DB_NAME', os.getenv('POSTGRES_DB', 'callcenterai')),
-        'POSTGRES_HOST': os.getenv('DB_HOST', os.getenv('POSTGRES_HOST', 'postgres')),
-        'POSTGRES_PORT': os.getenv('DB_PORT', os.getenv('POSTGRES_PORT', '5432')),
     })
     
     cmd = ['alembic'] + [command] + list(args)
     print(f"Running: {' '.join(cmd)}")
-    print(f"Using database: {env['POSTGRES_HOST']}:{env['POSTGRES_PORT']}/{env['POSTGRES_DB']}")
+    print(f"Using database: {database_url.split('@')[1].split('/')[0]}")
     
     try:
         result = subprocess.run(cmd, env=env, check=True, capture_output=True, text=True)

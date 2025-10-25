@@ -172,10 +172,12 @@ class StructuredLogger:
         console_handler.setFormatter(StructuredFormatter())
         self.logger.addHandler(console_handler)
         
-        # File handler for persistent logs
-        file_handler = logging.FileHandler('/app/logs/callcenter_ai.log')
-        file_handler.setFormatter(StructuredFormatter())
-        self.logger.addHandler(file_handler)
+        # File handler for persistent logs (only if enabled in config)
+        settings = get_settings()
+        if settings.logging.file_enabled:
+            file_handler = logging.FileHandler('/app/logs/callcenter_ai.log')
+            file_handler.setFormatter(StructuredFormatter())
+            self.logger.addHandler(file_handler)
     
     def _detect_and_mask_phi(self, message: str) -> str:
         """

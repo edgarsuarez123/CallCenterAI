@@ -18,6 +18,9 @@ from services.google_calendar_service import (
 )
 from services.configuration import get_settings
 from services.structured_logging import get_logger, LogCategory
+
+# Get configuration
+settings = get_settings()
 from models.schemas import SuccessResponse, ErrorResponse
 
 # Initialize logger
@@ -60,9 +63,9 @@ def start_oauth_flow():
     """
     try:
         # Get environment variables directly
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -174,9 +177,9 @@ def authenticate_provider(
     """
     try:
         # Get environment variables directly
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -250,9 +253,9 @@ def get_provider_availability(
     try:
         # Initialize Google Calendar service
         # Get credentials from environment variables
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -307,9 +310,9 @@ def sync_appointment_slots(
     try:
         # Initialize Google Calendar service
         # Get credentials from environment variables
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -380,9 +383,9 @@ def create_calendar_event(
         
         # Initialize Google Calendar service
         # Get credentials from environment variables
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -462,9 +465,9 @@ def update_calendar_event(
         
         # Initialize Google Calendar service
         # Get credentials from environment variables
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -527,9 +530,9 @@ def delete_calendar_event(
     try:
         # Initialize Google Calendar service
         # Get credentials from environment variables
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(
@@ -587,9 +590,9 @@ def get_provider_calendar_status(
     """
     try:
         # Get environment variables directly
-        client_id = os.getenv('GOOGLE_CLIENT_ID')
-        client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-        redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
         
         if not client_id or not client_secret:
             raise HTTPException(

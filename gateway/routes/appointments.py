@@ -14,7 +14,11 @@ import re
 from services.database import get_db
 from services.appointment_service import AppointmentService
 from services.google_calendar_service import GoogleCalendarIntegrationService, GoogleCalendarConfig
+from services.configuration import get_settings
 from services.structured_logging import get_logger
+
+# Get configuration
+settings = get_settings()
 
 # Initialize logger
 logger = get_logger("appointments")
@@ -62,9 +66,9 @@ async def create_appointment(
         google_calendar_service = None
         try:
             # Get credentials from environment variables
-            client_id = os.getenv('GOOGLE_CLIENT_ID')
-            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            client_id = settings.google_calendar.client_id
+            client_secret = settings.google_calendar.client_secret.get_secret_value()
+            redirect_uri = settings.google_calendar.redirect_uri
             
             if client_id and client_secret:
                 config = GoogleCalendarConfig(
@@ -195,9 +199,9 @@ def update_appointment(
         google_calendar_service = None
         try:
             # Get credentials from environment variables
-            client_id = os.getenv('GOOGLE_CLIENT_ID')
-            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            client_id = settings.google_calendar.client_id
+            client_secret = settings.google_calendar.client_secret.get_secret_value()
+            redirect_uri = settings.google_calendar.redirect_uri
             
             if client_id and client_secret:
                 config = GoogleCalendarConfig(
@@ -262,9 +266,9 @@ def cancel_appointment(
         google_calendar_service = None
         try:
             # Get credentials from environment variables
-            client_id = os.getenv('GOOGLE_CLIENT_ID')
-            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-            redirect_uri = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8443/api/v1/google-calendar/oauth/callback')
+            client_id = settings.google_calendar.client_id
+            client_secret = settings.google_calendar.client_secret.get_secret_value()
+            redirect_uri = settings.google_calendar.redirect_uri
             
             if client_id and client_secret:
                 config = GoogleCalendarConfig(
