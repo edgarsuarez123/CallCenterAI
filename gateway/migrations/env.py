@@ -10,7 +10,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Import all models to ensure they're registered with SQLAlchemy
 from models.models import Base
-from models.call_flow_models import *  # Import all call flow models
+from models.call_flow_models import (
+    CallSession, CallTranscript, CallIntent, CallEntity,
+    CallSummary, CallRecording, CallMetrics, CallFeedback
+)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -32,36 +35,34 @@ target_metadata = Base.metadata
 
 
 def get_database_url():
-    """Get database URL from environment variables with Azure support."""
-    # Try DATABASE_URL first (for Azure and production)
+    """Get database URL for Alembic migrations."""
+    # Check for explicit DATABASE_URL first
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         return database_url
     
-    # Try DB_* variables (Azure naming convention)
-    db_host = os.getenv("DB_HOST")
-    db_port = os.getenv("DB_PORT")
-    db_name = os.getenv("DB_NAME")
-    db_user = os.getenv("DB_USER")
-    db_pass = os.getenv("DB_PASSWORD")
-    
-    # Fall back to POSTGRES_* variables (local Docker naming)
-    if not db_host:
-        db_host = os.getenv("POSTGRES_HOST", "postgres")
-    if not db_port:
-        db_port = os.getenv("POSTGRES_PORT", "5432")
-    if not db_name:
-        db_name = os.getenv("POSTGRES_DB", "callcenterai")
-    if not db_user:
-        db_user = os.getenv("POSTGRES_USER", "callcenterai")
-    if not db_pass:
-        db_pass = os.getenv("POSTGRES_PASSWORD", "ChangeThisNow_!")
-    
-    # Add SSL mode for Azure PostgreSQL
-    if 'azure.com' in db_host or 'postgres.database.azure.com' in db_host:
-        return f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}?sslmode=require"
-    
-    return f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+    # Use configuration system
+    try:
+        from services.configuration import get_settings
+        from urllib.parse import quote_plus
+        
+        settings = get_settings()
+        db_host = settings.database.host
+        db_port = settings.database.port
+        db_name = settings.database.name
+        db_user = settings.database.user
+        db_pass = settings.database.password.get_secret_value()
+        
+        # URL encode password
+        db_pass_encoded = quote_plus(db_pass)
+        
+        # Auto-detect SSL
+        is_azure = "azure.com" in db_host
+        ssl_mode = "require" if is_azure else "disable"
+        
+        return f"postgresql://{db_user}:{db_pass_encoded}@{db_host}:{db_port}/{db_name}?sslmode={ssl_mode}"
+    except Exception as e:
+        raise RuntimeError(f"Failed to get database URL from configuration: {e}")
 
 
 def run_migrations_offline() -> None:

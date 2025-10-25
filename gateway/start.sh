@@ -26,4 +26,4 @@ fi
 
 # Start the application
 echo "Starting FastAPI application..."
-exec uvicorn main:app --host 0.0.0.0 --port 8443
+exec uvicorn main:app --host "$APP_HOST" --port "$APP_PORT"
