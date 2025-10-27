@@ -79,15 +79,8 @@ async def create_appointment(
                 google_calendar_service = GoogleCalendarIntegrationService(
                     GoogleCalendarService(config, db)
                 )
-        except ImportError:
-            # Google Calendar API not available
-            pass
-        except Exception as e:
-            # Log Google Calendar service initialization failure but don't fail the appointment update
-            logger.warning(f"Failed to initialize Google Calendar service: {e}")
-            google_calendar_service = None
-        except Exception as e:
-            # Log Google Calendar service initialization failure but don't fail the appointment creation
+        except (ImportError, Exception) as e:
+            # Google Calendar API not available or initialization failed
             logger.warning(f"Failed to initialize Google Calendar service: {e}")
             google_calendar_service = None
         
@@ -459,9 +452,9 @@ def get_appointment_statistics(
         
         # Set default date range if not provided
         if not start_date:
-            start_date = datetime.now() - timedelta(days=30)
+            start_date = datetime.now(timezone.utc) - timedelta(days=30)
         if not end_date:
-            end_date = datetime.now() + timedelta(days=30)
+            end_date = datetime.now(timezone.utc) + timedelta(days=30)
         
         # Create search request
         search = AppointmentSearchRequest(
@@ -498,7 +491,7 @@ def get_appointment_statistics(
                 "appointments_by_status": status_counts,
                 "appointments_by_provider": provider_counts
             },
-            "generated_at": datetime.now()
+            "generated_at": datetime.now(timezone.utc)
         }
     except Exception as e:
         raise HTTPException(

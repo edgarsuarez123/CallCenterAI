@@ -5,9 +5,6 @@ from services.database import get_db, Base, engine
 from models.schemas import TokenizeRequest, TokenizeResponse, HydrateRequest, HydrateResponse
 from services.tokens import tokenize_text, hydrate_text
 
-# Ensure tables exist (idempotent)
-Base.metadata.create_all(bind=engine)
-
 router = APIRouter(prefix="/tokens", tags=["phi-proxy"])
 
 @router.post("/tokenize", response_model=TokenizeResponse)

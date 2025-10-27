@@ -122,7 +122,7 @@ def create_demo_appointment_slots(db: Session, providers: list, clinic_id: str):
     provider_service = ProviderManagementService(db)
     
     # Create slots for the entire year (365 days)
-    start_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    start_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     end_date = start_date + timedelta(days=365)  # One year from tomorrow
     
     total_slots_created = 0

@@ -30,8 +30,7 @@ from services.google_calendar_service import GoogleCalendarIntegrationService, G
 from services.natural_language_processor import NaturalLanguageProcessor, IntentType, ExtractedEntities
 from services.tokens import tokenize_text
 from services.crypto import make_ulid_token
-from services.response_cache import get_response_cache_service
-from services.response_templates import get_response_templates
+from services.response_router import get_response_router, ResponseResult
 from models.schemas import AppointmentCreateRequest
 from services.call_store import store_call, get_call, remove_call, list_calls
 import os
@@ -94,6 +93,7 @@ class CallFlowService:
             call = Call(
                 call_sid=call_sid,
                 call_id=f"CALL_{make_ulid_token('CALL')[:12]}",
+                clinic_id=clinic_id,
                 caller_phone_token=self._tokenize_phone(caller_phone),
                 status=CallStatus.ACTIVE.value
             )
@@ -134,6 +134,125 @@ class CallFlowService:
             self.logger.error(f"Failed to initialize call {call_sid}: {str(e)}")
             raise ValueError(f"Failed to initialize call: {str(e)}")
     
+    async def process_user_input_with_router(self, call_id: str, user_input: str, db_session: Session) -> ResponseResult:
+        """
+        Process user input with intelligent response routing.
+        
+        Args:
+            call_id: Call session ID
+            user_input: User's speech or text input
+            db_session: Database session
+            
+        Returns:
+            ResponseResult: Contains response text, scripted flag, and metadata
+        """
+        try:
+            # Get intent from NLP
+            intent_result = await self.nlp.classify_intent(user_input)
+            
+            # Get call context from call store
+            call_context = get_call(call_id)
+            if not call_context:
+                # Create basic call context if not found
+                from services.call_orchestrator import CallContext
+                from services.bilingual_manager import LanguageCode
+                call_context = CallContext(
+                    call_id=call_id,
+                    clinic_id="default",  # Will be updated from database
+                    language=LanguageCode.ENGLISH,
+                    conversation_history=[],
+                    current_state=None
+                )
+            
+            # Get clinic configuration
+            clinic_config = await self._load_clinic_config(call_context.clinic_id, db_session)
+            
+            # Use response router to determine response type
+            response_router = get_response_router()
+            response_result = await response_router.get_response(
+                user_input,
+                intent_result.intent,
+                call_context,
+                clinic_config
+            )
+            
+            # Log token usage
+            if response_result.is_scripted:
+                self.logger.info(f"Used scripted response (0 tokens) for pattern: {response_result.template_key}")
+            else:
+                self.logger.info(f"Used AI response ({response_result.tokens_used} tokens)")
+            
+            return response_result
+            
+        except Exception as e:
+            self.logger.error(f"Error processing user input with router: {e}")
+            # Fallback to generic error message (scripted)
+            return ResponseResult(
+                text="I'm sorry, I didn't understand that. Could you please repeat?",
+                is_scripted=True,
+                template_key="greeting",
+                tokens_used=0
+            )
+    
+    async def _load_clinic_config(self, clinic_id: str, db_session: Session) -> Dict[str, Any]:
+        """Load clinic-specific data for scripted responses."""
+        try:
+            # Get clinic details
+            clinic = db_session.query(Clinic).filter(Clinic.id == clinic_id).first()
+            
+            if not clinic:
+                # Return default config if clinic not found
+                return {
+                    "clinic_name": "our clinic",
+                    "address": "our main location",
+                    "phone": "our main number",
+                    "hours": "Monday-Friday 9AM-5PM",
+                    "days": "Monday through Friday",
+                    "services": "comprehensive healthcare services"
+                }
+            
+            # Get system config for this clinic
+            from models.models import SystemConfig
+            configs = db_session.query(SystemConfig).filter(
+                SystemConfig.clinic_id == clinic_id
+            ).all()
+            
+            # Build config dict
+            clinic_config = {
+                "clinic_name": clinic.clinic_name,
+                "address": clinic.address or "our main location",
+                "phone": clinic.phone_number or "our main number",
+                "hours": "Monday-Friday 9AM-5PM",  # Default
+                "days": "Monday through Friday",  # Default
+                "services": clinic.services_offered or "comprehensive healthcare services",
+            }
+            
+            # Add custom config values
+            for cfg in configs:
+                if cfg.config_key == "office_hours":
+                    clinic_config["hours"] = cfg.config_value
+                elif cfg.config_key == "days_open":
+                    clinic_config["days"] = cfg.config_value
+                elif cfg.config_key == "main_services":
+                    clinic_config["main_services"] = cfg.config_value
+                elif cfg.config_key == "insurance_plans":
+                    clinic_config["insurance_plans"] = cfg.config_value
+                elif cfg.config_key == "pharmacy_phone":
+                    clinic_config["pharmacy_phone"] = cfg.config_value
+            
+            return clinic_config
+            
+        except Exception as e:
+            self.logger.error(f"Error loading clinic config: {e}")
+            return {
+                "clinic_name": "our clinic",
+                "address": "our main location",
+                "phone": "our main number",
+                "hours": "Monday-Friday 9AM-5PM",
+                "days": "Monday through Friday",
+                "services": "comprehensive healthcare services"
+            }
+    
     async def process_user_input(self, call_sid: str, user_input: str) -> CallFlowResponse:
         """
         Process user input and determine next conversation step.
@@ -162,7 +281,7 @@ class CallFlowService:
             if context.current_state == CallFlowState.GET_INTENT:
                 response = await self._process_intent(context, user_input)
             elif context.current_state == CallFlowState.IDENTIFY_PATIENT:
-                response = self._process_patient_identification(context, user_input)
+                response = await self._process_patient_identification(context, user_input)
             elif context.current_state == CallFlowState.NEW_PATIENT_INFO:
                 response = self._process_new_patient_info(context, user_input)
             elif context.current_state == CallFlowState.RETURNING_PATIENT_INFO:
@@ -185,7 +304,7 @@ class CallFlowService:
                     message="Transferring you to our insurance department. Please hold.",
                     is_complete=True
                 )
-            elif context.current_state == CallFlowState.DOCTOR_INQUIRY:
+            elif context.current_state == CallFlowState.PROVIDER_INQUIRY:
                 response = CallFlowResponse(
                     next_state=CallFlowState.TRANSFER_TO_HUMAN,
                     message="Transferring you to our medical staff. Please hold.",
@@ -227,7 +346,7 @@ class CallFlowService:
         
         # Handle different intents based on confidence and context
         if result.confidence >= 0.7:  # High confidence
-            return self._handle_high_confidence_intent(result, context)
+            return await self._handle_high_confidence_intent(result, context)
         elif result.confidence >= 0.4:  # Medium confidence
             return self._handle_medium_confidence_intent(result, context)
         else:  # Low confidence or unclear
@@ -300,12 +419,12 @@ class CallFlowService:
                 is_complete=True
             )
         
-        elif result.intent == IntentType.DOCTOR_INQUIRY:
-            context.call_type = "doctor_inquiry"
+        elif result.intent == IntentType.PROVIDER_INQUIRY:
+            context.call_type = "provider_inquiry"
             return CallFlowResponse(
-                next_state=CallFlowState.DOCTOR_INQUIRY,
+                next_state=CallFlowState.PROVIDER_INQUIRY,
                 message="I'll connect you with our medical staff. Please hold while I transfer you.",
-                data={"intent": "doctor_inquiry"},
+                data={"intent": "provider_inquiry"},
                 is_complete=True
             )
         
@@ -365,7 +484,7 @@ class CallFlowService:
             data={"intent": "unclear"}
         )
     
-    def _process_patient_identification(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
+    async def _process_patient_identification(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process patient name and ask if they've been before."""
         # Use natural language processor to extract name
         result = self.nlp.process_input(user_input)
@@ -678,7 +797,7 @@ class CallFlowService:
         if any(word in user_input_lower for word in ["yes", "yeah", "correct", "okay", "ok", "sounds good", "that works", "perfect", "good"]):
             # Book the appointment
             try:
-                appointment = self._book_appointment(context)
+                appointment = await self._book_appointment(context)
                 return CallFlowResponse(
                     next_state=CallFlowState.POST_BOOKING_HELP,
                     message=f"Excellent! I've booked your appointment for {context.appointment_date.strftime('%A, %B %d')} at {context.appointment_time.strftime('%I:%M %p')}. You'll receive a confirmation text shortly. Is there anything else I can help you with?",
@@ -858,7 +977,7 @@ class CallFlowService:
     def _get_available_dates(self, provider_id: str) -> List[DateOption]:
         """Get available dates for a provider."""
         # Get next 14 days
-        start_date = datetime.now() + timedelta(days=1)
+        start_date = datetime.now(timezone.utc) + timedelta(days=1)
         end_date = start_date + timedelta(days=14)
         
         available_dates = []
@@ -910,7 +1029,7 @@ class CallFlowService:
             for slot in slots
         ]
     
-    def _book_appointment(self, context: CallFlowContext) -> Any:
+    async def _book_appointment(self, context: CallFlowContext) -> Any:
         """Book the appointment using the appointment service."""
         # Create or find patient
         if not context.patient_id:
@@ -936,7 +1055,7 @@ class CallFlowService:
             appointment_type=context.appointment_type
         )
         
-        appointment, google_event_id = self.appointment_service.create_appointment(
+        appointment, google_event_id = await self.appointment_service.create_appointment(
             appointment_data, context.patient_name
         )
         
@@ -1297,7 +1416,7 @@ class CallFlowService:
                     return template_response
             
             # Try cache for existing responses
-            cached_response = await self.response_cache.get_cached_response(
+            cached_response = self.response_cache.get_cached_response(
                 intent=intent,
                 language=language,
                 variables=variables

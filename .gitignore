@@ -81,6 +81,10 @@ test_*.py
 # Temporary files
 *.tmp
 *.temp
+
+# Debug files with secrets
+container-debug.txt
+*-debug.txt
 .cache/
 
 # Coverage reports

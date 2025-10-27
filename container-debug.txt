@@ -1,31 +1,28 @@
 az container create `
   --resource-group CallCenterAi-Test `
   --name callcenter-gateway `
-  --image callcenteracr.azurecr.io/callcenter-gateway:1456323 `
+  --image callcenteracr.azurecr.io/callcenter-gateway:111112 `
   --registry-login-server callcenteracr.azurecr.io `
   --registry-username $(az acr credential show --name callcenteracr --query username -o tsv) `
   --registry-password $(az acr credential show --name callcenteracr --query passwords[0].value -o tsv) `
-  --dns-name-label callcenterai-app-testing2025 `
+  --dns-name-label callcenterai-app-testing10/25/2025 `
   --location centralus `
   --os-type Linux `
   --cpu 2 `
   --memory 4 `
-  --ports 8443 `
+  --ports 8080 `
   --ip-address Public `
   --restart-policy Always `
   --environment-variables `
     'APP_ENVIRONMENT=production' `
     'APP_DEBUG=false' `
     'APP_HOST=0.0.0.0' `
-    'APP_PORT=8443' `
+    'APP_PORT=8080' `
+    'APP_WORKERS=1' `
     'DB_HOST=callcenterai-db.postgres.database.azure.com' `
     'DB_PORT=5432' `
     'DB_NAME=postgres' `
     'DB_USER=callcenteradmin' `
-    'POSTGRES_HOST=callcenterai-db.postgres.database.azure.com' `
-    'POSTGRES_PORT=5432' `
-    'POSTGRES_DB=postgres' `
-    'POSTGRES_USER=callcenteradmin' `
 
     'APP_WORKERS=1' `
     'APP_API_PREFIX=/api/v1' `
@@ -43,8 +40,8 @@ az container create `
     'DB_POOL_PRE_PING=true' `
     'DB_CONNECT_TIMEOUT=10' `
     'DB_APPLICATION_NAME=CallCenterAI' `
-    'DB_DEFAULT_TRANSACTION_ISOLATION=read_committed' `
-    'SECURITY_CORS_ORIGINS=["*"]' `
+    'DB_DEFAULT_TRANSACTION_ISOLATION=read committed' `
+    'SECURITY_CORS_ORIGINS=["https://callcenterai-app-testing10-25-2025.centralus.azurecontainer.io"]' `
     'SECURITY_CORS_METHODS=["GET","POST","PUT","DELETE"]' `
     'SECURITY_CORS_HEADERS=["*"]' `
     'SECURITY_RATE_LIMIT_PER_MINUTE=100' `
@@ -62,7 +59,7 @@ az container create `
     'GOOGLE_REDIRECT_URI=https://your-domain.com/auth/callback' `
     'GOOGLE_API_KEY=your_google_api_key_here' `
     'ACS_PHONE_NUMBER=+18449197564' `
-    'ACS_CALLBACK_URL=https://your-domain.com/api/v1/callbacks' `
+    'ACS_CALLBACK_URL=https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io/api/v1/acs/webhooks/events' `
     'AZURE_SPEECH_REGION=eastus' `
     'AZURE_SPEECH_LANGUAGE_EN=en-US' `
     'AZURE_SPEECH_LANGUAGE_ES=es-US' `
@@ -91,7 +88,6 @@ az container create `
     'AZURE_OPENAI_SYSTEM_PROMPT_ES=Eres un asistente de salud útil para programar citas. Al registrar nuevos pacientes, recopila: nombre completo, número de teléfono, correo electrónico, fecha de nacimiento y dirección completa (calle, ciudad, estado, código postal). Siempre confirma la dirección para mayor precisión. Sé profesional, empático y claro.' `
     'AZURE_STORAGE_ACCOUNT_NAME=your_storage_account' `
     'AZURE_STORAGE_CONTAINER_NAME=callcenter' `
-    'POSTGRES_DB=postgres' `
     'APP_ENV=production' `
     'PYTHONPATH=/app' `
     'GOOGLE_HIPAA_COMPLIANT=false' `
@@ -99,7 +95,6 @@ az container create `
 --secure-environment-variables `
     'DB_PASSWORD=/8IIE674KaeShqgtHJIFTMF2u3kBzbA3rGRBXNZ/Jpc=' `
     'SECURITY_ENCRYPTION_KEY=K2Mo6tvmYdgQoIjazUq/h42MUWVK5UaLAPuIBhsF8T4=' `
-    'POSTGRES_PASSWORD=/8IIE674KaeShqgtHJIFTMF2u3kBzbA3rGRBXNZ/Jpc=' `
 
     'SECURITY_JWT_SECRET=HPz2_qoLGALuJR8avYb9x4MNYwA0CSwCEmuR8OHtarw' `
     'GOOGLE_CLIENT_SECRET=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' `
@@ -110,5 +105,4 @@ az container create `
     'AZURE_OPENAI_API_KEY=9LSN0rgkYJEosFJNv1jvQCCD2T2sVIB53c54ccga6D5c1aNOrYK7JQQJ99BJACHYHv6XJ3w3AAAAACOGSgYN' `
     'AZURE_STORAGE_ACCOUNT_KEY=JQglpPIoygDxG+MvcLnnGz+BgOIeHYv6/Au8RcQB/toHq5zEyuHVQ98D24lQPM9p6tb+bF41LIlm+ASt/tXWuQ==' `
     'CLINIC_TOKEN_HMAC_KEY_BASE64=VGrksg2BpDK6eA2jZwWMpmxKoMvGVtp/PHYuha+WCSU=' `
-    'AES_GCM_KEY_BASE64=pr/ug84YRLp78uR+4j+7vArWfxd3CkFceXfOERcBJKI=' `
-    --command-line "/bin/sh -lc '"echo BOOT_OK; echo --BEGIN-ENV--; printenv | sort | sed -n '1,200p'; echo --END-ENV--; sleep 3600'""
+    'AES_GCM_KEY_BASE64=pr/ug84YRLp78uR+4j+7vArWfxd3CkFceXfOERcBJKI='"

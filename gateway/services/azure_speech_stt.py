@@ -25,8 +25,7 @@ from azure.cognitiveservices.speech import (
     SpeechConfig, 
     AudioConfig, 
     SpeechRecognizer, 
-    AutoDetectSourceLanguageConfig,
-    LanguageIdentificationMode
+    AutoDetectSourceLanguageConfig
 )
 
 from services.configuration import get_settings
@@ -99,6 +98,7 @@ class SpeechToTextService:
         self.language_detection_results: Dict[str, LanguageDetectionResult] = {}
         self.transcription_callbacks: Dict[str, Callable] = {}
         self.language_detection_callbacks: Dict[str, Callable] = {}
+        self.audio_streams: Dict[str, speechsdk.audio.PushAudioInputStream] = {}
         
         # Audio processing
         self.audio_buffer_size = 4096
@@ -199,6 +199,9 @@ class SpeechToTextService:
             # Create audio input stream
             audio_stream = speechsdk.audio.PushAudioInputStream()
             audio_config = AudioConfig(stream=audio_stream)
+            
+            # Store audio stream for this call
+            self.audio_streams[call_id] = audio_stream
             
             # Create recognizer with language detection
             recognizer = SpeechRecognizer(
@@ -700,6 +703,37 @@ class SpeechToTextService:
         """Get count of active recognition sessions."""
         return len(self.active_recognizers)
     
+    async def process_audio_chunk(self, call_id: str, audio_data: bytes):
+        """
+        Process audio chunk from WebSocket stream.
+        
+        Args:
+            call_id: ID of the call
+            audio_data: Raw audio bytes (PCM 16kHz 16-bit mono)
+        """
+        try:
+            if call_id not in self.active_recognizers:
+                self.logger.warning(f"No active recognizer for call {call_id}")
+                return
+            
+            # Get audio stream for this recognizer
+            audio_stream = self.audio_streams.get(call_id)
+            if audio_stream:
+                # Push audio data to recognizer
+                audio_stream.write(audio_data)
+                
+                self.logger.debug(
+                    f"Pushed audio chunk to STT",
+                    LogCategory.AZURE_SPEECH,
+                    extra_data={
+                        "call_id": call_id,
+                        "chunk_size": len(audio_data)
+                    }
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process audio chunk for {call_id}: {e}")
+    
     async def cleanup_expired_sessions(self):
         """Clean up expired recognition sessions."""
         try:
@@ -729,3 +763,8 @@ def get_speech_to_text_service() -> SpeechToTextService:
     if _speech_to_text_service is None:
         _speech_to_text_service = SpeechToTextService()
     return _speech_to_text_service
+
+
+def get_stt_service() -> SpeechToTextService:
+    """Get the global Speech-to-Text Service instance (alias)."""
+    return get_speech_to_text_service()

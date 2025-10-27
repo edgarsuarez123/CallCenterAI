@@ -26,7 +26,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 from functools import wraps
@@ -65,16 +65,28 @@ class LogCategory(Enum):
     PROVIDER = "provider"
     CLINIC = "clinic"
     CALL = "call"
+    REMINDER = "reminder"
+    
+    # Azure services categories
+    AZURE_COMMUNICATION = "azure_communication"
+    AZURE_SPEECH = "azure_speech"
+    AZURE_OPENAI = "azure_openai"
+    
+    # Language and orchestration categories
+    LANGUAGE_DETECTION = "language_detection"
+    CALL_ORCHESTRATION = "call_orchestration"
+    NLP = "nlp"
+    
+    # Performance categories
+    PERFORMANCE = "performance"
+    CACHE = "cache"
+    SLOW_QUERY = "slow_query"
+    TIMEOUT = "timeout"
     
     # Security categories
     SECURITY = "security"
     AUDIT = "audit"
     COMPLIANCE = "compliance"
-    
-    # Performance categories
-    PERFORMANCE = "performance"
-    SLOW_QUERY = "slow_query"
-    TIMEOUT = "timeout"
     
     # Error categories
     ERROR = "error"

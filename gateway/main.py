@@ -6,7 +6,7 @@ import os
 import logging
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from services.database import Base, engine, get_database_health, test_database_connection, ConnectionPoolMonitor
 from services.structured_logging import (
     get_logger, RequestContextManager, log_performance, 
@@ -49,7 +49,7 @@ request_counts = defaultdict(list)
 async def rate_limit_middleware(request: Request, call_next):
     """Simple rate limiting middleware - 100 requests per minute per IP."""
     client_ip = request.client.host
-    current_time = datetime.now()
+    current_time = datetime.now(timezone.utc)
     
     # Clean old requests (older than 1 minute)
     request_counts[client_ip] = [
@@ -176,6 +176,14 @@ def on_startup():
         "database_host": settings.database.host,
         "database_port": settings.database.port,
         "pool_size": settings.database.pool_size
+    })
+    
+    # Log expected callback URLs for deployment verification
+    logger.info("Expected callback URLs for deployment", LogCategory.SYSTEM, extra_data={
+        "acs_callback_url": settings.azure.communication.callback_url,
+        "google_redirect_uri": settings.google_calendar.redirect_uri,
+        "api_base_url": f"http://{settings.host}:{settings.port}{settings.api_prefix}",
+        "health_check_url": f"http://{settings.host}:{settings.port}/healthz"
     })
     
     # Setup database query logging
@@ -311,7 +319,7 @@ register_exception_handlers(app)
 @app.get("/health")
 async def health_check():
     """Basic health check endpoint."""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/health/detailed")
 async def detailed_health_check():
@@ -320,7 +328,7 @@ async def detailed_health_check():
         db_healthy = test_database_connection()
         return {
             "status": "healthy" if db_healthy else "degraded",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "database": "connected" if db_healthy else "disconnected",
             "services": {
                 "database": db_healthy,
@@ -331,14 +339,14 @@ async def detailed_health_check():
         logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         }
 
 @app.get("/ping")
 async def ping():
     """Simple ping endpoint for load balancers."""
-    return {"pong": datetime.now().isoformat()}
+    return {"pong": datetime.now(timezone.utc).isoformat()}
 
 # Include all routers
 app.include_router(api_router)     # Comprehensive API endpoints

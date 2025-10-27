@@ -12,7 +12,7 @@ Critical for patient engagement and reducing no-shows.
 """
 
 import asyncio
-from datetime import datetime, timezone, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -29,7 +29,7 @@ from services.structured_logging import get_logger, LogCategory, log_performance
 from services.configuration import get_settings
 from services.exceptions import (
     AzureCommunicationError, ExternalServiceUnavailableError,
-    ValidationError, CallCenterAIException
+    ValidationError, CallCenterAIException, ErrorCode
 )
 
 
@@ -94,7 +94,10 @@ class ReminderService:
             ).first()
             
             if not appointment:
-                raise CallCenterAIException(f"Appointment {appointment_id} not found")
+                raise CallCenterAIException(
+                    f"Appointment {appointment_id} not found",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             # Get clinic settings
             clinic = db.query(Clinic).join(Patient).filter(
@@ -103,12 +106,18 @@ class ReminderService:
             ).first()
             
             if not clinic:
-                raise CallCenterAIException(f"Clinic not found for appointment {appointment_id}")
+                raise CallCenterAIException(
+                    f"Clinic not found for appointment {appointment_id}",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             # Check if reminders are enabled for this clinic
             if clinic.reminders_enabled != 'yes':
                 self.logger.info(f"Reminders disabled for clinic {clinic.clinic_id}, skipping reminder for appointment {appointment_id}", LogCategory.REMINDER)
-                raise CallCenterAIException("Reminders are disabled for this clinic")
+                raise CallCenterAIException(
+                    "Reminders are disabled for this clinic",
+                    error_code=ErrorCode.CONFIGURATION_ERROR
+                )
             
             # Calculate scheduled time
             if custom_scheduled_time:
@@ -155,7 +164,10 @@ class ReminderService:
             self.logger.error(f"Failed to schedule reminder for appointment {appointment_id}: {e}", LogCategory.REMINDER, exception=e)
             if isinstance(e, (CallCenterAIException, ValidationError, CallCenterAIException)):
                 raise
-            raise CallCenterAIException(f"Failed to schedule reminder: {e}")
+            raise CallCenterAIException(
+                f"Failed to schedule reminder: {e}",
+                error_code=ErrorCode.DATABASE_ERROR
+            )
     
     @log_performance("reminder_execution")
     async def execute_reminder(self, db: Session, reminder_id: str) -> Dict[str, Any]:
@@ -177,10 +189,16 @@ class ReminderService:
             ).first()
             
             if not reminder:
-                raise CallCenterAIException(f"Reminder {reminder_id} not found")
+                raise CallCenterAIException(
+                    f"Reminder {reminder_id} not found",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             if reminder.status not in ['scheduled', 'failed']:
-                raise CallCenterAIException(f"Reminder {reminder_id} is not in a valid state for execution (current: {reminder.status})")
+                raise CallCenterAIException(
+                    f"Reminder {reminder_id} is not in a valid state for execution (current: {reminder.status})",
+                    error_code=ErrorCode.VALIDATION_ERROR
+                )
             
             # Get appointment and patient data
             appointment = db.query(Appointment).join(Patient).filter(
@@ -189,7 +207,10 @@ class ReminderService:
             ).first()
             
             if not appointment:
-                raise CallCenterAIException(f"Appointment {reminder.appointment_id} not found")
+                raise CallCenterAIException(
+                    f"Appointment {reminder.appointment_id} not found",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             # Get patient's phone number
             phone_mapping = db.query(Mapping).filter(
@@ -198,7 +219,10 @@ class ReminderService:
             ).first()
             
             if not phone_mapping:
-                raise CallCenterAIException(f"Phone number not found for patient {appointment.patient_id}")
+                raise CallCenterAIException(
+                    f"Phone number not found for patient {appointment.patient_id}",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             patient_phone = phone_mapping.actual_value
             
@@ -284,7 +308,10 @@ class ReminderService:
             self.logger.error(f"Failed to execute reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
             if isinstance(e, (CallCenterAIException, CallCenterAIException)):
                 raise
-            raise CallCenterAIException(f"Failed to execute reminder: {e}")
+            raise CallCenterAIException(
+                f"Failed to execute reminder: {e}",
+                error_code=ErrorCode.DATABASE_ERROR
+            )
     
     async def _generate_reminder_message(self, appointment: Appointment, reminder_type: str) -> str:
         """
@@ -425,7 +452,10 @@ class ReminderService:
             
         except Exception as e:
             self.logger.error(f"Failed to get due reminders: {e}", LogCategory.REMINDER, exception=e)
-            raise CallCenterAIException(f"Failed to get due reminders: {e}")
+            raise CallCenterAIException(
+                f"Failed to get due reminders: {e}",
+                error_code=ErrorCode.DATABASE_ERROR
+            )
     
     async def cancel_reminder(self, db: Session, reminder_id: str, reason: str = "cancelled_by_user") -> bool:
         """
@@ -438,7 +468,10 @@ class ReminderService:
             ).first()
             
             if not reminder:
-                raise CallCenterAIException(f"Reminder {reminder_id} not found")
+                raise CallCenterAIException(
+                    f"Reminder {reminder_id} not found",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
             
             if reminder.status in ['completed', 'cancelled']:
                 self.logger.warning(f"Reminder {reminder_id} is already {reminder.status}", LogCategory.REMINDER)
@@ -458,7 +491,10 @@ class ReminderService:
             self.logger.error(f"Failed to cancel reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
             if isinstance(e, CallCenterAIException):
                 raise
-            raise CallCenterAIException(f"Failed to cancel reminder: {e}")
+            raise CallCenterAIException(
+                f"Failed to cancel reminder: {e}",
+                error_code=ErrorCode.DATABASE_ERROR
+            )
 
 
 # Global instance for dependency injection

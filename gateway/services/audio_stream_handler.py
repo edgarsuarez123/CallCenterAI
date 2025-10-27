@@ -394,6 +394,22 @@ class AudioStreamHandler:
             extra_data={"connection_id": connection_id}
         )
     
+    def register_stt_callback(self, connection_id: str, callback: Callable):
+        """
+        Register an STT callback for a connection.
+        
+        Args:
+            connection_id: ID of the connection
+            callback: Function to handle STT results
+        """
+        self.audio_processors[connection_id] = callback
+        
+        self.logger.info(
+            f"STT callback registered: {connection_id}",
+            LogCategory.AZURE_COMMUNICATION,
+            extra_data={"connection_id": connection_id}
+        )
+    
     def unregister_audio_processor(self, connection_id: str):
         """
         Unregister an audio processor for a connection.
