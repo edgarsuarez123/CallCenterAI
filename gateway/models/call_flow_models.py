@@ -24,7 +24,7 @@ class CallFlowState(str, Enum):
     POST_BOOKING_HELP = "post_booking_help"
     CANCEL_APPOINTMENT = "cancel_appointment"
     INSURANCE_INQUIRY = "insurance_inquiry"
-    DOCTOR_INQUIRY = "doctor_inquiry"
+    PROVIDER_INQUIRY = "provider_inquiry"
     GOODBYE = "goodbye"
     TRANSFER_TO_HUMAN = "transfer_to_human"
 

@@ -813,10 +813,13 @@ class BackgroundJobManager:
         """Process reminders that are due for execution."""
         try:
             reminder_service = get_reminder_service()
-            db = get_db_session()
+            db_session = next(get_db_session())
             
-            # Get due reminders
-            due_reminders = asyncio.run(reminder_service.get_due_reminders(db, limit=50))
+            try:
+                # Get due reminders
+                due_reminders = asyncio.run(reminder_service.get_due_reminders(db_session, limit=50))
+            finally:
+                db_session.close()
             
             processed_count = 0
             success_count = 0

@@ -14,8 +14,11 @@ class IntentType(Enum):
     APPOINTMENT_BOOKING = "appointment_booking"
     APPOINTMENT_CANCELLATION = "appointment_cancellation"
     APPOINTMENT_RESCHEDULING = "appointment_rescheduling"
+    APPOINTMENT_INQUIRY = "appointment_inquiry"
     INSURANCE_INQUIRY = "insurance_inquiry"
-    DOCTOR_INQUIRY = "doctor_inquiry"
+    PROVIDER_INQUIRY = "provider_inquiry"  # Renamed from DOCTOR_INQUIRY
+    CLINIC_INQUIRY = "clinic_inquiry"
+    BILLING_INQUIRY = "billing_inquiry"
     GENERAL_INQUIRY = "general_inquiry"
     EMERGENCY = "emergency"
     GREETING = "greeting"
@@ -23,6 +26,20 @@ class IntentType(Enum):
     CONFIRMATION = "confirmation"
     NEGATION = "negation"
     UNCLEAR = "unclear"
+    UNKNOWN = "unknown"
+
+class EntityType(Enum):
+    """Types of entities that can be extracted."""
+    DATE = "date"
+    TIME = "time"
+    PHONE_NUMBER = "phone_number"
+    EMAIL = "email"
+    NAME = "name"
+    APPOINTMENT_TYPE = "appointment_type"
+    PROVIDER_NAME = "provider_name"
+    CLINIC_NAME = "clinic_name"
+    INSURANCE = "insurance"
+    ADDRESS = "address"  # Complete patient address
 
 @dataclass
 class ExtractedEntities:
@@ -79,7 +96,7 @@ class NaturalLanguageProcessor:
                 (r'\b(?:i\'m calling about|i need help with|i have questions about)\s+(?:my\s+)?(?:insurance|coverage|benefits)\b', 0.9),
                 (r'\b(?:does my insurance|will my insurance|is this covered)\b', 0.8),
             ],
-            IntentType.DOCTOR_INQUIRY: [
+            IntentType.PROVIDER_INQUIRY: [
                 (r'\b(?:i\'m a doctor|i\'m calling from|this is dr\.|physician calling)\b', 0.9),
                 (r'\b(?:medical records|patient information|referral|consultation)\b', 0.8),
                 (r'\b(?:i need to speak with|i need to talk to)\s+(?:a\s+)?(?:doctor|physician|medical staff)\b', 0.7),

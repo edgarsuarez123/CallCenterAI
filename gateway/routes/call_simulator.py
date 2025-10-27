@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/start-call", response_model=CallStatusResponse)
-def start_call_simulation(
+async def start_call_simulation(
     request: CallSimulationRequest,
     db: Session = Depends(get_db)
 ):
@@ -38,7 +38,7 @@ def start_call_simulation(
         call_sid = f"SIM_{request.caller_phone.replace('+', '').replace('-', '')}_{hash(request.caller_phone) % 10000:04d}"
         
         # Initialize the call
-        response = call_flow_service.initialize_call(
+        response = await call_flow_service.initialize_call(
             call_sid=call_sid,
             caller_phone=request.caller_phone,
             clinic_id=request.clinic_id
@@ -63,7 +63,7 @@ def start_call_simulation(
 
 
 @router.post("/call/{call_sid}/input", response_model=CallStatusResponse)
-def process_call_input(
+async def process_call_input(
     call_sid: str,
     request: CallInputRequest,
     db: Session = Depends(get_db)
@@ -78,7 +78,7 @@ def process_call_input(
         call_flow_service = CallFlowService(db)
         
         # Process the user input
-        response = call_flow_service.process_user_input(
+        response = await call_flow_service.process_user_input(
             call_sid=call_sid,
             user_input=request.user_input
         )

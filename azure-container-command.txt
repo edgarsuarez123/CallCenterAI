@@ -1,7 +1,7 @@
 az container create `
   --resource-group CallCenterAi-Test `
   --name callcenter-gateway `
-  --image callcenteracr.azurecr.io/callcenter-gateway:1456323 `
+  --image callcenteracr.azurecr.io/callcenter-gateway:latest `
   --registry-login-server callcenteracr.azurecr.io `
   --registry-username $(az acr credential show --name callcenteracr --query username -o tsv) `
   --registry-password $(az acr credential show --name callcenteracr --query passwords[0].value -o tsv) `
@@ -39,9 +39,9 @@ az container create `
     "DB_CONNECT_TIMEOUT=10" `
     "DB_APPLICATION_NAME=CallCenterAI" `
     "DB_DEFAULT_TRANSACTION_ISOLATION=read_committed" `
-    "SECURITY_CORS_ORIGINS=[*]" `
-    "SECURITY_CORS_METHODS=[GET,POST,PUT,DELETE]" `
-    "SECURITY_CORS_HEADERS=[*]" `
+    "SECURITY_CORS_ORIGINS=[\"https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io\"]" `
+    "SECURITY_CORS_METHODS=[\"GET\",\"POST\",\"PUT\",\"DELETE\",\"OPTIONS\"]" `
+    "SECURITY_CORS_HEADERS=[\"Content-Type\",\"Authorization\",\"X-Request-ID\",\"WebHook-Request-Origin\",\"WebHook-Request-Callback\"]" `
     "SECURITY_RATE_LIMIT_PER_MINUTE=100" `
     "SECURITY_RATE_LIMIT_BURST=200" `
     "SECURITY_SESSION_TIMEOUT_MINUTES=30" `
@@ -56,8 +56,8 @@ az container create `
     "GOOGLE_CLIENT_ID=182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com" `
     "GOOGLE_REDIRECT_URI=https://your-domain.com/auth/callback" `
     "GOOGLE_API_KEY=your_google_api_key_here" `
-    "ACS_PHONE_NUMBER=+18449197564" `
-    "ACS_CALLBACK_URL=https://your-domain.com/api/v1/callbacks" `
+    "ACS_PHONE_NUMBER=+18667334054" `
+    "ACS_CALLBACK_URL=https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io/api/v1/acs/webhooks/events" `
     "AZURE_SPEECH_REGION=eastus" `
     "AZURE_SPEECH_LANGUAGE_EN=en-US" `
     "AZURE_SPEECH_LANGUAGE_ES=es-US" `
@@ -92,6 +92,7 @@ az container create `
     "POSTGRES_USER=callcenteradmin" `
     "APP_ENV=production" `
     "PYTHONPATH=/app" `
+  --secure-environment-variables `
     "DB_PASSWORD=literal:REDACTED_DB_PASSWORD" `
     "POSTGRES_PASSWORD=literal:REDACTED_DB_PASSWORD" `
     "SECURITY_ENCRYPTION_KEY=literal:REDACTED_SECURITY_ENCRYPTION_KEY" `

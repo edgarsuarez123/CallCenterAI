@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import and_
 from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uuid
 import logging
 
@@ -397,7 +397,7 @@ class AppointmentService:
             Next available slot or None
         """
         if not preferred_date:
-            preferred_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            preferred_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         
         # Search for available slots starting from preferred date
         search_end = preferred_date + timedelta(days=30)  # Search up to 30 days ahead

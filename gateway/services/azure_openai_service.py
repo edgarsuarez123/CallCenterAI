@@ -37,47 +37,7 @@ from services.response_templates import get_response_templates
 logger = get_logger("azure_openai_service")
 
 
-class IntentType(Enum):
-    """Types of user intents."""
-    APPOINTMENT_BOOKING = "appointment_booking"
-    APPOINTMENT_CANCELLATION = "appointment_cancellation"
-    APPOINTMENT_RESCHEDULING = "appointment_rescheduling"
-    APPOINTMENT_INQUIRY = "appointment_inquiry"
-    PROVIDER_INQUIRY = "provider_inquiry"
-    CLINIC_INQUIRY = "clinic_inquiry"
-    BILLING_INQUIRY = "billing_inquiry"
-    EMERGENCY = "emergency"
-    GENERAL_INQUIRY = "general_inquiry"
-    GREETING = "greeting"
-    GOODBYE = "goodbye"
-    UNKNOWN = "unknown"
-
-
-class EntityType(Enum):
-    """Types of entities that can be extracted."""
-    DATE = "date"
-    TIME = "time"
-    PHONE_NUMBER = "phone_number"
-    EMAIL = "email"
-    NAME = "name"
-    APPOINTMENT_TYPE = "appointment_type"
-    PROVIDER_NAME = "provider_name"
-    CLINIC_NAME = "clinic_name"
-    INSURANCE = "insurance"
-    ADDRESS = "address"  # Complete patient address
-
-
-@dataclass
-class IntentResult:
-    """Result of intent classification."""
-    intent: IntentType
-    confidence: float
-    entities: List[Dict[str, Any]]
-    raw_response: str
-    processing_time_ms: int
-    timestamp: datetime
-    language: LanguageCode
-    fallback_used: bool = False
+from services.natural_language_processor import IntentType, EntityType, ExtractedEntities, IntentResult
 
 
 @dataclass
@@ -214,8 +174,7 @@ class AzureOpenAIService:
         try:
             self.client = AsyncOpenAI(
                 api_key=self.api_key,
-                base_url=f"{self.endpoint}/openai/deployments/{self.deployment_name}",
-                api_version=self.api_version
+                base_url=f"{self.endpoint}/openai/deployments/{self.deployment_name}"
             )
             
             self.logger.info(

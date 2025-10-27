@@ -68,9 +68,31 @@ class SecurityConfig(BaseSettings):
     jwt_expiration_hours: int = Field(default=24, ge=1, le=168, description="JWT expiration in hours")
     
     # CORS
-    cors_origins: List[str] = Field(default=["*"], description="Allowed CORS origins")
-    cors_methods: List[str] = Field(default=["GET", "POST", "PUT", "DELETE"], description="Allowed CORS methods")
-    cors_headers: List[str] = Field(default=["*"], description="Allowed CORS headers")
+    cors_origins: str = Field(default='["*"]', description="Allowed CORS origins (JSON string)")
+    cors_methods: str = Field(default='["GET", "POST", "PUT", "DELETE"]', description="Allowed CORS methods (JSON string)")
+    cors_headers: str = Field(default='["*"]', description="Allowed CORS headers (JSON string)")
+    
+    @field_validator('cors_origins', 'cors_methods', 'cors_headers')
+    @classmethod
+    def parse_json_strings(cls, v):
+        """Parse JSON strings or comma-separated values for CORS configuration."""
+        if isinstance(v, str):
+            # Handle special case where Azure CLI strips quotes: [*] -> ["*"]
+            if v == "[*]":
+                return ["*"]
+            elif v.startswith("[") and v.endswith("]") and "*" in v:
+                # Handle cases like [GET,POST,PUT,DELETE] -> ["GET","POST","PUT","DELETE"]
+                content = v[1:-1]  # Remove brackets
+                return [item.strip() for item in content.split(',') if item.strip()]
+            
+            # Try to parse as JSON first
+            try:
+                import json
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                # Fall back to comma-separated values
+                return [item.strip() for item in v.split(',') if item.strip()]
+        return v
     
     # Rate limiting
     rate_limit_per_minute: int = Field(default=100, ge=1, le=1000, description="Rate limit per minute")
@@ -111,7 +133,12 @@ class SecurityConfig(BaseSettings):
     
     model_config = SettingsConfigDict(
         env_prefix="SECURITY_",
-        case_sensitive=False
+        case_sensitive=False,
+        json_schema_extra={
+            "cors_origins": {"type": "string"},
+            "cors_methods": {"type": "string"},
+            "cors_headers": {"type": "string"}
+        }
     )
 
 
@@ -441,7 +468,7 @@ class ApplicationConfig(BaseSettings):
     
     # Server settings
     host: str = Field(default="0.0.0.0", description="Server host")
-    port: int = Field(default=8443, ge=1, le=65535, description="Server port")
+    port: int = Field(default=8080, ge=1, le=65535, description="Server port")
     workers: int = Field(default=1, ge=1, le=32, description="Number of worker processes")
     
     # API settings

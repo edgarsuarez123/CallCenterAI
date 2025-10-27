@@ -10,7 +10,10 @@ Provides REST endpoints for:
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, Request, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
@@ -20,402 +23,792 @@ from sqlalchemy.orm import Session
 
 from services.azure_communication_service import get_azure_communication_service
 from services.audio_stream_handler import get_audio_stream_handler
+from services.database import get_db_session
 from services.structured_logging import get_logger, LogCategory
-from services.exceptions import (
-    AzureCommunicationError,
-    CallNotFoundError,
-    ValidationError,
-    ExternalServiceUnavailableError
-)
-from models.enums import CallStatus
-from services.database import get_db
+from services.configuration import get_settings
 
-
-logger = get_logger("azure_communication_routes")
+# Initialize router
 router = APIRouter(prefix="/acs", tags=["Azure Communication Services"])
 
+# Get logger
+logger = get_logger("azure_communication_routes")
 
-# Request/Response Models
+
+# Pydantic models for request/response validation
 class CallInitiateRequest(BaseModel):
-    """Request model for initiating a call."""
-    phone_number: str = Field(..., description="Phone number to call")
-    clinic_id: str = Field(..., description="ID of the clinic handling the call")
-    call_type: str = Field(default="outbound", description="Type of call (inbound/outbound)")
+    """Request model for call initiation."""
+    to_phone_number: str = Field(..., description="Phone number to call")
+    from_phone_number: Optional[str] = Field(None, description="Phone number to call from")
+    call_type: str = Field(default="outbound", description="Type of call")
     
-    @field_validator('phone_number')
+    @field_validator('to_phone_number')
     @classmethod
     def validate_phone_number(cls, v):
-        if not v.startswith('+'):
-            raise ValueError('Phone number must include country code (e.g., +1234567890)')
-        return v
-    
-    @field_validator('call_type')
-    @classmethod
-    def validate_call_type(cls, v):
-        if v not in ['inbound', 'outbound']:
-            raise ValueError('Call type must be either "inbound" or "outbound"')
+        if not v or len(v) < 10:
+            raise ValueError('Phone number must be at least 10 digits')
         return v
 
 
 class CallInitiateResponse(BaseModel):
     """Response model for call initiation."""
     call_id: str
-    acs_call_id: str
     status: str
     message: str
+    timestamp: str
 
 
 class AzureCallStatusResponse(BaseModel):
-    """Response model for Azure call status."""
+    """Response model for call status."""
     call_id: str
-    acs_call_id: Optional[str]
-    clinic_id: str
     status: str
-    start_time: str
-    end_time: Optional[str]
-    websocket_connected: bool
-    audio_stream_active: bool
-    language_detected: Optional[str]
-    language_locked: bool
-    recording_id: Optional[str]
+    duration_seconds: Optional[float] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    caller_phone: Optional[str] = None
+    callee_phone: Optional[str] = None
 
 
-class WebhookEventRequest(BaseModel):
-    """Request model for webhook events."""
-    eventType: str
-    callConnectionId: Optional[str] = None
-    state: Optional[str] = None
-    recordingState: Optional[str] = None
-    recordingId: Optional[str] = None
-    timestamp: Optional[str] = None
-
-
-class CallAnswerRequest(BaseModel):
-    """Request model for answering a call."""
-    call_id: str
-
-
-class CallEndRequest(BaseModel):
-    """Request model for ending a call."""
-    call_id: str
-    reason: str = Field(default="completed", description="Reason for ending the call")
-
-
-# REST API Endpoints
+# REST API endpoints
 @router.post("/calls/initiate", response_model=CallInitiateResponse, status_code=status.HTTP_201_CREATED)
 async def initiate_call(
     request: CallInitiateRequest,
-    db: Session = Depends(get_db)
-):
+    db: Session = Depends(get_db_session)
+) -> CallInitiateResponse:
     """
-    Initiate a new call with Azure Communication Services.
+    Initiate a new call using Azure Communication Services.
     
-    This endpoint starts either an inbound or outbound call and returns
-    the call identifiers for tracking and management.
+    Args:
+        request: Call initiation request
+        db: Database session
+        
+    Returns:
+        CallInitiateResponse: Call initiation result
     """
     try:
         acs_service = get_azure_communication_service()
         
         # Initiate the call
-        call_id, acs_call_id = await acs_service.initialize_call(
-            phone_number=request.phone_number,
-            clinic_id=request.clinic_id,
+        result = await acs_service.initiate_call(
+            to_phone_number=request.to_phone_number,
+            from_phone_number=request.from_phone_number,
             call_type=request.call_type
         )
         
         logger.info(
-            f"Call initiated successfully: {call_id}",
+            f"Call initiated successfully: {result['call_id']}",
             LogCategory.API,
             extra_data={
-                "call_id": call_id,
-                "acs_call_id": acs_call_id,
-                "clinic_id": request.clinic_id,
+                "call_id": result['call_id'],
+                "to_phone": request.to_phone_number,
+                "from_phone": request.from_phone_number,
                 "call_type": request.call_type
             }
         )
         
         return CallInitiateResponse(
-            call_id=call_id,
-            acs_call_id=acs_call_id,
-            status=CallStatus.INITIATED.value,
-            message="Call initiated successfully"
+            call_id=result['call_id'],
+            status=result['status'],
+            message=result['message'],
+            timestamp=datetime.now(AST).isoformat()
         )
         
-    except ValidationError as e:
-        logger.warning(
-            f"Validation error in call initiation: {e}",
-            LogCategory.API,
-            extra_data={"error": str(e)}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Validation error: {e}"
-        )
-    
-    except AzureCommunicationError as e:
-        logger.error(
-            f"ACS error in call initiation: {e}",
-            LogCategory.API,
-            extra_data={"error": str(e)}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Communication service error: {e}"
-        )
-    
     except Exception as e:
-        logger.error(
-            f"Unexpected error in call initiation: {e}",
-            LogCategory.API,
-            exception=e
-        )
+        logger.error(f"Failed to initiate call: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Failed to initiate call: {e}"
         )
 
 
 @router.post("/calls/{call_id}/answer", response_model=Dict[str, str])
 async def answer_call(
     call_id: str,
-    request: CallAnswerRequest,
-    db: Session = Depends(get_db)
-):
+    db: Session = Depends(get_db_session)
+) -> Dict[str, str]:
     """
-    Answer an inbound call.
+    Answer an incoming call.
     
-    This endpoint answers a call that has been initiated and is waiting
-    for connection.
+    Args:
+        call_id: ID of the call to answer
+        db: Database session
+        
+    Returns:
+        Dict[str, str]: Answer result
     """
     try:
         acs_service = get_azure_communication_service()
         
         # Answer the call
-        success = await acs_service.answer_call(call_id)
+        result = await acs_service.answer_call(call_id)
         
-        if success:
-            logger.info(
-                f"Call answered successfully: {call_id}",
-                LogCategory.API,
-                extra_data={"call_id": call_id}
-            )
-            
-            return {
-                "status": "success",
-                "message": "Call answered successfully",
-                "call_id": call_id
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to answer call"
-            )
-        
-    except CallNotFoundError as e:
-        logger.warning(
-            f"Call not found for answering: {call_id}",
+        logger.info(
+            f"Call answered successfully: {call_id}",
             LogCategory.API,
             extra_data={"call_id": call_id}
         )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Call not found: {call_id}"
-        )
-    
-    except AzureCommunicationError as e:
-        logger.error(
-            f"ACS error in call answering: {e}",
-            LogCategory.API,
-            extra_data={"call_id": call_id, "error": str(e)}
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Communication service error: {e}"
-        )
-    
+        
+        return {
+            "status": "answered",
+            "message": f"Call {call_id} answered successfully",
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
     except Exception as e:
-        logger.error(
-            f"Unexpected error in call answering: {e}",
-            LogCategory.API,
-            exception=e,
-            extra_data={"call_id": call_id}
-        )
+        logger.error(f"Failed to answer call {call_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Failed to answer call: {e}"
         )
 
 
 @router.post("/calls/{call_id}/end", response_model=Dict[str, str])
 async def end_call(
     call_id: str,
-    request: CallEndRequest,
-    db: Session = Depends(get_db)
-):
+    db: Session = Depends(get_db_session)
+) -> Dict[str, str]:
     """
-    End an active call.
+    End a call.
     
-    This endpoint terminates a call and cleans up associated resources.
+    Args:
+        call_id: ID of the call to end
+        db: Database session
+        
+    Returns:
+        Dict[str, str]: End result
     """
     try:
         acs_service = get_azure_communication_service()
         
         # End the call
-        success = await acs_service.end_call(call_id, request.reason)
+        result = await acs_service.end_call(call_id)
         
-        if success:
-            logger.info(
-                f"Call ended successfully: {call_id}",
-                LogCategory.API,
-                extra_data={
-                    "call_id": call_id,
-                    "reason": request.reason
-                }
-            )
-            
-            return {
-                "status": "success",
-                "message": "Call ended successfully",
-                "call_id": call_id,
-                "reason": request.reason
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to end call"
-            )
-        
-    except Exception as e:
-        logger.error(
-            f"Unexpected error in call ending: {e}",
+        logger.info(
+            f"Call ended successfully: {call_id}",
             LogCategory.API,
-            exception=e,
             extra_data={"call_id": call_id}
         )
+        
+        return {
+            "status": "ended",
+            "message": f"Call {call_id} ended successfully",
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to end call {call_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Failed to end call: {e}"
         )
 
 
 @router.get("/calls/{call_id}/status", response_model=AzureCallStatusResponse)
 async def get_call_status(
     call_id: str,
-    db: Session = Depends(get_db)
-):
+    db: Session = Depends(get_db_session)
+) -> AzureCallStatusResponse:
     """
     Get the status of a call.
     
-    Returns detailed information about the call including its current state,
-    connection status, and metadata.
+    Args:
+        call_id: ID of the call
+        db: Database session
+        
+    Returns:
+        AzureCallStatusResponse: Call status information
     """
     try:
         acs_service = get_azure_communication_service()
         
         # Get call status
-        call_status = acs_service.get_call_status(call_id)
+        status_info = await acs_service.get_call_status(call_id)
         
-        if not call_status:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Call not found: {call_id}"
-            )
-        
-        return AzureCallStatusResponse(**call_status)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"Unexpected error getting call status: {e}",
-            LogCategory.API,
-            exception=e,
-            extra_data={"call_id": call_id}
+        return AzureCallStatusResponse(
+            call_id=call_id,
+            status=status_info.get('status', 'unknown'),
+            duration_seconds=status_info.get('duration_seconds'),
+            start_time=status_info.get('start_time'),
+            end_time=status_info.get('end_time'),
+            caller_phone=status_info.get('caller_phone'),
+            callee_phone=status_info.get('callee_phone')
         )
+        
+    except Exception as e:
+        logger.error(f"Failed to get call status for {call_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Failed to get call status: {e}"
         )
 
 
 @router.get("/calls/active", response_model=Dict[str, Any])
 async def get_active_calls(
-    clinic_id: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
+    db: Session = Depends(get_db_session)
+) -> Dict[str, Any]:
     """
-    Get information about active calls.
+    Get all active calls.
     
-    Returns a summary of all active calls, optionally filtered by clinic.
+    Args:
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Active calls information
     """
     try:
         acs_service = get_azure_communication_service()
-        audio_handler = get_audio_stream_handler()
         
-        # Get active calls count
-        total_active = acs_service.get_active_calls_count()
-        
-        # Get clinic-specific count if requested
-        clinic_active = None
-        if clinic_id:
-            clinic_active = acs_service.get_clinic_active_calls_count(clinic_id)
-        
-        # Get connection statistics
-        connection_stats = audio_handler.get_connection_statistics()
+        # Get active calls
+        active_calls = await acs_service.get_active_calls()
         
         return {
-            "total_active_calls": total_active,
-            "clinic_active_calls": clinic_active,
-            "connection_statistics": connection_stats,
-            "timestamp": datetime.utcnow().isoformat()
+            "active_calls": active_calls,
+            "count": len(active_calls),
+            "timestamp": datetime.now(AST).isoformat()
         }
         
     except Exception as e:
-        logger.error(
-            f"Unexpected error getting active calls: {e}",
-            LogCategory.API,
-            exception=e
-        )
+        logger.error(f"Failed to get active calls: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Failed to get active calls: {e}"
         )
 
 
-@router.post("/webhooks/events", response_model=Dict[str, Any])
-async def handle_webhook_events(
-    request: Request,
-    db: Session = Depends(get_db)
-):
+# Event handlers
+async def handle_incoming_call_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
     """
-    Handle webhook events from Azure Communication Services.
+    Handle incoming call event from Azure Communication Services.
     
-    This endpoint receives and processes events from ACS including
-    call state changes, recording events, and media streaming events.
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
     """
     try:
+        # Extract call information
+        call_id = payload.get('callId')
+        from_number = payload.get('from', {}).get('phoneNumber', {}).get('value')
+        to_number = payload.get('to', {}).get('phoneNumber', {}).get('value')
+        
+        logger.info(
+            f"Incoming call event: {call_id} from {from_number} to {to_number}",
+            LogCategory.API,
+            extra_data={
+                "call_id": call_id,
+                "from_number": from_number,
+                "to_number": to_number,
+                "payload": payload
+            }
+        )
+        
+        # Answer the call automatically
+        await acs_service.answer_call(call_id)
+        
+        # Initialize AI call handling
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        await orchestrator.start_call(
+            call_id=call_id,
+            caller_phone=from_number,
+            clinic_id='default-clinic',
+            call_type='inbound'
+        )
+        
+        return {
+            "status": "call_answered",
+            "message": f"Call {call_id} answered and AI handling initialized",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling incoming call event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling incoming call event: {e}"
+        )
+
+
+async def handle_call_starting_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle call starting event.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_id = payload.get('callId')
+        
+        logger.info(
+            f"Call starting event: {call_id}",
+            LogCategory.API,
+            extra_data={"call_id": call_id, "payload": payload}
+        )
+        
+        # Answer the call
+        await acs_service.answer_call(call_id)
+        
+        return {
+            "status": "call_starting",
+            "message": f"Call {call_id} is starting",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling call starting event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling call starting event: {e}"
+        )
+
+
+async def handle_call_ending_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle call ending event.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_id = payload.get('callId')
+        
+        logger.info(
+            f"Call ending event: {call_id}",
+            LogCategory.API,
+            extra_data={"call_id": call_id, "payload": payload}
+        )
+        
+        # End AI call handling
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        await orchestrator.end_call(call_id)
+        
+        return {
+            "status": "call_ending",
+            "message": f"Call {call_id} is ending",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling call ending event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling call ending event: {e}"
+        )
+
+
+async def handle_incoming_call_received_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle IncomingCallReceived event from Call Automation.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_connection_id = payload.get('callConnectionId')
+        from_number = payload.get('from', {}).get('phoneNumber', {}).get('value')
+        to_number = payload.get('to', {}).get('phoneNumber', {}).get('value')
+        
+        logger.info(
+            f"IncomingCallReceived event: {call_connection_id} from {from_number} to {to_number}",
+            LogCategory.API,
+            extra_data={
+                "call_connection_id": call_connection_id,
+                "from_number": from_number,
+                "to_number": to_number,
+                "payload": payload
+            }
+        )
+        
+        # Register the incoming call in ACS service
+        await acs_service.register_incoming_call(
+            call_id=call_connection_id,
+            caller_phone=from_number,
+            clinic_id='default-clinic',
+            acs_call_id=call_connection_id
+        )
+        
+        # Answer the call
+        await acs_service.answer_call(call_connection_id)
+        
+        # Initialize AI call handling
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        await orchestrator.start_call(
+            call_id=call_connection_id,
+            caller_phone=from_number,
+            clinic_id='default-clinic',
+            call_type='inbound'
+        )
+        
+        return {
+            "status": "call_received",
+            "message": f"Call {call_connection_id} received and answered",
+            "call_connection_id": call_connection_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling IncomingCallReceived event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling IncomingCallReceived event: {e}"
+        )
+
+
+async def handle_call_connected_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle CallConnected event from Call Automation.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_connection_id = payload.get('callConnectionId')
+        
+        logger.info(
+            f"CallConnected event: {call_connection_id}",
+            LogCategory.API,
+            extra_data={"call_connection_id": call_connection_id, "payload": payload}
+        )
+        
+        # Play greeting
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        await orchestrator.play_greeting(call_connection_id)
+        
+        return {
+            "status": "call_connected",
+            "message": f"Call {call_connection_id} connected",
+            "call_connection_id": call_connection_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling CallConnected event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling CallConnected event: {e}"
+        )
+
+
+async def handle_call_disconnected_event(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle CallDisconnected event from Call Automation.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_connection_id = payload.get('callConnectionId')
+        
+        logger.info(
+            f"CallDisconnected event: {call_connection_id}",
+            LogCategory.API,
+            extra_data={"call_connection_id": call_connection_id, "payload": payload}
+        )
+        
+        # End AI call handling
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        await orchestrator.end_call(call_connection_id)
+        
+        return {
+            "status": "call_disconnected",
+            "message": f"Call {call_connection_id} disconnected",
+            "call_connection_id": call_connection_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling CallDisconnected event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling CallDisconnected event: {e}"
+        )
+
+
+async def handle_event_grid_call_started(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle CallStarted event from Event Grid.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_id = payload.get('data', {}).get('callId')
+        
+        logger.info(
+            f"Event Grid CallStarted event: {call_id}",
+            LogCategory.API,
+            extra_data={"call_id": call_id, "payload": payload}
+        )
+        
+        return {
+            "status": "call_started",
+            "message": f"Event Grid call {call_id} started",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling Event Grid CallStarted event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling Event Grid CallStarted event: {e}"
+        )
+
+
+async def handle_event_grid_call_ended(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle CallEnded event from Event Grid.
+    
+    Args:
+        acs_service: Azure Communication Service instance
+        payload: Event payload
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Event handling result
+    """
+    try:
+        call_id = payload.get('data', {}).get('callId')
+        
+        logger.info(
+            f"Event Grid CallEnded event: {call_id}",
+            LogCategory.API,
+            extra_data={"call_id": call_id, "payload": payload}
+        )
+        
+        return {
+            "status": "call_ended",
+            "message": f"Event Grid call {call_id} ended",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error handling Event Grid CallEnded event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling Event Grid CallEnded event: {e}"
+        )
+
+
+async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], db: Session) -> Dict[str, Any]:
+    """
+    Handle IncomingCall event from Event Grid.
+    This event comes when someone calls the phone number.
+    We need to answer the call to establish the connection.
+    """
+    try:
+        # Extract call details from Event Grid payload
+        from_number = payload.get('data', {}).get('from', {}).get('phoneNumber', {}).get('value')
+        to_number = payload.get('data', {}).get('to', {}).get('phoneNumber', {}).get('value')
+        server_call_id = payload.get('data', {}).get('serverCallId')
+        
+        # Use serverCallId as the call_id (it's base64 encoded)
+        import base64
+        if server_call_id:
+            try:
+                # Decode the base64 serverCallId to get a readable call ID
+                decoded_id = base64.b64decode(server_call_id).decode('utf-8')
+                # Extract a shorter ID from the decoded string
+                call_id = f"EVENT_GRID_{decoded_id.split('/')[-1].split('?')[0][:12]}"
+            except:
+                # Fallback to using the base64 string directly
+                call_id = f"EVENT_GRID_{server_call_id[:12]}"
+        else:
+            # Generate a fallback call ID
+            call_id = f"EVENT_GRID_{payload.get('id', 'unknown')[:12]}"
+
+        logger.info(
+            f"Event Grid IncomingCall event from {from_number} to {to_number}",
+            LogCategory.API,
+            extra_data={
+                "from_number": from_number,
+                "to_number": to_number,
+                "call_id": call_id,
+                "payload": payload
+            }
+        )
+
+        # Get the callback URL from environment variables
+        from services.configuration import get_settings
+        settings = get_settings()
+        callback_url = settings.azure.communication.callback_url
+
+        if not callback_url:
+            logger.error("ACS_CALLBACK_URL is not configured. Cannot answer call.")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="ACS_CALLBACK_URL is not configured"
+            )
+
+        # Extract incomingCallContext from Event Grid payload
+        incoming_call_context = payload.get('data', {}).get('incomingCallContext')
+        
+        if not incoming_call_context:
+            logger.error("No incomingCallContext in Event Grid payload")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing incomingCallContext in Event Grid payload"
+            )
+
+        # Answer the call using Call Automation SDK
+        answer_result = await acs_service.answer_incoming_call(
+            incoming_call_context=incoming_call_context,
+            callback_url=callback_url
+        )
+
+        call_connection_id = answer_result.get('call_connection_id')
+        logger.info(f"Call answered with connection ID: {call_connection_id}")
+        
+        # Determine clinic (default to 'default-clinic' for now)
+        clinic_id = 'default-clinic'
+
+        # Register the incoming call in ACS service
+        await acs_service.register_incoming_call(
+            call_id=call_id,
+            caller_phone=from_number,
+            clinic_id=clinic_id,
+            acs_call_id=call_connection_id  # Use the actual call connection ID
+        )
+
+        # Initialize call orchestrator
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+
+        # Start AI conversation with the Event Grid call ID
+        await orchestrator.start_call(
+            call_id=call_id,
+            caller_phone=from_number,
+            clinic_id=clinic_id,
+            call_type='inbound'
+        )
+
+        # Play initial greeting
+        await orchestrator.play_greeting(call_id)
+
+        logger.info(f"AI call handling initialized for Event Grid call {call_id}")
+
+        return {
+            "status": "call_received",
+            "message": f"Event Grid call received and AI handling initialized for {call_id}",
+            "call_id": call_id,
+            "timestamp": datetime.now(AST).isoformat(),
+            "ai_ready": True
+        }
+
+    except Exception as e:
+        logger.error(f"Error handling Event Grid IncomingCall event: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error handling Event Grid IncomingCall event: {e}"
+        )
+
+
+# Webhook endpoints
+@router.post("/webhooks/events", response_model=Dict[str, Any])
+@router.get("/webhooks/events", response_model=Dict[str, Any])
+@router.options("/webhooks/events", response_model=Dict[str, Any])
+async def handle_webhook_events(
+    request: Request,
+    db: Session = Depends(get_db_session)
+) -> Dict[str, Any]:
+    """
+    Handle Azure Communication Services webhook events.
+    
+    Args:
+        request: FastAPI request object
+        db: Database session
+        
+    Returns:
+        Dict[str, Any]: Webhook handling result
+    """
+    try:
+        # Handle OPTIONS request for CORS preflight
+        if request.method == "OPTIONS":
+            # Check if this is a CloudEvents v1.0 validation request
+            webhook_request_origin = request.headers.get("WebHook-Request-Origin")
+            webhook_request_callback = request.headers.get("WebHook-Request-Callback")
+            
+            if webhook_request_origin and webhook_request_callback:
+                logger.info(
+                    f"CloudEvents v1.0 validation request from {webhook_request_origin}",
+                    LogCategory.API,
+                    extra_data={
+                        "webhook_request_origin": webhook_request_origin,
+                        "webhook_request_callback": webhook_request_callback,
+                        "client_ip": request.client.host if request.client else "unknown"
+                    }
+                )
+                
+                # Return required headers for CloudEvents v1.0 validation
+                return JSONResponse(
+                    content={"message": "CloudEvents v1.0 validation successful"},
+                    headers={
+                        "WebHook-Allowed-Origin": webhook_request_origin,
+                        "WebHook-Allowed-Rate": "120"
+                    }
+                )
+            else:
+                # Regular CORS preflight
+                return JSONResponse(
+                    content={"message": "CORS preflight request handled"},
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-ID, WebHook-Request-Origin, WebHook-Request-Callback"
+                    }
+                )
+        
+        # Handle ACS webhook events (POST requests)
         acs_service = get_azure_communication_service()
         
-        # Get raw payload
-        payload_bytes = await request.body()
-        
-        # Verify webhook signature
-        if not acs_service.verify_webhook_signature(request, payload_bytes):
-            logger.warning(
-                "Invalid webhook signature received",
-                LogCategory.API,
-                extra_data={
-                    "client_ip": request.client.host if request.client else "unknown",
-                    "user_agent": request.headers.get("user-agent", "unknown")
-                }
-            )
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid webhook signature"
-            )
-        
-        # Parse payload
+        # Parse payload first to check if it's an Event Grid validation event
         try:
+            payload_bytes = await request.body()
             payload = json.loads(payload_bytes.decode('utf-8'))
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in webhook payload: {e}")
@@ -424,103 +817,168 @@ async def handle_webhook_events(
                 detail="Invalid JSON payload"
             )
         
-        # Handle the webhook event
-        result = await acs_service.handle_webhook_event(request, payload)
+        # Handle Event Grid validation handshake (SubscriptionValidationEvent)
+        # Skip signature verification for Event Grid validation events
+        # Event Grid sends an array of events, so we need to check each one
+        if isinstance(payload, list) and len(payload) > 0:
+            # Check if any event in the array is a validation event
+            for event in payload:
+                if event.get('eventType') == 'Microsoft.EventGrid.SubscriptionValidationEvent':
+                    validation_code = event.get('data', {}).get('validationCode')
+                    if validation_code:
+                        logger.info(
+                            f"Event Grid validation handshake received: {validation_code}",
+                            LogCategory.API,
+                            extra_data={
+                                "validation_code": validation_code,
+                                "client_ip": request.client.host if request.client else "unknown"
+                            }
+                        )
+                        return {"validationResponse": validation_code}
+                    else:
+                        logger.warning("Event Grid validation event missing validationCode")
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Missing validationCode in Event Grid validation event"
+                        )
+        elif isinstance(payload, dict) and payload.get('eventType') == 'Microsoft.EventGrid.SubscriptionValidationEvent':
+            validation_code = payload.get('data', {}).get('validationCode')
+            if validation_code:
+                logger.info(
+                    f"Event Grid validation handshake received: {validation_code}",
+                    LogCategory.API,
+                    extra_data={
+                        "validation_code": validation_code,
+                        "client_ip": request.client.host if request.client else "unknown"
+                    }
+                )
+                return {"validationResponse": validation_code}
+            else:
+                logger.warning("Event Grid validation event missing validationCode")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing validationCode in Event Grid validation event"
+                )
+
+        # Check if this is a Call Automation event (signed with ACS webhook secret)
+        # Event Grid uses 'type' field, Call Automation uses 'eventType' field
+        event_type_field = payload.get('type') or payload.get('eventType', '')
+        is_call_automation_event = event_type_field.startswith('Microsoft.Communication.CallAutomation.')
         
-        logger.info(
-            f"Webhook event processed: {payload.get('eventType', 'unknown')}",
-            LogCategory.API,
-            extra_data={
-                "event_type": payload.get('eventType'),
-                "call_connection_id": payload.get('callConnectionId'),
-                "result": result
-            }
-        )
-        
-        return result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"Unexpected error handling webhook: {e}",
-            LogCategory.API,
-            exception=e
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+        # Check if this is an Event Grid event (not signed with ACS webhook secret)
+        is_event_grid_event = (
+            event_type_field.startswith('Microsoft.Communication.') and
+            not event_type_field.startswith('Microsoft.Communication.CallAutomation.')
         )
 
-
-@router.post("/webhooks/recording", response_model=Dict[str, Any])
-async def handle_recording_webhook(
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    Handle recording-specific webhook events from ACS.
-    
-    This endpoint processes recording events separately from general
-    call events for better organization and processing.
-    """
-    try:
-        # Get raw payload
-        payload_bytes = await request.body()
-        
-        # Parse payload
-        try:
-            payload = json.loads(payload_bytes.decode('utf-8'))
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in recording webhook payload: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid JSON payload"
+        # Only verify ACS webhook signature for Call Automation events
+        if is_call_automation_event:
+            if not acs_service.verify_webhook_signature(request, payload_bytes):
+                logger.warning(
+                    "Invalid webhook signature received for Call Automation event",
+                    LogCategory.API,
+                    extra_data={
+                        "client_ip": request.client.host if request.client else "unknown",
+                        "user_agent": request.headers.get("user-agent", "unknown"),
+                        "event_type": event_type_field
+                    }
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid webhook signature"
+                )
+        elif is_event_grid_event:
+            logger.info(
+                "Event Grid event received, skipping ACS signature verification",
+                LogCategory.API,
+                extra_data={"event_type": event_type_field}
             )
+        else:
+            logger.info(
+                "Non-Call Automation event received, skipping ACS signature verification",
+                LogCategory.API,
+                extra_data={"event_type": event_type_field}
+            )
+
+        # Handle different types of call events
+        # Process events - handle both single event and array of events
+        events_to_process = payload if isinstance(payload, list) else [payload]
         
-        logger.info(
-            f"Recording webhook received: {payload.get('eventType', 'unknown')}",
-            LogCategory.API,
-            extra_data={
-                "event_type": payload.get('eventType'),
-                "recording_id": payload.get('recordingId'),
-                "recording_state": payload.get('recordingState')
-            }
-        )
+        results = []
+        for event_payload in events_to_process:
+            if not isinstance(event_payload, dict):
+                logger.warning(f"Skipping non-dict event: {event_payload}")
+                continue
+                
+            # Event Grid uses 'type' field, Call Automation uses 'eventType' field
+            event_type = event_payload.get('type') or event_payload.get('eventType', 'unknown')
+            call_connection_id = event_payload.get('callConnectionId')
+
+            logger.info(
+                f"Processing webhook event: {event_type}",
+                LogCategory.API,
+                extra_data={
+                    "event_type": event_type,
+                    "call_connection_id": call_connection_id,
+                    "payload": event_payload
+                }
+            )
+
+            # Handle IncomingCallReceived event from Call Automation (when someone calls)
+            if event_type == 'Microsoft.Communication.CallAutomation.IncomingCallReceived':
+                result = await handle_incoming_call_received_event(acs_service, event_payload, db)
+
+            # Handle CallConnected event from Call Automation (when call is answered)
+            elif event_type == 'Microsoft.Communication.CallAutomation.CallConnected':
+                result = await handle_call_connected_event(acs_service, event_payload, db)
+
+            # Handle CallDisconnected event from Call Automation (when call ends)
+            elif event_type == 'Microsoft.Communication.CallAutomation.CallDisconnected':
+                result = await handle_call_disconnected_event(acs_service, event_payload, db)
+
+            # Handle Event Grid IncomingCall event (when someone calls via Event Grid)
+            elif event_type == 'Microsoft.Communication.IncomingCall':
+                result = await handle_event_grid_incoming_call(acs_service, event_payload, db)
+
+            # Handle Event Grid CallStarted event (when call starts via Event Grid)
+            elif event_type == 'Microsoft.Communication.CallStarted':
+                result = await handle_event_grid_call_started(acs_service, event_payload, db)
+
+            # Handle Event Grid CallEnded event (when call ends via Event Grid)
+            elif event_type == 'Microsoft.Communication.CallEnded':
+                result = await handle_event_grid_call_ended(acs_service, event_payload, db)
+
+            # Handle other Call Automation events
+            else:
+                result = await acs_service.handle_webhook_event(request, event_payload)
+            
+            results.append(result)
         
-        # For now, just acknowledge the webhook
-        # In a full implementation, you would process the recording data
-        return {
-            "status": "received",
-            "message": "Recording webhook processed",
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-    except HTTPException:
-        raise
+        # Return results - single result if single event, array if multiple events
+        return results[0] if len(results) == 1 else {"results": results}
+
     except Exception as e:
-        logger.error(
-            f"Unexpected error handling recording webhook: {e}",
-            LogCategory.API,
-            exception=e
-        )
+        logger.error(f"Error processing webhook event: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail=f"Error processing webhook event: {e}"
         )
 
 
-# WebSocket Endpoint
+# WebSocket endpoint for audio streaming
 @router.websocket("/ws/audio/{call_id}")
 async def websocket_audio_stream(
     websocket: WebSocket,
-    call_id: str
+    call_id: str,
+    db: Session = Depends(get_db_session)
 ):
     """
     WebSocket endpoint for real-time audio streaming.
     
-    This endpoint establishes a WebSocket connection for bidirectional
-    audio streaming between the client and Azure Communication Services.
+    Args:
+        websocket: WebSocket connection
+        call_id: ID of the call
+        db: Database session
     """
     connection_id = None
     
@@ -531,210 +989,200 @@ async def websocket_audio_stream(
         connection_id = await audio_handler.connect_audio_stream(websocket, call_id)
         
         logger.info(
-            f"WebSocket audio stream established: {connection_id} for call {call_id}",
+            f"Audio stream connected for call {call_id}",
             LogCategory.API,
-            extra_data={
-                "connection_id": connection_id,
-                "call_id": call_id
-            }
+            extra_data={"call_id": call_id, "connection_id": connection_id}
         )
         
-        # Handle incoming audio
-        await audio_handler.handle_incoming_audio(connection_id)
-        
-    except CallNotFoundError as e:
-        logger.warning(
-            f"Call not found for WebSocket connection: {call_id}",
-            LogCategory.API,
-            extra_data={"call_id": call_id}
-        )
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Call not found")
-    
-    except ValidationError as e:
-        logger.warning(
-            f"Validation error in WebSocket connection: {e}",
-            LogCategory.API,
-            extra_data={"call_id": call_id, "error": str(e)}
-        )
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Validation error")
-    
-    except WebSocketDisconnect:
-        logger.info(
-            f"WebSocket disconnected: {connection_id} for call {call_id}",
-            LogCategory.API,
-            extra_data={
-                "connection_id": connection_id,
-                "call_id": call_id
-            }
-        )
-    
+        # Keep connection alive
+        while True:
+            try:
+                # Wait for messages from client
+                data = await websocket.receive_text()
+                
+                # Process audio data
+                await audio_handler.handle_incoming_audio(connection_id)
+                
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket disconnected for call {call_id}")
+                break
+            except Exception as e:
+                logger.error(f"Error in WebSocket for call {call_id}: {e}")
+                break
+                
     except Exception as e:
-        logger.error(
-            f"Unexpected error in WebSocket audio stream: {e}",
-            LogCategory.API,
-            exception=e,
-            extra_data={
-                "connection_id": connection_id,
-                "call_id": call_id
-            }
-        )
-        
-        try:
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR, reason="Internal error")
-        except Exception:
-            pass  # WebSocket might already be closed
+        logger.error(f"Failed to establish audio stream for call {call_id}: {e}", exc_info=True)
+        await websocket.close(code=1011, reason="Internal server error")
+    finally:
+        # Clean up connection
+        if connection_id:
+            try:
+                audio_handler = get_audio_stream_handler()
+                await audio_handler.disconnect_audio_stream(connection_id)
+            except Exception as e:
+                logger.error(f"Error cleaning up audio stream for call {call_id}: {e}")
 
 
-# Health and Monitoring Endpoints
+# Health and monitoring endpoints
 @router.get("/health", response_model=Dict[str, Any])
 async def get_acs_health():
     """
-    Get health status of Azure Communication Services integration.
+    Get Azure Communication Services health status.
     
-    Returns the current status of ACS connections and services.
+    Returns:
+        Dict[str, Any]: Health status information
     """
     try:
         acs_service = get_azure_communication_service()
-        audio_handler = get_audio_stream_handler()
         
-        # Get service statistics
-        active_calls = acs_service.get_active_calls_count()
-        connection_stats = audio_handler.get_connection_statistics()
+        # Check ACS service health
+        health_status = await acs_service.get_health_status()
         
         return {
             "status": "healthy",
-            "active_calls": active_calls,
-            "connection_statistics": connection_stats,
-            "timestamp": datetime.utcnow().isoformat()
+            "acs_service": health_status,
+            "timestamp": datetime.now(AST).isoformat()
         }
         
     except Exception as e:
-        logger.error(
-            f"Error checking ACS health: {e}",
-            LogCategory.API,
-            exception=e
-        )
-        
+        logger.error(f"ACS health check failed: {e}", exc_info=True)
         return {
             "status": "unhealthy",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(AST).isoformat()
         }
 
 
 @router.get("/cache/statistics", response_model=Dict[str, Any])
 async def get_cache_statistics():
     """
-    Get cache performance statistics.
+    Get cache statistics.
     
     Returns:
-        Dict[str, Any]: Cache statistics including hit rates, memory usage, and performance metrics
+        Dict[str, Any]: Cache statistics
     """
     try:
         from services.response_cache import get_response_cache_service
-        from services.hybrid_nlp_service import get_hybrid_nlp_service
+        cache_service = get_response_cache_service()
         
-        # Get response cache statistics
-        response_cache = get_response_cache_service()
-        await response_cache.initialize()
-        cache_stats = await response_cache.get_cache_statistics()
-        
-        # Get NLP cache statistics
-        nlp_service = get_hybrid_nlp_service()
-        nlp_stats = nlp_service.get_processing_statistics()
-        
-        # Calculate estimated token savings
-        total_requests = cache_stats.get("statistics", {}).get("total_requests", 0)
-        cache_hits = cache_stats.get("statistics", {}).get("hits", 0)
-        hit_rate = cache_stats.get("statistics", {}).get("hit_rate", 0.0)
-        
-        # Estimate token savings (rough calculation)
-        estimated_tokens_saved = cache_hits * 50  # Assume 50 tokens saved per cache hit
-        estimated_cost_savings = estimated_tokens_saved * 0.0001  # Rough cost per token
+        stats = cache_service.get_statistics()
         
         return {
-            "response_cache": cache_stats,
-            "nlp_cache": nlp_stats,
-            "performance_metrics": {
-                "total_requests": total_requests,
-                "cache_hits": cache_hits,
-                "hit_rate": hit_rate,
-                "estimated_tokens_saved": estimated_tokens_saved,
-                "estimated_cost_savings_usd": round(estimated_cost_savings, 4)
-            },
-            "timestamp": datetime.utcnow().isoformat()
+            "cache_statistics": stats,
+            "timestamp": datetime.now(AST).isoformat()
         }
         
     except Exception as e:
-        logger.error(f"Failed to get cache statistics: {e}", LogCategory.CACHE)
+        logger.error(f"Failed to get cache statistics: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve cache statistics: {str(e)}"
+            detail=f"Failed to get cache statistics: {e}"
         )
 
 
 @router.post("/cache/clear", response_model=Dict[str, Any])
 async def clear_cache(pattern: Optional[str] = None):
     """
-    Clear cache entries (admin only).
+    Clear cache entries.
     
     Args:
-        pattern: Optional pattern to match keys (default: all response keys)
+        pattern: Optional pattern to match cache keys
         
     Returns:
-        Dict[str, Any]: Clear operation results
+        Dict[str, Any]: Cache clear result
     """
     try:
         from services.response_cache import get_response_cache_service
+        cache_service = get_response_cache_service()
         
-        response_cache = get_response_cache_service()
-        await response_cache.initialize()
+        cleared_count = cache_service.clear_cache(pattern)
         
-        # Clear cache
-        success = await response_cache.clear_cache(pattern)
+        return {
+            "status": "success",
+            "cleared_entries": cleared_count,
+            "pattern": pattern,
+            "timestamp": datetime.now(AST).isoformat()
+        }
         
-        if success:
-            return {
-                "message": "Cache cleared successfully",
-                "pattern": pattern,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to clear cache"
-            )
-            
     except Exception as e:
-        logger.error(f"Failed to clear cache: {e}", LogCategory.CACHE)
+        logger.error(f"Failed to clear cache: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to clear cache: {str(e)}"
+            detail=f"Failed to clear cache: {e}"
         )
 
 
 @router.get("/cache/health", response_model=Dict[str, Any])
 async def get_cache_health():
     """
-    Get cache service health status.
+    Get cache health status.
     
     Returns:
         Dict[str, Any]: Cache health information
     """
     try:
         from services.response_cache import get_response_cache_service
+        cache_service = get_response_cache_service()
         
-        response_cache = get_response_cache_service()
-        await response_cache.initialize()
+        health_status = cache_service.get_health_status()
         
-        health_status = await response_cache.health_check()
-        
-        return health_status
+        return {
+            "cache_health": health_status,
+            "timestamp": datetime.now(AST).isoformat()
+        }
         
     except Exception as e:
-        logger.error(f"Failed to get cache health: {e}", LogCategory.CACHE)
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        logger.error(f"Failed to get cache health: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get cache health: {e}"
+        )
+
+
+@router.websocket("/ws/audio/{call_connection_id}")
+async def websocket_audio_stream(
+    websocket: WebSocket,
+    call_connection_id: str
+):
+    """WebSocket endpoint for ACS media streaming."""
+    try:
+        await websocket.accept()
+        
+        audio_handler = get_audio_stream_handler()
+        acs_service = get_azure_communication_service()
+        
+        # Find call by ACS connection ID
+        call_id = None
+        for cid, call_state in acs_service.active_calls.items():
+            if call_state.acs_call_id == call_connection_id:
+                call_id = cid
+                break
+        
+        if not call_id:
+            logger.warning(f"No call found for connection {call_connection_id}")
+            await websocket.close(code=1008, reason="Call not found")
+            return
+        
+        # Connect audio stream
+        connection_id = await audio_handler.connect_audio_stream(websocket, call_id)
+        
+        # Start STT recognition for this call
+        from services.azure_speech_stt import get_stt_service
+        stt_service = get_stt_service()
+        
+        # Register audio processor to feed STT
+        async def audio_processor(chunk, connection):
+            # Push audio to STT recognizer
+            await stt_service.process_audio_chunk(call_id, chunk.data)
+        
+        audio_handler.register_audio_processor(connection_id, audio_processor)
+        
+        # Handle incoming audio from ACS
+        await audio_handler.handle_incoming_audio(connection_id)
+        
+    except Exception as e:
+        logger.error(f"WebSocket audio error: {e}", exc_info=True)
+        try:
+            await websocket.close(code=1011, reason="Internal error")
+        except:
+            pass

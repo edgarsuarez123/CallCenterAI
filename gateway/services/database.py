@@ -220,7 +220,8 @@ def test_database_connection(max_retries: int = 5) -> bool:
         try:
             with get_db_session() as db:
                 # Simple query to test connection
-                result = db.execute("SELECT 1").scalar()
+                from sqlalchemy import text
+                result = db.execute(text("SELECT 1")).scalar()
                 if result == 1:
                     logger.info("Database connection test successful")
                     return True

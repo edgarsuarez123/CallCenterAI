@@ -1,29 +1,38 @@
 #!/bin/bash
+
+# CallCenter AI Gateway startup script
+# Handles both development and production environments
+
 set -e
 
-echo "Starting CallCenterAI Gateway..."
+# Logging function
+log_with_timestamp() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
+
+log_with_timestamp "Starting CallCenter AI Gateway..."
 
 # Wait for database to be ready
-echo "Waiting for database to be ready..."
-until pg_isready -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER"; do
-  echo "Database is unavailable - sleeping"
-  sleep 2
+log_with_timestamp "Waiting for database to be ready..."
+until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME"; do
+    log_with_timestamp "Database not ready, waiting..."
+    sleep 2
 done
 
-echo "Database is ready!"
+log_with_timestamp "Database is ready!"
 
-# Run database migrations
-echo "Running database migrations..."
-python migrate.py upgrade
+# Reset database and run clean migration
+log_with_timestamp "Resetting database and running clean migration..."
+cd /app
+python reset_db.py
 
-# Check if migrations were successful
-if [ $? -eq 0 ]; then
-    echo "Migrations completed successfully"
-else
-    echo "Migration failed - exiting"
-    exit 1
-fi
+log_with_timestamp "Database reset and migration completed!"
 
 # Start the application
-echo "Starting FastAPI application..."
-exec uvicorn main:app --host "$APP_HOST" --port "$APP_PORT"
+if [ "$APP_ENVIRONMENT" = "development" ]; then
+    log_with_timestamp "Starting in development mode with hot reload..."
+    exec uvicorn main:app --host "$APP_HOST" --port "$APP_PORT" --reload
+else
+    log_with_timestamp "Starting in production mode..."
+    exec uvicorn main:app --host "$APP_HOST" --port "$APP_PORT" --workers "$APP_WORKERS"
+fi

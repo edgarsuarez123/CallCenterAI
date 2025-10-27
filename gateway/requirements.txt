@@ -23,6 +23,7 @@ requests==2.31.0
 # Azure Communication Services
 azure-communication-identity==1.2.0
 azure-communication-phonenumbers==1.2.0
+azure-communication-callautomation==1.1.0
 
 # Azure Speech Services
 azure-cognitiveservices-speech==1.34.0

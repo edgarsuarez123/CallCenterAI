@@ -319,6 +319,20 @@ class CallNotFoundError(CallCenterAIException):
         )
 
 
+class CallOrchestrationError(CallCenterAIException):
+    """Raised when call orchestration fails."""
+    
+    def __init__(self, error_type: str, reason: str, call_id: Optional[str] = None):
+        super().__init__(
+            message=f"Call orchestration error ({error_type}): {reason}",
+            error_code=ErrorCode.CALL_ROUTING_FAILED,
+            http_status=500,
+            details={"error_type": error_type, "reason": reason, "call_id": call_id},
+            user_message="Call processing failed. Please try again.",
+            context={"error_type": error_type, "call_id": call_id}
+        )
+
+
 class InvalidCallStatusError(CallCenterAIException):
     """Raised when call status is invalid."""
     

@@ -10,10 +10,6 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 # Import all models to ensure they're registered with SQLAlchemy
 from models.models import Base
-from models.call_flow_models import (
-    CallSession, CallTranscript, CallIntent, CallEntity,
-    CallSummary, CallRecording, CallMetrics, CallFeedback
-)
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -57,7 +53,7 @@ def get_database_url():
         db_pass_encoded = quote_plus(db_pass)
         
         # Auto-detect SSL
-        is_azure = "azure.com" in db_host
+        is_azure = "azure.com" in db_host or "database.windows.net" in db_host
         ssl_mode = "require" if is_azure else "disable"
         
         return f"postgresql://{db_user}:{db_pass_encoded}@{db_host}:{db_port}/{db_name}?sslmode={ssl_mode}"

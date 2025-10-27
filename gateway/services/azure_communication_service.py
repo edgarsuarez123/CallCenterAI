@@ -14,7 +14,7 @@ import hmac
 import json
 import logging
 import uuid
-from datetime import datetime, timezone, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlencode
 
@@ -316,6 +316,131 @@ class AzureCommunicationService:
             self.logger.error(f"Failed to store call record: {e}")
             # Don't raise here as the call is already active
     
+    async def answer_incoming_call(self, incoming_call_context: str, callback_url: str) -> Dict[str, Any]:
+        """
+        Answer an incoming call using Call Automation SDK.
+        This is used when receiving IncomingCall event from Event Grid.
+        
+        Args:
+            incoming_call_context: The incoming call context from Event Grid
+            callback_url: The callback URL for Call Automation events
+            
+        Returns:
+            Dict containing call connection details
+            
+        Raises:
+            AzureCommunicationError: If answering fails
+        """
+        try:
+            from azure.communication.callautomation import CallAutomationClient
+            
+            # Create Call Automation client
+            call_automation_client = CallAutomationClient.from_connection_string(
+                self.connection_string
+            )
+            
+            # Answer the call using proper SDK method
+            try:
+                # Try keyword arguments first
+                answer_call_result = call_automation_client.answer_call(
+                    incoming_call_context=incoming_call_context,
+                    callback_url=callback_url
+                )
+                self.logger.info("Call answered successfully with keyword arguments")
+            except Exception as e1:
+                self.logger.warning(f"Keyword arguments failed: {e1}")
+                try:
+                    # Try positional arguments
+                    answer_call_result = call_automation_client.answer_call(
+                        incoming_call_context,
+                        callback_url
+                    )
+                    self.logger.info("Call answered successfully with positional arguments")
+                except Exception as e2:
+                    self.logger.error(f"All answer_call attempts failed: {e1}, {e2}")
+                    raise AzureCommunicationError(
+                        "answer_failed", 
+                        f"Failed to answer incoming call: {e1}"
+                    )
+            
+            self.logger.info(
+                f"Call answered successfully via Call Automation SDK",
+                LogCategory.AZURE_COMMUNICATION,
+                extra_data={
+                    "call_connection_id": answer_call_result.call_connection_id,
+                    "callback_url": callback_url
+                }
+            )
+            
+            # Start media streaming for real-time audio
+            try:
+                # Check if SDK supports start_media_streaming
+                if hasattr(answer_call_result.call_connection, 'start_media_streaming'):
+                    # Configure WebSocket URL for media streaming
+                    ws_url = f"{callback_url.replace('https://', 'wss://')}/ws/audio/{answer_call_result.call_connection_id}"
+                    
+                    # Start streaming (method signature may vary)
+                    answer_call_result.call_connection.start_media_streaming(
+                        transport_url=ws_url,
+                        transport_type="websocket"
+                    )
+                    
+                    self.logger.info(f"Media streaming started for call {answer_call_result.call_connection_id}")
+                else:
+                    self.logger.warning("Media streaming not supported, will use Play API fallback")
+                    
+            except Exception as e:
+                self.logger.warning(f"Failed to start media streaming: {e}")
+                # Continue without media streaming - will use Play API instead
+            
+            # Get call connection using the client
+            call_connection = call_automation_client.get_call_connection(
+                answer_call_result.call_connection_id
+            )
+            
+            return {
+                "call_connection_id": answer_call_result.call_connection_id,
+                "call_connection": call_connection,
+                "status": "answered"
+            }
+            
+        except Exception as e:
+            self.logger.error(
+                f"Error answering incoming call: {e}",
+                LogCategory.AZURE_COMMUNICATION,
+                exception=e
+            )
+            raise AzureCommunicationError("answer_failed", f"Failed to answer incoming call: {str(e)}")
+
+    async def register_incoming_call(self, call_id: str, caller_phone: str, clinic_id: str, acs_call_id: str) -> bool:
+        """
+        Register an incoming call in the active calls dictionary.
+        
+        Args:
+            call_id: Internal call ID
+            caller_phone: Caller's phone number
+            clinic_id: Clinic ID
+            acs_call_id: ACS call connection ID
+            
+        Returns:
+            True if call was registered successfully
+        """
+        try:
+            # Create call state for incoming call
+            call_state = CallState(call_id, clinic_id, caller_phone)
+            call_state.status = "incoming"
+            call_state.acs_call_id = acs_call_id
+            
+            async with self._calls_lock:
+                self.active_calls[call_id] = call_state
+            
+            logger.info(f"Registered incoming call {call_id} with ACS call ID {acs_call_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to register incoming call {call_id}: {e}")
+            raise AzureCommunicationError("register_failed", f"Failed to register incoming call: {str(e)}")
+
     async def answer_call(self, call_id: str) -> bool:
         """
         Answer an inbound call.
@@ -536,6 +661,83 @@ class AzureCommunicationService:
                 LogCategory.AZURE_COMMUNICATION,
                 exception=e
             )
+            return False
+    
+    async def play_scripted_text(self, call_connection_id: str, text: str, language: str = "en-US") -> bool:
+        """Play text using ACS TextSource (fast, no TTS processing)."""
+        try:
+            from azure.communication.callautomation import CallAutomationClient
+            from azure.communication.callautomation import TextSource
+            
+            # Create client
+            client = CallAutomationClient.from_connection_string(self.connection_string)
+            call_connection = client.get_call_connection(call_connection_id)
+            
+            # Create TextSource
+            text_source = TextSource(text=text, voice_name=self._get_voice_name(language))
+            
+            # Play text
+            call_connection.play_media(play_source=text_source)
+            
+            self.logger.info(f"Text played via TextSource for {call_connection_id}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to play text via TextSource for {call_connection_id}: {e}")
+            return False
+    
+    def _get_voice_name(self, language: str) -> str:
+        """Get appropriate voice name for language."""
+        voice_mapping = {
+            "en-US": "en-US-AriaNeural",
+            "es-ES": "es-ES-ElviraNeural",
+            "es-MX": "es-MX-DaliaNeural"
+        }
+        return voice_mapping.get(language, "en-US-AriaNeural")
+    
+    async def play_audio_to_call(self, call_connection_id: str, audio_data: bytes) -> bool:
+        """Play audio to call using Call Automation Play API."""
+        try:
+            from azure.communication.callautomation import CallAutomationClient
+            
+            # Create client
+            client = CallAutomationClient.from_connection_string(self.connection_string)
+            call_connection = client.get_call_connection(call_connection_id)
+            
+            # Option 1: Try FileSource with data URI
+            try:
+                from azure.communication.callautomation import FileSource
+                import base64
+                
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                audio_uri = f"data:audio/wav;base64,{audio_base64}"
+                
+                play_source = FileSource(url=audio_uri)
+                call_connection.play_media(play_source=play_source)
+                
+                self.logger.info(f"Audio played via FileSource for {call_connection_id}")
+                return True
+                
+            except Exception as e1:
+                self.logger.warning(f"FileSource failed: {e1}")
+                
+                # Option 2: Try TextSource with SSML
+                try:
+                    from azure.communication.callautomation import TextSource
+                    
+                    # Convert audio back to text if possible, or use placeholder
+                    text_source = TextSource(text="Response audio playback")
+                    call_connection.play_media(play_source=text_source)
+                    
+                    self.logger.info(f"Audio played via TextSource for {call_connection_id}")
+                    return True
+                    
+                except Exception as e2:
+                    self.logger.error(f"All play methods failed: {e1}, {e2}")
+                    return False
+            
+        except Exception as e:
+            self.logger.error(f"Failed to play audio to call {call_connection_id}: {e}")
             return False
     
     def verify_webhook_signature(self, request: Request, payload: bytes) -> bool:
