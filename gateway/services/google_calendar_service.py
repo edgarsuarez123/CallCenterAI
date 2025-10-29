@@ -612,3 +612,20 @@ class GoogleCalendarIntegrationService:
         except Exception as e:
             self.logger.error(f"Failed to cancel calendar appointment: {str(e)}")
             return False
+
+
+# Singleton instance
+_google_calendar_service: Optional[GoogleCalendarService] = None
+
+
+def get_google_calendar_service() -> GoogleCalendarService:
+    """Get the global GoogleCalendarService instance."""
+    global _google_calendar_service
+    if _google_calendar_service is None:
+        from services.configuration import get_settings
+        settings = get_settings()
+        _google_calendar_service = GoogleCalendarService(
+            config=settings.google_calendar,
+            db_session=None
+        )
+    return _google_calendar_service

@@ -91,9 +91,22 @@ class AudioStreamHandler:
         self.max_connections = 100
         self.connection_timeout = 300  # 5 minutes
         self.cleanup_interval = 60  # 1 minute
-        
-        # Start cleanup task
-        asyncio.create_task(self._cleanup_inactive_connections())
+        self._cleanup_task = None
+    
+    async def start(self):
+        """Start the audio stream handler."""
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._cleanup_inactive_connections())
+    
+    async def stop(self):
+        """Stop the audio stream handler."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
     
     async def connect_audio_stream(self, websocket: WebSocket, call_id: str) -> str:
         """
@@ -497,8 +510,8 @@ class AudioStreamHandler:
     
     async def _cleanup_inactive_connections(self):
         """Clean up inactive connections periodically."""
-        while True:
-            try:
+        try:
+            while True:
                 await asyncio.sleep(self.cleanup_interval)
                 
                 current_time = datetime.now(timezone.utc)
@@ -527,12 +540,15 @@ class AudioStreamHandler:
                         }
                     )
                 
-            except Exception as e:
-                self.logger.error(
-                    f"Error in connection cleanup task: {e}",
-                    LogCategory.AZURE_COMMUNICATION,
-                    exception=e
-                )
+        except asyncio.CancelledError:
+            self.logger.info("Cleanup task cancelled")
+            raise
+        except Exception as e:
+            self.logger.error(
+                f"Error in connection cleanup task: {e}",
+                LogCategory.AZURE_COMMUNICATION,
+                exception=e
+            )
 
 
 # Global service instance

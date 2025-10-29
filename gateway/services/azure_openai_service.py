@@ -1006,28 +1006,40 @@ class AzureOpenAIService:
         return len(self.conversations)
     
     async def cleanup_expired_conversations(self):
-        """Clean up expired conversations."""
-        try:
-            current_time = datetime.now(timezone.utc)
-            expired_calls = []
+        """Remove old conversations from memory."""
+        current_time = datetime.now(timezone.utc)
+        expired_calls = []
+        
+        for call_id, messages in self.conversations.items():
+            if not messages:
+                expired_calls.append(call_id)
+                continue
             
-            for call_id, messages in self.conversations.items():
-                if messages:
-                    last_message_time = messages[-1].timestamp
-                    if (current_time - last_message_time).total_seconds() > 3600:  # 1 hour
-                        expired_calls.append(call_id)
+            last_message_time = messages[-1].timestamp
+            # Remove after 5 minutes of inactivity (user requirement)
+            time_since_last_message = (current_time - last_message_time).total_seconds()
             
-            for call_id in expired_calls:
-                del self.conversations[call_id]
-                if call_id in self.intent_stats:
-                    del self.intent_stats[call_id]
-                if call_id in self.response_stats:
-                    del self.response_stats[call_id]
-                
-                self.logger.info(f"Cleaned up expired OpenAI conversation: {call_id}")
-                
-        except Exception as e:
-            self.logger.error(f"Failed to cleanup expired OpenAI conversations: {e}")
+            if time_since_last_message > 300:  # 5 minutes = 300 seconds
+                expired_calls.append(call_id)
+        
+        for call_id in expired_calls:
+            del self.conversations[call_id]
+            if call_id in self.intent_stats:
+                del self.intent_stats[call_id]
+            if call_id in self.response_stats:
+                del self.response_stats[call_id]
+            
+            self.logger.info(f"Cleaned up expired OpenAI conversation: {call_id}")
+    
+    async def end_conversation(self, call_id: str):
+        """Explicitly end and clean up a conversation when call finishes."""
+        if call_id in self.conversations:
+            del self.conversations[call_id]
+            if call_id in self.intent_stats:
+                del self.intent_stats[call_id]
+            if call_id in self.response_stats:
+                del self.response_stats[call_id]
+            self.logger.info(f"Conversation {call_id} ended and cleaned up")
 
 
 # Global service instance

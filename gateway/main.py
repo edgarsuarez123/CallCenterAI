@@ -14,7 +14,7 @@ from services.structured_logging import (
     LogCategory
 )
 from services.background_jobs import start_background_jobs, stop_background_jobs
-from services.configuration import get_settings, validate_configuration
+from services.configuration import get_settings, validate_configuration, validate_required_settings, ConfigurationError
 from services.exception_handler import register_exception_handlers
 from routes.tokens import router as tokens_router
 from routes import api_router
@@ -159,6 +159,14 @@ def on_startup():
     # Database schema is now managed by Alembic migrations
     # Run migrations with: alembic upgrade head
     
+    try:
+        # Validate critical configuration first
+        validate_required_settings(settings)
+        logger.info("Critical configuration validation passed")
+    except ConfigurationError as e:
+        logger.error(f"Configuration validation failed: {e}")
+        raise
+    
     # Validate configuration
     validation_results = validate_configuration()
     if not validation_results["valid"]:
@@ -197,13 +205,40 @@ def on_startup():
     logger.info("Background job manager started", LogCategory.SYSTEM)
 
 @app.on_event("shutdown")
-def on_shutdown():
+async def on_shutdown():
     """Application shutdown - cleanup resources."""
     logger.info("Shutting down CallCenterAI Gateway", LogCategory.SYSTEM)
     
     # Stop background jobs
     stop_background_jobs()
     logger.info("Background job manager stopped", LogCategory.SYSTEM)
+    
+    # Close Redis connection pool
+    try:
+        from services.response_cache import get_response_cache_service
+        response_cache = get_response_cache_service()
+        await response_cache.close()
+        logger.info("Redis connection pool closed", LogCategory.SYSTEM)
+    except Exception as e:
+        logger.error(f"Error closing Redis connection pool: {e}", LogCategory.SYSTEM, exception=e)
+    
+    # Close ACS HTTP client
+    try:
+        from services.azure_communication_service import get_azure_communication_service
+        acs_service = get_azure_communication_service()
+        await acs_service.close()
+        logger.info("ACS HTTP client closed", LogCategory.SYSTEM)
+    except Exception as e:
+        logger.error(f"Error closing ACS HTTP client: {e}", LogCategory.SYSTEM, exception=e)
+    
+    # Close audio stream handler
+    try:
+        from services.audio_stream_handler import get_audio_stream_handler
+        audio_handler = get_audio_stream_handler()
+        await audio_handler.stop()
+        logger.info("Audio stream handler stopped", LogCategory.SYSTEM)
+    except Exception as e:
+        logger.error(f"Error stopping audio handler: {e}", LogCategory.SYSTEM, exception=e)
 
 @app.get("/healthz")
 def healthz():

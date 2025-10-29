@@ -71,6 +71,7 @@ class ErrorCode(Enum):
     GOOGLE_CALENDAR_ERROR = "google_calendar_error"
     AZURE_COMMUNICATION_ERROR = "azure_communication_error"
     EXTERNAL_SERVICE_UNAVAILABLE = "external_service_unavailable"
+    SERVICE_UNAVAILABLE = "service_unavailable"
     
     # Business logic errors
     BUSINESS_RULE_VIOLATION = "business_rule_violation"
@@ -518,6 +519,20 @@ class ExternalServiceUnavailableError(CallCenterAIException):
             details={"service": service, "reason": reason},
             user_message="An external service is temporarily unavailable. Please try again later.",
             context={"service": service}
+        )
+
+
+class ServiceUnavailableError(CallCenterAIException):
+    """Raised when a service is unavailable."""
+    
+    def __init__(self, message: str = "Service is temporarily unavailable"):
+        super().__init__(
+            message=message,
+            error_code=ErrorCode.SERVICE_UNAVAILABLE,
+            http_status=503,
+            details={"service": "internal"},
+            user_message="The service is temporarily unavailable. Please try again later.",
+            context={"service": "internal"}
         )
 
 

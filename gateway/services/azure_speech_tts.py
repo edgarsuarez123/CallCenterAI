@@ -122,6 +122,9 @@ class TextToSpeechService:
         # Performance tracking
         self.synthesis_stats: Dict[str, Dict[str, Any]] = {}
         
+        # Thread safety
+        self._synthesis_lock = asyncio.Lock()
+        
         # Initialize speech configuration
         self._initialize_speech_config()
     
@@ -187,11 +190,12 @@ class TextToSpeechService:
             # Create synthesis result ID
             result_id = f"tts_{int(time.time() * 1000)}"
             
-            # Update status
+            # Update status (with lock)
             if call_id:
-                self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
-                if synthesis_callback:
-                    self.synthesis_callbacks[call_id] = synthesis_callback
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
+                    if synthesis_callback:
+                        self.synthesis_callbacks[call_id] = synthesis_callback
             
             # Create SSML
             ssml = self._create_ssml(text, voice_config)
@@ -212,10 +216,11 @@ class TextToSpeechService:
                 success=True
             )
             
-            # Update stats
+            # Update stats (with lock)
             if call_id:
                 self._update_synthesis_stats(call_id, result)
-                self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
             
             # Call callback if registered
             if call_id and call_id in self.synthesis_callbacks:
@@ -261,13 +266,14 @@ class TextToSpeechService:
             )
             
             if call_id:
-                self.synthesis_status[call_id] = SynthesisStatus.ERROR
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
             
             return result
     
     def _create_ssml(self, text: str, voice_config: VoiceConfig) -> str:
         """
-        Create SSML markup for natural-sounding speech.
+        Create SSML markup for natural-sounding speech with proper XML escaping.
         
         Args:
             text: Text to synthesize
@@ -276,21 +282,30 @@ class TextToSpeechService:
         Returns:
             SSML markup string
         """
-        # Escape special characters
-        escaped_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        import xml.etree.ElementTree as ET
         
-        # Create SSML with voice configuration
-        ssml = f"""
-        <speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="{voice_config.language}">
-            <voice name="{voice_config.name}">
-                <prosody rate="{voice_config.rate}" pitch="{voice_config.pitch}" volume="{voice_config.volume}">
-                    {escaped_text}
-                </prosody>
-            </voice>
-        </speak>
-        """.strip()
+        # Create SSML structure using ElementTree for proper escaping
+        speak = ET.Element('speak', {
+            'version': '1.0',
+            'xmlns': 'http://www.w3.org/2001/10/synthesis',
+            'xml:lang': voice_config.language
+        })
         
-        return ssml
+        voice = ET.SubElement(speak, 'voice', {'name': voice_config.name})
+        prosody = ET.SubElement(voice, 'prosody', {
+            'rate': voice_config.rate,
+            'pitch': voice_config.pitch,
+            'volume': voice_config.volume
+        })
+        
+        # ElementTree automatically escapes text content
+        prosody.text = text
+        
+        # Convert to string with proper formatting
+        ssml_str = ET.tostring(speak, encoding='unicode')
+        
+        # Add proper indentation for readability
+        return ssml_str.replace('><', '>\n<')
     
     async def _perform_synthesis(self, ssml: str, voice_config: VoiceConfig) -> bytes:
         """
@@ -361,8 +376,9 @@ class TextToSpeechService:
             # Create SSML
             ssml = self._create_ssml(text, voice_config)
             
-            # Update status
-            self.synthesis_status[call_id] = SynthesisStatus.STREAMING
+            # Update status (with lock)
+            async with self._synthesis_lock:
+                self.synthesis_status[call_id] = SynthesisStatus.STREAMING
             
             # Store session info
             self.active_sessions[call_id] = {
@@ -595,10 +611,11 @@ class TextToSpeechService:
                 success=True
             )
             
-            # Update stats
+            # Update stats (with lock)
             if call_id:
                 self._update_synthesis_stats(call_id, result)
-                self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
             
             self.logger.info(
                 f"SSML synthesis completed: {result_id}",
@@ -636,7 +653,8 @@ class TextToSpeechService:
             )
             
             if call_id:
-                self.synthesis_status[call_id] = SynthesisStatus.ERROR
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
             
             return result
     
@@ -681,7 +699,8 @@ class TextToSpeechService:
         Returns:
             Current synthesis status or None
         """
-        return self.synthesis_status.get(call_id)
+        async with self._synthesis_lock:
+            return self.synthesis_status.get(call_id)
     
     def get_synthesis_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -724,11 +743,12 @@ class TextToSpeechService:
             if call_id in self.active_sessions:
                 del self.active_sessions[call_id]
             
-            if call_id in self.synthesis_status:
-                del self.synthesis_status[call_id]
-            
-            if call_id in self.synthesis_callbacks:
-                del self.synthesis_callbacks[call_id]
+            async with self._synthesis_lock:
+                if call_id in self.synthesis_status:
+                    del self.synthesis_status[call_id]
+                
+                if call_id in self.synthesis_callbacks:
+                    del self.synthesis_callbacks[call_id]
             
             self.logger.info(
                 f"Synthesis stopped for call: {call_id}",

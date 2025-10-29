@@ -7,6 +7,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 import uuid
 
 from models.models import Clinic, ClinicLicense, SystemConfig, AuditLog
@@ -131,7 +134,7 @@ class ClinicManagementService:
             if hasattr(clinic, field):
                 setattr(clinic, field, value)
         
-        clinic.updated_at = datetime.now(timezone.utc)
+        clinic.updated_at = datetime.now(AST)
         
         # Log the update
         self._log_audit("clinics", clinic_id, "UPDATE", old_values, update_data)
@@ -149,7 +152,7 @@ class ClinicManagementService:
         Returns:
             List of matching clinics
         """
-        query = self.db.query(Clinic)
+        query = self.db.query(Clinic).filter(Clinic.is_deleted == 'no')
         
         # Apply filters
         if search.clinic_name:
@@ -185,7 +188,7 @@ class ClinicManagementService:
         
         old_values = {"is_active": clinic.is_active}
         clinic.is_active = "no"
-        clinic.updated_at = datetime.now(timezone.utc)
+        clinic.updated_at = datetime.now(AST)
         
         # Log the deactivation
         self._log_audit("clinics", clinic_id, "DEACTIVATE", old_values, {"is_active": "no"})
@@ -208,43 +211,51 @@ class ClinicManagementService:
         Returns:
             True if successful, False if clinic not found
         """
-        clinic = self.get_clinic(clinic_id)
-        license = self.get_clinic_license(clinic_id)
-        
-        if not clinic or not license:
-            return False
-        
-        # Update clinic tier
-        old_clinic_tier = clinic.subscription_tier
-        clinic.subscription_tier = tier
-        clinic.updated_at = datetime.now(timezone.utc)
-        
-        # Update license with new tier configuration
-        license_data = self._get_license_config(tier)
-        old_license_values = {
-            "tier": license.tier,
-            "max_calls_per_month": license.max_calls_per_month,
-            "max_concurrent_calls": license.max_concurrent_calls,
-            "max_providers": license.max_providers,
-            "monthly_fee_usd": license.monthly_fee_usd
-        }
-        
-        license.tier = license_data['tier']
-        license.max_calls_per_month = license_data['max_calls_per_month']
-        license.max_concurrent_calls = license_data['max_concurrent_calls']
-        license.max_providers = license_data['max_providers']
-        license.monthly_fee_usd = license_data['monthly_fee_usd']
-        license.updated_at = datetime.now(timezone.utc)
-        
-        # Log the changes
-        self._log_audit("clinics", clinic_id, "UPDATE_TIER", 
-                       {"subscription_tier": old_clinic_tier}, 
-                       {"subscription_tier": tier})
-        self._log_audit("clinic_licenses", license.license_id, "UPDATE", 
-                       old_license_values, license_data)
-        
-        self.db.commit()
-        return True
+        try:
+            # Use row-level locking to prevent race conditions
+            from sqlalchemy.orm import with_for_update
+            
+            clinic = self.db.query(Clinic).filter_by(clinic_id=clinic_id).with_for_update().first()
+            license = self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).with_for_update().first()
+            
+            if not clinic or not license:
+                return False
+            
+            # Update clinic tier
+            old_clinic_tier = clinic.subscription_tier
+            clinic.subscription_tier = tier
+            clinic.updated_at = datetime.now(AST)
+            
+            # Update license with new tier configuration
+            license_data = self._get_license_config(tier)
+            old_license_values = {
+                "tier": license.tier,
+                "max_calls_per_month": license.max_calls_per_month,
+                "max_concurrent_calls": license.max_concurrent_calls,
+                "max_providers": license.max_providers,
+                "monthly_fee_usd": license.monthly_fee_usd
+            }
+            
+            license.tier = license_data['tier']
+            license.max_calls_per_month = license_data['max_calls_per_month']
+            license.max_concurrent_calls = license_data['max_concurrent_calls']
+            license.max_providers = license_data['max_providers']
+            license.monthly_fee_usd = license_data['monthly_fee_usd']
+            license.updated_at = datetime.now(AST)
+            
+            # Log the changes
+            self._log_audit("clinics", clinic_id, "UPDATE_TIER", 
+                           {"subscription_tier": old_clinic_tier}, 
+                           {"subscription_tier": tier})
+            self._log_audit("clinic_licenses", license.license_id, "UPDATE", 
+                           old_license_values, license_data)
+            
+            self.db.commit()
+            return True
+        except Exception as e:
+            self.db.rollback()
+            self.logger.error(f"Failed to update clinic license for {clinic_id}: {e}")
+            raise
     
     def get_clinic_config(self, clinic_id: str, config_key: str) -> Optional[str]:
         """Get a specific configuration value for a clinic."""
@@ -276,7 +287,7 @@ class ClinicManagementService:
             old_value = existing_config.config_value
             existing_config.config_value = config_value
             existing_config.description = description or existing_config.description
-            existing_config.updated_at = datetime.now(timezone.utc)
+            existing_config.updated_at = datetime.now(AST)
             
             self._log_audit("system_config", existing_config.config_id, "UPDATE",
                            {"config_value": old_value}, {"config_value": config_value})
@@ -334,14 +345,17 @@ class ClinicManagementService:
         }
         return configs.get(tier, configs['basic'])
     
-    def _get_billing_cycle_start(self) -> datetime:
-        """Get start of current billing cycle."""
-        now = datetime.now(timezone.utc)
+    def _get_billing_cycle_start(self, now: Optional[datetime] = None) -> datetime:
+        """Get start of current billing cycle, optionally using a specific time to avoid race conditions."""
+        if now is None:
+            now = datetime.now(AST)
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
-    def _get_billing_cycle_end(self) -> datetime:
-        """Get end of current billing cycle."""
-        start = self._get_billing_cycle_start()
+    def _get_billing_cycle_end(self, now: Optional[datetime] = None) -> datetime:
+        """Get end of current billing cycle, using same 'now' to avoid race conditions."""
+        if now is None:
+            now = datetime.now(AST)
+        start = self._get_billing_cycle_start(now)
         if start.month == 12:
             return start.replace(year=start.year + 1, month=1) - timedelta(days=1)
         else:

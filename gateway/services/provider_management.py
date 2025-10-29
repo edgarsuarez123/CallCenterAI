@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
-import uuid
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
+from zoneinfo import ZoneInfo
 
 from models.models import Provider, AppointmentSlot, Clinic, AuditLog
 from models.enums import YesNo
@@ -81,7 +84,7 @@ class ProviderManagementService:
     
     def get_provider(self, provider_id: str) -> Optional[Provider]:
         """Get provider by ID."""
-        return self.db.query(Provider).filter_by(provider_id=provider_id).first()
+        return self.db.query(Provider).filter_by(provider_id=provider_id).filter(Provider.is_deleted == 'no').first()
     
     def update_provider(self, provider_id: str, updates: ProviderUpdateRequest) -> Optional[Provider]:
         """
@@ -113,7 +116,7 @@ class ProviderManagementService:
             if hasattr(provider, field):
                 setattr(provider, field, value)
         
-        provider.updated_at = datetime.now(timezone.utc)
+        provider.updated_at = datetime.now(AST)
         
         # Log the update
         self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
@@ -131,16 +134,19 @@ class ProviderManagementService:
         Returns:
             List of matching providers
         """
-        query = self.db.query(Provider)
+        query = self.db.query(Provider).filter(Provider.is_deleted == 'no')
         
         # Apply filters
         if search.clinic_id:
-            # Note: This assumes we have a way to link providers to clinics
-            # You might need to add a clinic_id field to Provider model
-            pass  # TODO: Implement clinic filtering when clinic_id is added to Provider
+            query = query.filter(Provider.clinic_id == search.clinic_id)
         
         if search.specialty:
-            query = query.filter(Provider.specialty.ilike(f"%{search.specialty}%"))
+            # Prefix search on specialty for better index usage
+            query = query.filter(Provider.specialty.ilike(f"{search.specialty}%"))
+        
+        if search.name:
+            # Prefix search on name for better index usage
+            query = query.filter(Provider.name.ilike(f"{search.name}%"))
         
         if search.is_available:
             query = query.filter(Provider.is_available == search.is_available.value)
@@ -167,7 +173,7 @@ class ProviderManagementService:
         
         old_status = provider.is_available
         provider.is_available = "yes" if is_available else "no"
-        provider.updated_at = datetime.now(timezone.utc)
+        provider.updated_at = datetime.now(AST)
         
         # Log the change
         self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
@@ -206,7 +212,9 @@ class ProviderManagementService:
             }
         
         created_slots = []
-        current_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Use AST timezone for DST-aware slot creation
+        tz = ZoneInfo("America/Puerto_Rico")  # AST timezone
+        current_date = start_date.replace(tzinfo=tz)
         
         while current_date <= end_date:
             day_name = current_date.strftime("%A").lower()
@@ -216,12 +224,17 @@ class ProviderManagementService:
                 hours_str = business_hours[day_name]
                 start_hour, end_hour = self._parse_business_hours(hours_str)
                 
-                # Create slots for this day
-                day_slots = self._create_day_slots(
-                    provider_id, clinic_id, current_date, 
-                    start_hour, end_hour, duration_minutes
-                )
-                created_slots.extend(day_slots)
+                try:
+                    # Create slots for this day - will skip non-existent DST times
+                    day_slots = self._create_day_slots(
+                        provider_id, clinic_id, current_date, 
+                        start_hour, end_hour, duration_minutes
+                    )
+                    created_slots.extend(day_slots)
+                except Exception as e:
+                    # Skip DST transition hour
+                    self.logger.warning(f"Skipping DST transition for {current_date.date()}: {e}")
+                    continue
             
             current_date += timedelta(days=1)
         
@@ -324,7 +337,7 @@ class ProviderManagementService:
         
         slot.is_booked = "yes"
         slot.booked_by_appointment_id = appointment_id
-        slot.updated_at = datetime.now(timezone.utc)
+        slot.updated_at = datetime.now(AST)
         
         # Log the booking
         self._log_audit("appointment_slots", slot_id, "BOOK", 
@@ -354,7 +367,7 @@ class ProviderManagementService:
         
         slot.is_booked = "no"
         slot.booked_by_appointment_id = None
-        slot.updated_at = datetime.now(timezone.utc)
+        slot.updated_at = datetime.now(AST)
         
         # Log the release
         self._log_audit("appointment_slots", slot_id, "RELEASE", 
@@ -401,12 +414,15 @@ class ProviderManagementService:
         return True  # TODO: Implement when clinic_id is added to Provider model
     
     def _parse_business_hours(self, hours_str: str) -> tuple:
-        """Parse business hours string (e.g., '08:00-17:00')."""
+        """Parse business hours string supporting overnight shifts (e.g., '08:00-17:00' or '22:00-06:00')."""
         try:
             start_str, end_str = hours_str.split('-')
             start_hour = int(start_str.split(':')[0])
             end_hour = int(end_str.split(':')[0])
-            return start_hour, end_hour
+            
+            # Return tuple with overnight flag
+            is_overnight = end_hour <= start_hour
+            return start_hour, end_hour, is_overnight
         except (ValueError, IndexError) as e:
             from services.exceptions import ValidationError
             raise ValidationError(
@@ -416,14 +432,24 @@ class ProviderManagementService:
             )
     
     def _create_day_slots(self, provider_id: str, clinic_id: str, date: datetime,
-                         start_hour: int, end_hour: int, duration_minutes: int) -> List[AppointmentSlot]:
-        """Create appointment slots for a single day."""
+                         start_hour: int, end_hour: int, duration_minutes: int, is_overnight: bool = False) -> List[AppointmentSlot]:
+        """Create appointment slots for a single day, supporting overnight shifts."""
+        import uuid
+        
         slots = []
         current_time = date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
-        end_time = date.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+        
+        # Handle overnight shifts
+        if is_overnight:
+            end_time = (date + timedelta(days=1)).replace(
+                hour=end_hour, minute=0, second=0, microsecond=0
+            )
+        else:
+            end_time = date.replace(hour=end_hour, minute=0, second=0, microsecond=0)
         
         while current_time < end_time:
-            slot_id = f"SLOT_{current_time.strftime('%Y%m%d_%H%M')}_{provider_id}"
+            # Use UUID to ensure unique slot IDs
+            slot_id = f"SLOT_{provider_id}_{current_time.strftime('%Y%m%d_%H%M')}_{uuid.uuid4().hex[:8]}"
             
             slot = AppointmentSlot(
                 slot_id=slot_id,

@@ -4,9 +4,10 @@ import time
 from typing import Generator
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.engine import Engine
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
 from urllib.parse import quote_plus
 from services.configuration import get_settings
 
@@ -85,6 +86,41 @@ SessionLocal = sessionmaker(
     autoflush=False,
     bind=engine,
     expire_on_commit=False  # Prevent lazy loading issues
+)
+
+# Async engine and session configuration
+ASYNC_DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASS_ENCODED}@{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={ssl_mode}"
+
+async_engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    # Connection Pool Configuration
+    pool_size=POOL_SIZE,
+    max_overflow=MAX_OVERFLOW,
+    pool_timeout=POOL_TIMEOUT,
+    pool_recycle=POOL_RECYCLE,
+    pool_pre_ping=POOL_PRE_PING,
+    
+    # Connection Configuration
+    connect_args={
+        "connect_timeout": settings.database.connect_timeout,
+        "application_name": settings.database.application_name,
+    },
+    
+    # Performance Configuration
+    echo=False,
+    echo_pool=False,
+    future=True,
+    
+    # Error Handling
+    pool_reset_on_return="commit",
+)
+
+AsyncSessionLocal = async_sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=async_engine,
+    expire_on_commit=False,
+    class_=AsyncSession
 )
 
 Base = declarative_base()
@@ -168,6 +204,19 @@ def get_db() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+
+@asynccontextmanager
+async def get_async_db_session():
+    """Async context manager for database sessions."""
+    db = AsyncSessionLocal()
+    try:
+        yield db
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 def get_db_with_retry(max_retries: int = 3) -> Generator[Session, None, None]:
     """

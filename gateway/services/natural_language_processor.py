@@ -72,54 +72,55 @@ class NaturalLanguageProcessor:
         # Intent patterns with confidence scores
         self.intent_patterns = {
             IntentType.APPOINTMENT_BOOKING: [
-                (r'\b(?:i need|i want|i would like|can i|could i|i\'d like)\s+(?:to\s+)?(?:book|schedule|make|get|set up)\s+(?:an?\s+)?(?:appointment|visit|meeting)\b', 0.9),
-                (r'\b(?:book|schedule|make|get|set up)\s+(?:an?\s+)?(?:appointment|visit|meeting)\b', 0.8),
-                (r'\b(?:i need|i want|i would like)\s+(?:to\s+)?(?:see|visit|meet with)\s+(?:a\s+)?(?:doctor|physician|provider)\b', 0.8),
-                (r'\b(?:when can i|what time can i|is there)\s+(?:see|visit|meet with)\s+(?:a\s+)?(?:doctor|physician|provider)\b', 0.7),
-                (r'\b(?:i\'m calling|i called)\s+(?:to\s+)?(?:book|schedule|make|get)\s+(?:an?\s+)?(?:appointment|visit)\b', 0.8),
-                (r'\b(?:appointment|visit|meeting)\s+(?:for|with|to see)\b', 0.7),
+                # Split complex patterns into simpler ones
+                (r'\b(i need|i want|i would like|can i|could i|i\'d like)\b', 0.7),
+                (r'\b(book|schedule|make|set up)\s+(an?\s+)?(appointment|visit)\b', 0.9),
+                (r'\b(see|visit|meet with)\s+(a\s+)?(doctor|physician|provider)\b', 0.8),
+                (r'\b(when can i|what time can i|is there)\s+(see|visit|meet with)\b', 0.7),
+                (r'\b(i\'m calling|i called)\s+(to\s+)?(book|schedule|make)\b', 0.8),
+                (r'\b(appointment|visit|meeting)\s+(for|with|to see)\b', 0.7),
             ],
             IntentType.APPOINTMENT_CANCELLATION: [
-                (r'\b(?:i need|i want|i would like)\s+(?:to\s+)?(?:cancel|stop|remove)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.9),
-                (r'\b(?:cancel|stop|remove)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.8),
-                (r'\b(?:i can\'t make it|i won\'t be able to make it|i need to cancel)\b', 0.7),
-                (r'\b(?:something came up|i have a conflict|i need to reschedule)\b', 0.6),
+                (r'\b(i need|i want|i would like)\s+(to\s+)?(cancel|stop|remove)\b', 0.7),
+                (r'\b(cancel|stop|remove)\s+(my\s+)?(appointment|visit|meeting)\b', 0.9),
+                (r'\b(i can\'t make it|i won\'t be able to make it|i need to cancel)\b', 0.8),
+                (r'\b(something came up|i have a conflict|i need to reschedule)\b', 0.6),
             ],
             IntentType.APPOINTMENT_RESCHEDULING: [
-                (r'\b(?:i need|i want|i would like)\s+(?:to\s+)?(?:reschedule|change|move|postpone)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.9),
-                (r'\b(?:reschedule|change|move|postpone)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.8),
-                (r'\b(?:can i change|can we change|is it possible to change)\s+(?:my\s+)?(?:appointment|visit|meeting)\b', 0.7),
-                (r'\b(?:i want to reschedule|i need to reschedule|i\'d like to reschedule)\b', 0.9),
+                (r'\b(i need|i want|i would like)\s+(to\s+)?(reschedule|change|move|postpone)\b', 0.7),
+                (r'\b(reschedule|change|move|postpone)\s+(my\s+)?(appointment|visit|meeting)\b', 0.9),
+                (r'\b(can i change|can we change|is it possible to change)\b', 0.7),
+                (r'\b(i want to reschedule|i need to reschedule|i\'d like to reschedule)\b', 0.9),
             ],
             IntentType.INSURANCE_INQUIRY: [
-                (r'\b(?:insurance|coverage|benefits|claim|authorization|pre-authorization)\b', 0.8),
-                (r'\b(?:i\'m calling about|i need help with|i have questions about)\s+(?:my\s+)?(?:insurance|coverage|benefits)\b', 0.9),
-                (r'\b(?:does my insurance|will my insurance|is this covered)\b', 0.8),
+                (r'\b(insurance|coverage|benefits|claim|authorization|pre-authorization)\b', 0.8),
+                (r'\b(i\'m calling about|i need help with|i have questions about)\s+(my\s+)?(insurance|coverage|benefits)\b', 0.9),
+                (r'\b(does my insurance|will my insurance|is this covered)\b', 0.8),
             ],
             IntentType.PROVIDER_INQUIRY: [
-                (r'\b(?:i\'m a doctor|i\'m calling from|this is dr\.|physician calling)\b', 0.9),
-                (r'\b(?:medical records|patient information|referral|consultation)\b', 0.8),
-                (r'\b(?:i need to speak with|i need to talk to)\s+(?:a\s+)?(?:doctor|physician|medical staff)\b', 0.7),
+                (r'\b(i\'m a doctor|i\'m calling from|this is dr\.|physician calling)\b', 0.9),
+                (r'\b(medical records|patient information|referral|consultation)\b', 0.8),
+                (r'\b(i need to speak with|i need to talk to)\s+(a\s+)?(doctor|physician|medical staff)\b', 0.7),
             ],
             IntentType.EMERGENCY: [
-                (r'\b(?:emergency|urgent|help|911|ambulance|heart attack|stroke|chest pain|can\'t breathe)\b', 0.9),
-                (r'\b(?:i need help|this is an emergency|it\'s urgent|i\'m having)\b', 0.8),
+                (r'\b(emergency|urgent|help|911|ambulance|heart attack|stroke|chest pain|can\'t breathe)\b', 0.9),
+                (r'\b(i need help|this is an emergency|it\'s urgent|i\'m having)\b', 0.8),
             ],
             IntentType.GREETING: [
-                (r'\b(?:hello|hi|hey|good morning|good afternoon|good evening)\b', 0.8),
-                (r'\b(?:how are you|how\'s it going|how can you help)\b', 0.6),
+                (r'\b(hello|hi|hey|good morning|good afternoon|good evening)\b', 0.8),
+                (r'\b(how are you|how\'s it going|how can you help)\b', 0.6),
             ],
             IntentType.GOODBYE: [
-                (r'\b(?:goodbye|bye|see you|thank you|thanks|that\'s all|nothing else)\b', 0.8),
-                (r'\b(?:i\'m done|that\'s it|no more questions|all set)\b', 0.7),
+                (r'\b(goodbye|bye|see you|thank you|thanks|that\'s all|nothing else)\b', 0.8),
+                (r'\b(i\'m done|that\'s it|no more questions|all set)\b', 0.7),
             ],
             IntentType.CONFIRMATION: [
-                (r'\b(?:yes|yeah|yep|sure|okay|ok|correct|right|that\'s right|exactly)\b', 0.8),
-                (r'\b(?:sounds good|perfect|great|that works|i agree)\b', 0.7),
+                (r'\b(yes|yeah|yep|sure|okay|ok|correct|right|that\'s right|exactly)\b', 0.8),
+                (r'\b(sounds good|perfect|great|that works|i agree)\b', 0.7),
             ],
             IntentType.NEGATION: [
-                (r'\b(?:no|nope|not|don\'t|doesn\'t|won\'t|can\'t|cannot|never|none)\b', 0.8),
-                (r'\b(?:that\'s not|that\'s wrong|incorrect|not right)\b', 0.7),
+                (r'\b(no|nope|not|don\'t|doesn\'t|won\'t|can\'t|cannot|never|none)\b', 0.8),
+                (r'\b(that\'s not|that\'s wrong|incorrect|not right)\b', 0.7),
             ],
             IntentType.GENERAL_INQUIRY: [
                 (r'\b(?:what|when|where|how|why|who)\b', 0.6),
@@ -129,6 +130,14 @@ class NaturalLanguageProcessor:
                 (r'\b(?:i want to know|i need to know|can you tell me)\s+(?:about|when|what time)\b', 0.7),
             ]
         }
+        
+        # Pre-compile all regex patterns for performance
+        self.compiled_patterns = {}
+        for intent_type, patterns in self.intent_patterns.items():
+            self.compiled_patterns[intent_type] = [
+                (re.compile(pattern, re.IGNORECASE), confidence)
+                for pattern, confidence in patterns
+            ]
         
         # Entity extraction patterns
         self.name_patterns = [
@@ -218,67 +227,78 @@ class NaturalLanguageProcessor:
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
         
-        # Handle common contractions
+        # Handle common contractions with word boundaries
         contractions = {
-            "i'm": "i am",
-            "i'd": "i would",
-            "i'll": "i will",
-            "i've": "i have",
-            "you're": "you are",
-            "you'd": "you would",
-            "you'll": "you will",
-            "you've": "you have",
-            "we're": "we are",
-            "we'd": "we would",
-            "we'll": "we will",
-            "we've": "we have",
-            "they're": "they are",
-            "they'd": "they would",
-            "they'll": "they will",
-            "they've": "they have",
-            "can't": "cannot",
-            "won't": "will not",
-            "don't": "do not",
-            "doesn't": "does not",
-            "didn't": "did not",
-            "haven't": "have not",
-            "hasn't": "has not",
-            "hadn't": "had not",
-            "isn't": "is not",
-            "aren't": "are not",
-            "wasn't": "was not",
-            "weren't": "were not",
-            "it's": "it is",
-            "that's": "that is",
-            "there's": "there is",
-            "here's": "here is",
-            "what's": "what is",
-            "where's": "where is",
-            "when's": "when is",
-            "why's": "why is",
-            "how's": "how is",
+            r"\bi'm\b": "i am",
+            r"\bi'd\b": "i would",
+            r"\bi'll\b": "i will",
+            r"\bi've\b": "i have",
+            r"\byou're\b": "you are",
+            r"\byou'd\b": "you would",
+            r"\byou'll\b": "you will",
+            r"\byou've\b": "you have",
+            r"\bwe're\b": "we are",
+            r"\bwe'd\b": "we would",
+            r"\bwe'll\b": "we will",
+            r"\bwe've\b": "we have",
+            r"\bthey're\b": "they are",
+            r"\bthey'd\b": "they would",
+            r"\bthey'll\b": "they will",
+            r"\bthey've\b": "they have",
+            r"\bcan't\b": "cannot",
+            r"\bwon't\b": "will not",
+            r"\bdon't\b": "do not",
+            r"\bdoesn't\b": "does not",
+            r"\bdidn't\b": "did not",
+            r"\bhaven't\b": "have not",
+            r"\bhasn't\b": "has not",
+            r"\bhadn't\b": "had not",
+            r"\bisn't\b": "is not",
+            r"\baren't\b": "are not",
+            r"\bwasn't\b": "was not",
+            r"\bweren't\b": "were not",
+            r"\bit's\b": "it is",
+            r"\bthat's\b": "that is",
+            r"\bthere's\b": "there is",
+            r"\bhere's\b": "here is",
+            r"\bwhat's\b": "what is",
+            r"\bwhere's\b": "where is",
+            r"\bwhen's\b": "when is",
+            r"\bwhy's\b": "why is",
+            r"\bhow's\b": "how is",
         }
         
-        for contraction, expansion in contractions.items():
-            text = text.replace(contraction, expansion)
+        for pattern, expansion in contractions.items():
+            text = re.sub(pattern, expansion, text, flags=re.IGNORECASE)
         
         return text
 
     def _extract_intent(self, text: str, context: Dict[str, Any] = None) -> Tuple[IntentType, float]:
-        """Extract intent from text with confidence scoring"""
-        best_intent = IntentType.UNCLEAR
-        best_confidence = 0.0
+        """Extract intent from text with specificity scoring and context awareness"""
+        text_lower = text.lower()
+        matches = []
         
-        for intent_type, patterns in self.intent_patterns.items():
-            for pattern, confidence in patterns:
-                if re.search(pattern, text, re.IGNORECASE):
-                    if confidence > best_confidence:
-                        best_intent = intent_type
-                        best_confidence = confidence
+        # Collect all matches with confidence scores
+        for intent_type, patterns in self.compiled_patterns.items():
+            for compiled_pattern, base_confidence in patterns:
+                match_obj = compiled_pattern.search(text_lower)
+                if match_obj:
+                    # Adjust confidence based on match specificity
+                    match_length = len(match_obj.group(0))
+                    specificity_bonus = match_length / len(text_lower) * 0.1
+                    
+                    final_confidence = min(1.0, base_confidence + specificity_bonus)
+                    matches.append((intent_type, final_confidence, match_length))
+        
+        if not matches:
+            return IntentType.UNCLEAR, 0.0
+        
+        # Sort by confidence, then by match length (more specific wins)
+        matches.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        best_intent, best_confidence, _ = matches[0]
         
         # Context-aware adjustments
         if context:
-            # If we're in a specific flow, adjust confidence
             current_state = context.get('current_state')
             if current_state == 'appointment_booking' and best_intent == IntentType.APPOINTMENT_BOOKING:
                 best_confidence = min(1.0, best_confidence + 0.2)

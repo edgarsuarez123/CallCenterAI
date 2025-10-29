@@ -236,6 +236,56 @@ class BackgroundJobManager:
             schedule_interval=86400,  # Daily
             priority=JobPriority.LOW
         )
+        
+        # NLP cleanup job
+        self.register_job(
+            job_id="cleanup_nlp_statistics",
+            name="Cleanup NLP Statistics",
+            description="Clean up expired NLP call statistics",
+            function=self._cleanup_nlp_statistics,
+            schedule_interval=300,  # Every 5 minutes
+            priority=JobPriority.NORMAL
+        )
+        
+        # TTS session cleanup job
+        self.register_job(
+            job_id="cleanup_tts_sessions",
+            name="Cleanup TTS Sessions",
+            description="Clean up expired TTS sessions",
+            function=self._cleanup_tts_sessions,
+            schedule_interval=300,  # Every 5 minutes
+            priority=JobPriority.NORMAL
+        )
+        
+        # STT session cleanup job
+        self.register_job(
+            job_id="cleanup_stt_sessions",
+            name="Cleanup STT Sessions",
+            description="Clean up expired STT sessions",
+            function=self._cleanup_stt_sessions,
+            schedule_interval=300,  # Every 5 minutes
+            priority=JobPriority.NORMAL
+        )
+        
+        # Bilingual manager cleanup job
+        self.register_job(
+            job_id="cleanup_bilingual_data",
+            name="Cleanup Bilingual Data",
+            description="Clean up expired bilingual conversation data",
+            function=self._cleanup_bilingual_data,
+            schedule_interval=300,  # Every 5 minutes
+            priority=JobPriority.NORMAL
+        )
+        
+        # Call router queue cleanup job
+        self.register_job(
+            job_id="cleanup_call_queues",
+            name="Cleanup Call Queues",
+            description="Clean up expired call queues",
+            function=self._cleanup_call_queues,
+            schedule_interval=300,  # Every 5 minutes
+            priority=JobPriority.NORMAL
+        )
     
     def register_job(self, job_id: str, name: str, description: str, 
                     function: Callable, schedule_interval: int,
@@ -813,13 +863,11 @@ class BackgroundJobManager:
         """Process reminders that are due for execution."""
         try:
             reminder_service = get_reminder_service()
-            db_session = next(get_db_session())
             
-            try:
+            # Use proper database session context manager
+            with get_db_session() as db_session:
                 # Get due reminders
                 due_reminders = asyncio.run(reminder_service.get_due_reminders(db_session, limit=50))
-            finally:
-                db_session.close()
             
             processed_count = 0
             success_count = 0
@@ -1056,6 +1104,128 @@ class BackgroundJobManager:
                 if (self.total_jobs_executed + self.total_jobs_failed) > 0 else 100
             )
         }
+    
+    def _cleanup_nlp_statistics(self) -> Dict[str, Any]:
+        """Clean up expired NLP call statistics."""
+        try:
+            from services.hybrid_nlp_service import get_hybrid_nlp_service
+            
+            hybrid_nlp = get_hybrid_nlp_service()
+            asyncio.run(hybrid_nlp.cleanup_expired_data())
+            
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": True
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to cleanup NLP statistics: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _cleanup_tts_sessions(self) -> Dict[str, Any]:
+        """Clean up expired TTS sessions."""
+        try:
+            from services.azure_speech_tts import get_tts_service
+            tts_service = get_tts_service()
+            asyncio.run(tts_service.cleanup_expired_sessions())
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": True
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to cleanup TTS sessions: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _cleanup_stt_sessions(self) -> Dict[str, Any]:
+        """Clean up expired STT sessions."""
+        try:
+            from services.azure_speech_stt import get_stt_service
+            stt_service = get_stt_service()
+            asyncio.run(stt_service.cleanup_expired_sessions())
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": True
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to cleanup STT sessions: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _cleanup_bilingual_data(self) -> Dict[str, Any]:
+        """Clean up expired bilingual conversation data."""
+        try:
+            from services.bilingual_manager import get_bilingual_manager
+            bilingual_manager = get_bilingual_manager()
+            asyncio.run(bilingual_manager.cleanup_expired_data())
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": True
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to cleanup bilingual data: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _cleanup_call_queues(self) -> Dict[str, Any]:
+        """Clean up expired call queues."""
+        try:
+            from services.call_router import get_call_router
+            call_router = get_call_router()
+            asyncio.run(call_router.cleanup_expired_queues())
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": True
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Failed to cleanup call queues: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return {
+                "records_processed": 0,
+                "records_affected": 0,
+                "success": False,
+                "error": str(e)
+            }
     
     def _refresh_google_calendar_tokens(self):
         """Refresh Google Calendar tokens that will expire soon."""

@@ -21,7 +21,7 @@ logger = get_logger("response_router")
 
 
 @dataclass
-class ResponseResult:
+class RouterResponseResult:
     """Result of response routing decision."""
     text: str
     is_scripted: bool
@@ -77,7 +77,7 @@ class ResponseRouter:
         intent: IntentType,
         call_context: CallContext,
         clinic_config: Dict[str, Any]
-    ) -> ResponseResult:
+    ) -> RouterResponseResult:
         """
         Automatically determine response type and generate response.
         
@@ -88,7 +88,7 @@ class ResponseRouter:
             clinic_config: Clinic-specific configuration data
             
         Returns:
-            ResponseResult: Contains response text, scripted flag, and metadata
+            RouterResponseResult: Contains response text, scripted flag, and metadata
         """
         try:
             self.logger.info(
@@ -112,7 +112,7 @@ class ResponseRouter:
                     LogCategory.NLP,
                     extra_data={"template_key": template_key}
                 )
-                return ResponseResult(
+                return RouterResponseResult(
                     text=response_text,
                     is_scripted=True,
                     template_key=template_key,
@@ -129,7 +129,7 @@ class ResponseRouter:
                     LogCategory.NLP,
                     extra_data={"tokens_used": "~50"}
                 )
-                return ResponseResult(
+                return RouterResponseResult(
                     text=response_text,
                     is_scripted=False,
                     tokens_used=50  # Estimated for calendar queries
@@ -142,7 +142,7 @@ class ResponseRouter:
                 LogCategory.NLP,
                 extra_data={"tokens_used": "~200"}
             )
-            return ResponseResult(
+            return RouterResponseResult(
                 text=response_text,
                 is_scripted=False,
                 tokens_used=200  # Estimated for complex AI responses
@@ -151,7 +151,7 @@ class ResponseRouter:
         except Exception as e:
             self.logger.error(f"Error in response routing: {e}", exc_info=True)
             # Fallback to generic scripted response
-            return ResponseResult(
+            return RouterResponseResult(
                 text="I'm sorry, I didn't understand that. Could you please repeat?",
                 is_scripted=True,
                 template_key="greeting",
@@ -159,15 +159,59 @@ class ResponseRouter:
             )
     
     def _match_scripted_pattern(self, user_input: str) -> Optional[str]:
-        """Check if input matches known scripted patterns."""
+        """Check if input matches known scripted patterns with context awareness."""
         user_lower = user_input.lower()
         
-        # Check for exact pattern matches
-        for key, patterns in self.SCRIPTED_PATTERNS.items():
-            if any(pattern in user_lower for pattern in patterns):
-                return key
+        # Define context-aware patterns to avoid false matches
+        context_patterns = {
+            "office_hours": {
+                "keywords": ["hours", "open", "closed", "when"],
+                "exclude": ["appointment", "schedule", "book", "meeting"]
+            },
+            "location": {
+                "keywords": ["address", "location", "where"],
+                "exclude": ["phone", "number", "call"]
+            },
+            "contact": {
+                "keywords": ["phone", "call", "contact", "number"],
+                "exclude": ["address", "location", "where"]
+            },
+            "services": {
+                "keywords": ["services", "offer", "provide"],
+                "exclude": ["appointment", "schedule", "book"]
+            },
+            "greeting": {
+                "keywords": ["hello", "hi", "hey", "welcome"],
+                "exclude": []
+            },
+            "confirmation": {
+                "keywords": ["yes", "no", "confirm", "correct"],
+                "exclude": []
+            },
+            "general_faq": {
+                "keywords": ["what is", "how do i", "tell me about"],
+                "exclude": ["appointment", "schedule", "book", "phone", "address"]
+            }
+        }
         
-        return None
+        # Check for context-aware matches with scoring
+        scores = {}
+        for key, config in context_patterns.items():
+            # Count matching keywords
+            keyword_matches = sum(1 for keyword in config["keywords"] if keyword in user_lower)
+            
+            # Check for exclusion keywords
+            exclusion_matches = sum(1 for exclude in config["exclude"] if exclude in user_lower)
+            
+            # Score based on keyword matches minus exclusions
+            if keyword_matches > 0 and exclusion_matches == 0:
+                scores[key] = keyword_matches
+        
+        if not scores:
+            return None
+        
+        # Return pattern with highest score
+        return max(scores.items(), key=lambda x: x[1])[0]
     
     def _generate_scripted_response(self, template_key: str, config: Dict[str, Any]) -> str:
         """Generate scripted response with variable substitution."""
