@@ -14,6 +14,7 @@ from models.models import Call, Patient, Provider, AppointmentSlot, Clinic
 from models.enums import YesNo
 from models.enums import CallStatus
 from services.configuration import get_settings
+from services.crypto import make_hmac_token, encrypt_str
 
 # Get configuration
 settings = get_settings()
@@ -23,6 +24,31 @@ from models.call_flow_models import (
     PatientIdentificationResult, ProviderOption, TimeSlotOption, DateOption,
     AppointmentBookingData
 )
+
+# Valid state transitions
+VALID_TRANSITIONS = {
+    CallFlowState.GET_INTENT: [
+        CallFlowState.IDENTIFY_PATIENT,
+        CallFlowState.CANCEL_APPOINTMENT,
+        CallFlowState.GENERAL_INQUIRY,
+        CallFlowState.EMERGENCY
+    ],
+    CallFlowState.IDENTIFY_PATIENT: [
+        CallFlowState.NEW_PATIENT_INFO,
+        CallFlowState.RETURNING_PATIENT_INFO
+    ],
+    CallFlowState.NEW_PATIENT_INFO: [CallFlowState.SELECT_PROVIDER],
+    CallFlowState.RETURNING_PATIENT_INFO: [CallFlowState.SELECT_PROVIDER],
+    CallFlowState.SELECT_PROVIDER: [CallFlowState.SELECT_DATE],
+    CallFlowState.SELECT_DATE: [CallFlowState.SELECT_TIME],
+    CallFlowState.SELECT_TIME: [CallFlowState.CONFIRM_DETAILS],
+    CallFlowState.CONFIRM_DETAILS: [
+        CallFlowState.BOOK_APPOINTMENT,
+        CallFlowState.SELECT_DATE,  # Allow going back
+        CallFlowState.SELECT_TIME
+    ],
+    CallFlowState.BOOK_APPOINTMENT: [CallFlowState.COMPLETED],
+}
 from services.appointment_service import AppointmentService
 from services.provider_management import ProviderManagementService
 from services.clinic_management import ClinicManagementService
@@ -30,7 +56,9 @@ from services.google_calendar_service import GoogleCalendarIntegrationService, G
 from services.natural_language_processor import NaturalLanguageProcessor, IntentType, ExtractedEntities
 from services.tokens import tokenize_text
 from services.crypto import make_ulid_token
-from services.response_router import get_response_router, ResponseResult
+from services.response_cache import get_response_cache_service
+from services.response_templates import get_response_templates
+from services.response_router import get_response_router, RouterResponseResult
 from models.schemas import AppointmentCreateRequest
 from services.call_store import store_call, get_call, remove_call, list_calls
 import os
@@ -42,6 +70,10 @@ class CallFlowService:
     def __init__(self, db: Session):
         self.db = db
         self.logger = logging.getLogger(__name__)
+        
+        # Add patient identification lock for thread safety
+        import asyncio
+        self._patient_lock = asyncio.Lock()
         
         # Initialize Natural Language Processor
         self.nlp = NaturalLanguageProcessor()
@@ -75,6 +107,38 @@ class CallFlowService:
         self.appointment_service = AppointmentService(db, google_calendar_service)
         self.provider_service = ProviderManagementService(db)
         self.clinic_service = ClinicManagementService(db)
+    
+    def sanitize_template_variable(self, value: Any) -> str:
+        """Remove template injection characters and limit length."""
+        if not isinstance(value, str):
+            value = str(value)
+        
+        # Remove template markers and special characters
+        value = value.replace('{', '').replace('}', '')
+        value = value.replace('$', '').replace('`', '')
+        value = value.replace('<', '').replace('>', '')
+        value = value.replace('&', '')
+        
+        # Limit length to prevent abuse
+        return value[:200]
+    
+    def _validate_transition(self, from_state: CallFlowState, to_state: CallFlowState) -> bool:
+        """Validate state transition is allowed."""
+        allowed_states = VALID_TRANSITIONS.get(from_state, [])
+        return to_state in allowed_states
+
+    async def _transition_state(self, context: CallFlowContext, new_state: CallFlowState) -> bool:
+        """Safely transition to new state with validation."""
+        if not self._validate_transition(context.current_state, new_state):
+            self.logger.error(
+                f"Invalid state transition: {context.current_state} -> {new_state}",
+                extra={"call_id": context.call_sid}
+            )
+            # Don't transition, stay in current state
+            return False
+        
+        context.current_state = new_state
+        return True
     
     async def initialize_call(self, call_sid: str, caller_phone: str, clinic_id: str) -> CallFlowResponse:
         """
@@ -134,7 +198,7 @@ class CallFlowService:
             self.logger.error(f"Failed to initialize call {call_sid}: {str(e)}")
             raise ValueError(f"Failed to initialize call: {str(e)}")
     
-    async def process_user_input_with_router(self, call_id: str, user_input: str, db_session: Session) -> ResponseResult:
+    async def process_user_input_with_router(self, call_id: str, user_input: str, db_session: Session) -> RouterResponseResult:
         """
         Process user input with intelligent response routing.
         
@@ -144,7 +208,7 @@ class CallFlowService:
             db_session: Database session
             
         Returns:
-            ResponseResult: Contains response text, scripted flag, and metadata
+            RouterResponseResult: Contains response text, scripted flag, and metadata
         """
         try:
             # Get intent from NLP
@@ -187,7 +251,7 @@ class CallFlowService:
         except Exception as e:
             self.logger.error(f"Error processing user input with router: {e}")
             # Fallback to generic error message (scripted)
-            return ResponseResult(
+            return RouterResponseResult(
                 text="I'm sorry, I didn't understand that. Could you please repeat?",
                 is_scripted=True,
                 template_key="greeting",
@@ -514,29 +578,36 @@ class CallFlowService:
         if self.nlp.is_confirmation(user_input):
             context.is_returning_patient = True
             
-            # Try to find existing patient
-            patient_result = self._identify_patient(context.patient_name)
-            if patient_result.is_found:
-                context.patient_id = patient_result.patient_id
-                # Use cached message for provider selection
-                cached_message = await self._get_cached_message(
-                    intent="provider_inquiry",
-                    language="en"
-                )
-                message = cached_message or f"Great! I found you in our system. Which doctor would you like to see?"
-                
-                return CallFlowResponse(
-                    next_state=CallFlowState.SELECT_PROVIDER,
-                    message=message,
-                    data={"patient_found": True}
-                )
-            else:
-                # Patient says they've been before but not found - treat as new
-                return CallFlowResponse(
-                    next_state=CallFlowState.NEW_PATIENT_INFO,
-                    message="I don't see you in our system yet. Let me get some information to set up your appointment. What's your date of birth?",
-                    data={"patient_found": False}
-                )
+            # Use lock to prevent race conditions in patient identification
+            async with self._patient_lock:
+                patient_result = self._identify_patient(context.patient_name)
+                if patient_result.is_found and patient_result.confidence > 0.8:
+                    context.patient_id = patient_result.patient_id
+                    # Use cached message for provider selection
+                    cached_message = await self._get_cached_message(
+                        intent="provider_inquiry",
+                        language="en"
+                    )
+                    message = cached_message or f"Great! I found you in our system. Which doctor would you like to see?"
+                    
+                    return CallFlowResponse(
+                        next_state=CallFlowState.SELECT_PROVIDER,
+                        message=message,
+                        data={"patient_found": True}
+                    )
+                elif patient_result.multiple_matches:
+                    # Ask for disambiguation
+                    return CallFlowResponse(
+                        next_state=CallFlowState.PATIENT_DISAMBIGUATION,
+                        message="I found multiple patients with that name. Can you provide your date of birth?"
+                    )
+                else:
+                    # Patient says they've been before but not found - treat as new
+                    return CallFlowResponse(
+                        next_state=CallFlowState.NEW_PATIENT_INFO,
+                        message="I don't see you in our system yet. Let me get some information to set up your appointment. What's your date of birth?",
+                        data={"patient_found": False}
+                    )
         
         elif self.nlp.is_negation(user_input):
             context.is_returning_patient = False
@@ -937,10 +1008,14 @@ class CallFlowService:
     
     def _identify_patient(self, patient_name: str) -> PatientIdentificationResult:
         """Try to identify patient by name."""
-        # Simple name matching (in production, use fuzzy matching)
+        # Normalize input for prefix search
+        search_name = patient_name.strip().upper()
+        
+        # Use prefix matching (starts with) for index usage
         patients = self.db.query(Patient).filter(
-            Patient.name_token.ilike(f"%{patient_name}%")
-        ).all()
+            Patient.name_token.ilike(f"{search_name}%"),  # Removed leading %
+            Patient.is_deleted == 'no'
+        ).limit(10).all()  # Add limit to prevent huge result sets
         
         if patients:
             # Return first match (in production, use confidence scoring)
@@ -1035,11 +1110,29 @@ class CallFlowService:
         if not context.patient_id:
             # Create new patient
             patient_id = f"PATIENT_{make_ulid_token('PATIENT')[:12]}"
+            
+            # Tokenize PII for HIPAA compliance
+            name_token = make_hmac_token("PATIENT_NAME", context.patient_name)
+            dob_token = make_hmac_token("PATIENT_DOB", context.patient_dob)
+            insurance_token = make_hmac_token("INSURANCE", context.insurance_provider)
+            
+            # Encrypt sensitive data
+            name_nonce, name_ct = encrypt_str(context.patient_name)
+            dob_nonce, dob_ct = encrypt_str(context.patient_dob)
+            insurance_nonce, insurance_ct = encrypt_str(context.insurance_provider)
+            
             patient = Patient(
                 patient_id=patient_id,
-                name_token=context.patient_name,
-                dob_token=context.patient_dob,
-                insurance_provider_token=context.insurance_provider
+                name_token=name_token,
+                dob_token=dob_token,
+                insurance_provider_token=insurance_token,
+                # Store encrypted data in separate fields for future use
+                name_nonce=name_nonce,
+                name_ciphertext=name_ct,
+                dob_nonce=dob_nonce,
+                dob_ciphertext=dob_ct,
+                insurance_nonce=insurance_nonce,
+                insurance_ciphertext=insurance_ct
             )
             self.db.add(patient)
             self.db.flush()
@@ -1177,30 +1270,17 @@ class CallFlowService:
         # Try exact matches first
         for provider in providers:
             provider_name_lower = provider.name.lower()
-            provider_specialty_lower = provider.specialty.lower()
             
             # Check for exact name match
-            if provider_name_lower in user_input_lower:
-                return provider
-            
-            # Check for last name match (common in speech)
-            last_name = provider_name_lower.split()[-1] if " " in provider_name_lower else provider_name_lower
-            if last_name in user_input_lower:
-                return provider
-            
-            # Check for specialty match
-            if provider_specialty_lower in user_input_lower:
+            if provider_name_lower == user_input_lower:
                 return provider
         
-        # Try partial matches
+        # Try last name with word boundaries
         for provider in providers:
-            provider_name_lower = provider.name.lower()
-            provider_specialty_lower = provider.specialty.lower()
-            
-            # Check if any word from provider name is in input
-            provider_words = provider_name_lower.split()
-            for word in provider_words:
-                if len(word) > 3 and word in user_input_lower:  # Avoid short words
+            name_parts = provider.name.lower().split()
+            for part in name_parts:
+                pattern = r'\b' + re.escape(part) + r'\b'
+                if re.search(pattern, user_input_lower):
                     return provider
         
         return None
@@ -1399,9 +1479,17 @@ class CallFlowService:
             
             # Check if template exists
             if self.response_templates.has_template(intent_type, language_code):
-                # Use template with variable substitution
+                # Sanitize all variables before substitution
+                sanitized_variables = {}
+                if variables:
+                    sanitized_variables = {
+                        k: self.sanitize_template_variable(v)
+                        for k, v in variables.items()
+                    }
+                
+                # Use template with sanitized variable substitution
                 template_response = self.response_templates.substitute_variables(
-                    intent_type, language_code, variables or {}
+                    intent_type, language_code, sanitized_variables
                 )
                 if template_response:
                     # Cache the response
@@ -1410,7 +1498,7 @@ class CallFlowService:
                         language=language,
                         response=template_response,
                         template=self.response_templates.get_template(intent_type, language_code).template,
-                        variables=variables,
+                        variables=sanitized_variables,
                         source="template"
                     )
                     return template_response

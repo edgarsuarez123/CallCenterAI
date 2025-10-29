@@ -431,36 +431,47 @@ async def handle_incoming_call_received_event(acs_service, payload: Dict[str, An
         from_number = payload.get('from', {}).get('phoneNumber', {}).get('value')
         to_number = payload.get('to', {}).get('phoneNumber', {}).get('value')
         
+        # Use call_connection_id consistently as call_id
+        call_id = call_connection_id
+        
         logger.info(
-            f"IncomingCallReceived event: {call_connection_id} from {from_number} to {to_number}",
+            f"IncomingCallReceived event: {call_id} from {from_number} to {to_number}",
             LogCategory.API,
             extra_data={
-                "call_connection_id": call_connection_id,
+                "call_id": call_id,
                 "from_number": from_number,
                 "to_number": to_number,
                 "payload": payload
             }
         )
         
+        # Get clinic_id from phone routing
+        from services.phone_routing_service import get_phone_routing_service
+        phone_routing = get_phone_routing_service(db)
+        clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        
         # Register the incoming call in ACS service
         await acs_service.register_incoming_call(
-            call_id=call_connection_id,
+            call_id=call_id,
             caller_phone=from_number,
-            clinic_id='default-clinic',
+            clinic_id=clinic_id,
             acs_call_id=call_connection_id
         )
         
+        # Store mapping for CallConnected event
+        await acs_service.store_call_id_mapping(call_id, call_connection_id)
+        
         # Answer the call
-        await acs_service.answer_call(call_connection_id)
+        await acs_service.answer_call(call_id)
         
         # Initialize AI call handling
         from services.call_orchestrator import get_call_orchestrator
         orchestrator = get_call_orchestrator()
         
         await orchestrator.start_call(
-            call_id=call_connection_id,
+            call_id=call_id,
             caller_phone=from_number,
-            clinic_id='default-clinic',
+            clinic_id=clinic_id,
             call_type='inbound'
         )
         
@@ -647,6 +658,21 @@ async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], 
         to_number = payload.get('data', {}).get('to', {}).get('phoneNumber', {}).get('value')
         server_call_id = payload.get('data', {}).get('serverCallId')
         
+        # Validate phone numbers
+        if not from_number or not isinstance(from_number, str) or len(from_number.strip()) == 0:
+            logger.error(f"Invalid from_number in Event Grid payload: {from_number}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid from_number in Event Grid payload"
+            )
+        
+        if not to_number or not isinstance(to_number, str) or len(to_number.strip()) == 0:
+            logger.error(f"Invalid to_number in Event Grid payload: {to_number}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid to_number in Event Grid payload"
+            )
+        
         # Use serverCallId as the call_id (it's base64 encoded)
         import base64
         if server_call_id:
@@ -701,11 +727,35 @@ async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], 
             callback_url=callback_url
         )
 
+        if not answer_result or not answer_result.get('call_connection_id'):
+            logger.error(f"Failed to answer incoming call {call_id}: {answer_result}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to answer incoming call"
+            )
+
         call_connection_id = answer_result.get('call_connection_id')
         logger.info(f"Call answered with connection ID: {call_connection_id}")
         
-        # Determine clinic (default to 'default-clinic' for now)
-        clinic_id = 'default-clinic'
+        # Determine clinic from phone number mapping
+        from services.phone_routing_service import get_phone_routing_service
+        from services.database import get_db_session
+
+        db = next(get_db_session())
+        try:
+            phone_routing = get_phone_routing_service(db)
+            clinic_id = phone_routing.get_clinic_by_phone(to_number)
+            
+            if not clinic_id:
+                # Fallback to default clinic
+                clinic_id = 'default-clinic'
+                logger.warning(
+                    f"No clinic mapping for {to_number}, using default",
+                    LogCategory.ROUTING,
+                    extra_data={"to_number": to_number}
+                )
+        finally:
+            db.close()
 
         # Register the incoming call in ACS service
         await acs_service.register_incoming_call(
@@ -749,7 +799,18 @@ async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], 
 
 
 # Webhook endpoints
-@router.post("/webhooks/events", response_model=Dict[str, Any])
+from fastapi import Request, Body, Depends
+from fastapi.exceptions import RequestValidationError
+
+MAX_WEBHOOK_BODY_SIZE = 1_048_576  # 1MB
+
+async def validate_request_size(request: Request):
+    """Validate webhook request body size to prevent DoS attacks."""
+    content_length = request.headers.get('content-length')
+    if content_length and int(content_length) > MAX_WEBHOOK_BODY_SIZE:
+        raise RequestValidationError("Request body too large")
+
+@router.post("/webhooks/events", response_model=Dict[str, Any], dependencies=[Depends(validate_request_size)])
 @router.get("/webhooks/events", response_model=Dict[str, Any])
 @router.options("/webhooks/events", response_model=Dict[str, Any])
 async def handle_webhook_events(
@@ -817,6 +878,39 @@ async def handle_webhook_events(
                 detail="Invalid JSON payload"
             )
         
+        # Extract clinic_id from phone number for rate limiting
+        clinic_id = 'default-clinic'  # Default fallback
+        try:
+            # Try to extract phone number from payload
+            if isinstance(payload, list) and len(payload) > 0:
+                # For Event Grid events, look in the first event
+                first_event = payload[0]
+                to_number = first_event.get('data', {}).get('to', {}).get('phoneNumber', {}).get('value')
+            elif isinstance(payload, dict):
+                to_number = payload.get('data', {}).get('to', {}).get('phoneNumber', {}).get('value')
+            else:
+                to_number = None
+            
+            if to_number:
+                # Use phone routing service to get clinic_id
+                from services.phone_routing_service import get_phone_routing_service
+                phone_routing = get_phone_routing_service(db)
+                clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        except Exception as e:
+            logger.warning(f"Could not determine clinic_id for rate limiting: {e}")
+            clinic_id = 'default-clinic'
+        
+        # Check webhook rate limit (DoS protection)
+        try:
+            from services.rate_limiter import get_rate_limiter
+            rate_limiter = get_rate_limiter()
+            if not await rate_limiter.check_webhook_limit(clinic_id):
+                logger.warning(f"Webhook rate limit exceeded for clinic {clinic_id}")
+                raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        except Exception as e:
+            logger.error(f"Rate limiting check failed: {e}")
+            # Continue processing if rate limiting fails
+        
         # Handle Event Grid validation handshake (SubscriptionValidationEvent)
         # Skip signature verification for Event Grid validation events
         # Event Grid sends an array of events, so we need to check each one
@@ -860,47 +954,6 @@ async def handle_webhook_events(
                     detail="Missing validationCode in Event Grid validation event"
                 )
 
-        # Check if this is a Call Automation event (signed with ACS webhook secret)
-        # Event Grid uses 'type' field, Call Automation uses 'eventType' field
-        event_type_field = payload.get('type') or payload.get('eventType', '')
-        is_call_automation_event = event_type_field.startswith('Microsoft.Communication.CallAutomation.')
-        
-        # Check if this is an Event Grid event (not signed with ACS webhook secret)
-        is_event_grid_event = (
-            event_type_field.startswith('Microsoft.Communication.') and
-            not event_type_field.startswith('Microsoft.Communication.CallAutomation.')
-        )
-
-        # Only verify ACS webhook signature for Call Automation events
-        if is_call_automation_event:
-            if not acs_service.verify_webhook_signature(request, payload_bytes):
-                logger.warning(
-                    "Invalid webhook signature received for Call Automation event",
-                    LogCategory.API,
-                    extra_data={
-                        "client_ip": request.client.host if request.client else "unknown",
-                        "user_agent": request.headers.get("user-agent", "unknown"),
-                        "event_type": event_type_field
-                    }
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid webhook signature"
-                )
-        elif is_event_grid_event:
-            logger.info(
-                "Event Grid event received, skipping ACS signature verification",
-                LogCategory.API,
-                extra_data={"event_type": event_type_field}
-            )
-        else:
-            logger.info(
-                "Non-Call Automation event received, skipping ACS signature verification",
-                LogCategory.API,
-                extra_data={"event_type": event_type_field}
-            )
-
-        # Handle different types of call events
         # Process events - handle both single event and array of events
         events_to_process = payload if isinstance(payload, list) else [payload]
         
@@ -923,6 +976,46 @@ async def handle_webhook_events(
                     "payload": event_payload
                 }
             )
+
+            # Check if this is a Call Automation event (signed with ACS webhook secret)
+            is_call_automation_event = event_type.startswith('Microsoft.Communication.CallAutomation.')
+            
+            # Check if this is an Event Grid event (not signed with ACS webhook secret)
+            is_event_grid_event = (
+                event_type.startswith('Microsoft.Communication.') and
+                not event_type.startswith('Microsoft.Communication.CallAutomation.')
+            )
+
+            # Only verify ACS webhook signature for Call Automation events
+            if is_call_automation_event:
+                if not acs_service.verify_webhook_signature(request, payload_bytes):
+                    logger.warning(
+                        "Invalid webhook signature received for Call Automation event",
+                        LogCategory.API,
+                        extra_data={
+                            "client_ip": request.client.host if request.client else "unknown",
+                            "user_agent": request.headers.get("user-agent", "unknown"),
+                            "event_type": event_type
+                        }
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid webhook signature"
+                    )
+            elif is_event_grid_event:
+                logger.info(
+                    "Event Grid event received, skipping ACS signature verification",
+                    LogCategory.API,
+                    extra_data={"event_type": event_type}
+                )
+            else:
+                logger.info(
+                    "Non-Call Automation event received, skipping ACS signature verification",
+                    LogCategory.API,
+                    extra_data={"event_type": event_type}
+                )
+
+            # Handle different types of call events
 
             # Handle IncomingCallReceived event from Call Automation (when someone calls)
             if event_type == 'Microsoft.Communication.CallAutomation.IncomingCallReceived':

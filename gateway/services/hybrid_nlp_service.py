@@ -35,7 +35,8 @@ from services.configuration import get_settings
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.exceptions import (
     ValidationError,
-    ExternalServiceUnavailableError
+    ExternalServiceUnavailableError,
+    ServiceUnavailableError
 )
 
 
@@ -270,8 +271,8 @@ class HybridNLPService:
         try:
             # Check service health
             if not self.azure_health and not self.local_health:
-                # Both services down, use local as last resort
-                return ProcessingStrategy.LOCAL_ONLY
+                # Both services down, raise error instead of infinite loop
+                raise ServiceUnavailableError("All NLP services are down")
             elif not self.azure_health:
                 return ProcessingStrategy.LOCAL_ONLY
             elif not self.local_health:
@@ -579,21 +580,19 @@ class HybridNLPService:
         """Convert local entities to Azure format."""
         entities = []
         
-        if local_entities.dates:
-            for date in local_entities.dates:
-                entities.append({
-                    "type": "date",
-                    "value": date,
-                    "confidence": 0.8
-                })
+        if local_entities.appointment_date:
+            entities.append({
+                "type": "date",
+                "value": local_entities.appointment_date,
+                "confidence": 0.8
+            })
         
-        if local_entities.times:
-            for time in local_entities.times:
-                entities.append({
-                    "type": "time",
-                    "value": time,
-                    "confidence": 0.8
-                })
+        if local_entities.appointment_time:
+            entities.append({
+                "type": "time",
+                "value": local_entities.appointment_time,
+                "confidence": 0.8
+            })
         
         if local_entities.phone_numbers:
             for phone in local_entities.phone_numbers:
@@ -623,21 +622,24 @@ class HybridNLPService:
     
     def _create_fallback_result(self, user_input: str, call_id: str, language: LanguageCode) -> HybridIntentResult:
         """Create a fallback result when all processing fails."""
+        # Import single source of truth for intent types
+        from models.enums import IntentType
+        
         # Simple keyword-based fallback
         user_input_lower = user_input.lower()
         
         if any(word in user_input_lower for word in ["book", "schedule", "appointment", "cita", "agendar"]):
-            intent = LocalIntentType.APPOINTMENT_BOOKING
+            intent = IntentType.APPOINTMENT_BOOKING
         elif any(word in user_input_lower for word in ["cancel", "cancelar"]):
-            intent = LocalIntentType.APPOINTMENT_CANCELLATION
+            intent = IntentType.APPOINTMENT_CANCELLATION
         elif any(word in user_input_lower for word in ["reschedule appointment", "reagendar cita", "change appointment", "cambiar cita"]):
-            intent = LocalIntentType.APPOINTMENT_RESCHEDULING
-        elif any(word in user_input_lower for word in ["hello", "hi", "hola", "buenas tardes", "buenas noches, buenos dias"]):
-            intent = LocalIntentType.GREETING
+            intent = IntentType.APPOINTMENT_RESCHEDULING
+        elif any(word in user_input_lower for word in ["hello", "hi", "hola", "buenas tardes", "buenas noches", "buenos dias"]):
+            intent = IntentType.GREETING
         elif any(word in user_input_lower for word in ["bye", "goodbye", "adios", "hasta luego", "chao"]):
-            intent = LocalIntentType.GOODBYE
+            intent = IntentType.GOODBYE
         else:
-            intent = LocalIntentType.GENERAL_INQUIRY
+            intent = IntentType.GENERAL_INQUIRY
         
         return HybridIntentResult(
             intent=intent,
@@ -655,17 +657,23 @@ class HybridNLPService:
             if (current_time - self.last_health_check).total_seconds() < self.health_check_interval:
                 return  # Skip health check if too recent
             
+            # Use unique health check call_id with timestamp
+            health_check_id = f"health_check_{int(datetime.now(timezone.utc).timestamp())}"
+            
             # Check Azure OpenAI health
             try:
-                # Simple test request
                 test_result = await asyncio.wait_for(
-                    self.azure_openai.classify_intent("test", "health_check", LanguageCode.ENGLISH),
-                    timeout=5
+                    self.azure_openai.classify_intent("test", health_check_id, LanguageCode.ENGLISH),
+                    timeout=10  # Increased from 5 to 10 seconds
                 )
                 self.azure_health = True
             except Exception as e:
                 self.azure_health = False
                 self.logger.warning(f"Azure OpenAI health check failed: {e}")
+            finally:
+                # Clean up health check conversation immediately
+                if health_check_id in self.azure_openai.conversations:
+                    del self.azure_openai.conversations[health_check_id]
             
             # Check local NLP health
             try:
@@ -789,8 +797,10 @@ class HybridNLPService:
             expired_calls = []
             
             for call_id, stats in self.call_stats.items():
-                # Remove stats for calls older than 1 hour
-                if stats.total_requests == 0 or (current_time - datetime.now(timezone.utc)).total_seconds() > 3600:
+                # Fix: Compare with stats.start_time, not datetime.now()
+                time_since_start = (current_time - stats.start_time).total_seconds()
+                # Remove stats for calls older than 1 hour or with no requests
+                if stats.total_requests == 0 or time_since_start > 3600:
                     expired_calls.append(call_id)
             
             for call_id in expired_calls:

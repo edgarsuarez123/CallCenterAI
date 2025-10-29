@@ -602,10 +602,28 @@ class SpeechToTextService:
             
             recognizer = self.active_recognizers[call_id]
             
+            # Disconnect all event handlers to prevent memory leak
+            try:
+                recognizer.session_started.disconnect_all()
+                recognizer.session_stopped.disconnect_all()
+                recognizer.speech_start_detected.disconnect_all()
+                recognizer.speech_end_detected.disconnect_all()
+                recognizer.recognizing.disconnect_all()
+                recognizer.recognized.disconnect_all()
+                recognizer.canceled.disconnect_all()
+            except Exception as e:
+                self.logger.warning(f"Error disconnecting STT handlers: {e}")
+            
             # Stop recognition
             recognizer.stop_continuous_recognition()
             
-            # Clean up
+            # Clean up audio stream and close native resources
+            if call_id in self.audio_streams:
+                audio_stream = self.audio_streams[call_id]
+                audio_stream.close()  # Close native resources
+                del self.audio_streams[call_id]
+            
+            # Clean up other resources
             del self.active_recognizers[call_id]
             if call_id in self.recognition_status:
                 del self.recognition_status[call_id]

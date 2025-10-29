@@ -15,6 +15,9 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 from typing import Dict, List, Optional, Any, Tuple
 from urllib.parse import urlencode
 
@@ -50,7 +53,7 @@ class CallState:
         self.caller_phone = caller_phone
         self.acs_call_id: Optional[str] = None
         self.status = CallStatus.INITIATED.value
-        self.start_time = datetime.now(timezone.utc)
+        self.start_time = datetime.now(AST)
         self.end_time: Optional[datetime] = None
         self.websocket_connected = False
         self.audio_stream_active = False
@@ -105,8 +108,9 @@ class AzureCommunicationService:
                 self.endpoint += '/'
                 
         except Exception as e:
-            self.logger.error(f"Failed to parse ACS connection string: {e}")
-            raise AzureCommunicationError("connection_parsing", str(e))
+            # Don't log the full exception (may contain connection string)
+            self.logger.error("Failed to parse ACS connection string: Invalid format")
+            raise AzureCommunicationError("connection_parsing", "Invalid connection string format")
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Generate authentication headers for ACS API calls."""
@@ -143,26 +147,26 @@ class AzureCommunicationService:
                 raise ValidationError("clinic_id", clinic_id, "Clinic ID is required")
             
             # Generate unique call ID
-            call_id = f"CALL_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8].upper()}"
+            call_id = f"CALL_{datetime.now(AST).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8].upper()}"
             
             # Check clinic capacity
             await self._check_clinic_capacity(clinic_id)
             
-            # Create call state
-            call_state = CallState(call_id, clinic_id, phone_number)
-            call_state.status = "initiating"
-            async with self._calls_lock:
-                self.active_calls[call_id] = call_state
-            
-            # Prepare ACS call request
+            # Prepare ACS call request BEFORE creating call state
             if call_type == "outbound":
                 acs_call_id = await self._initiate_outbound_call(phone_number, call_id)
             else:
                 # For inbound calls, ACS will provide the call ID via webhook
                 acs_call_id = None
             
-            call_state.acs_call_id = acs_call_id
+            # Create call state and update status BEFORE releasing lock
+            call_state = CallState(call_id, clinic_id, phone_number)
             call_state.status = CallStatus.ACTIVE.value
+            call_state.acs_call_id = acs_call_id
+            
+            # Add to active calls dict with complete state
+            async with self._calls_lock:
+                self.active_calls[call_id] = call_state
             
             # Store call in database
             await self._store_call_record(call_id, phone_number, clinic_id, call_type)
@@ -247,7 +251,8 @@ class AzureCommunicationService:
     async def _check_clinic_capacity(self, clinic_id: str):
         """Check if clinic has capacity for new calls."""
         try:
-            with get_db_session() as db:
+            db = next(get_db_session())
+            try:
                 # Get clinic license
                 license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
                 if not license_record:
@@ -270,6 +275,8 @@ class AzureCommunicationService:
                 # Increment concurrent call count
                 license_record.current_concurrent_calls += 1
                 db.commit()
+            finally:
+                db.close()
                 
         except Exception as e:
             if isinstance(e, AzureCommunicationError):
@@ -306,7 +313,7 @@ class AzureCommunicationService:
                     call_id=call_id,
                     caller_phone_token=phone_token,  # Now properly tokenized
                     status=CallStatus.ACTIVE.value,
-                    started_at=datetime.now(timezone.utc)
+                    started_at=datetime.now(AST)
                 )
                 
                 db.add(call_record)
@@ -426,6 +433,16 @@ class AzureCommunicationService:
             True if call was registered successfully
         """
         try:
+            # Check rate limit before registering call
+            from services.rate_limiter import get_rate_limiter
+            rate_limiter = get_rate_limiter()
+            if not await rate_limiter.check_acs_call_limit(clinic_id):
+                logger.warning(f"Rate limit exceeded for clinic {clinic_id}")
+                raise AzureCommunicationError(
+                    "rate_limit_exceeded",
+                    f"Clinic {clinic_id} has exceeded call rate limit"
+                )
+            
             # Create call state for incoming call
             call_state = CallState(call_id, clinic_id, caller_phone)
             call_state.status = "incoming"
@@ -440,6 +457,22 @@ class AzureCommunicationService:
         except Exception as e:
             logger.error(f"Failed to register incoming call {call_id}: {e}")
             raise AzureCommunicationError("register_failed", f"Failed to register incoming call: {str(e)}")
+
+    async def store_call_id_mapping(self, call_id: str, acs_call_id: str) -> None:
+        """
+        Store mapping between internal call_id and ACS call_id for event correlation.
+        
+        Args:
+            call_id: Internal call ID
+            acs_call_id: ACS call connection ID
+        """
+        try:
+            async with self._calls_lock:
+                if call_id in self.active_calls:
+                    self.active_calls[call_id].acs_call_id = acs_call_id
+                    logger.debug(f"Stored call ID mapping: {call_id} -> {acs_call_id}")
+        except Exception as e:
+            logger.error(f"Failed to store call ID mapping: {e}")
 
     async def answer_call(self, call_id: str) -> bool:
         """
@@ -519,7 +552,8 @@ class AzureCommunicationService:
             True if call was ended successfully
         """
         try:
-            call_state = self.active_calls.get(call_id)
+            async with self._calls_lock:
+                call_state = self.active_calls.get(call_id)
             if not call_state:
                 self.logger.warning(f"Attempted to end non-existent call: {call_id}")
                 return False
@@ -538,13 +572,20 @@ class AzureCommunicationService:
             
             # Update call state
             call_state.status = "ended"
-            call_state.end_time = datetime.now(timezone.utc)
+            call_state.end_time = datetime.now(AST)
             
             # Update database
             await self._update_call_record(call_id, "completed", call_state.end_time)
             
             # Decrement clinic capacity
             await self._decrement_clinic_capacity(call_state.clinic_id)
+            
+            # Release provider capacity
+            provider_id = call_state.metadata.get('provider_id')
+            if provider_id:
+                from services.call_router import get_call_router
+                call_router = get_call_router()
+                await call_router.release_provider_capacity(provider_id)
             
             # Remove from active calls
             async with self._calls_lock:
@@ -573,23 +614,29 @@ class AzureCommunicationService:
     async def _update_call_record(self, call_id: str, status: str, end_time: datetime):
         """Update call record in database."""
         try:
-            with get_db_session() as db:
+            db = next(get_db_session())
+            try:
                 call_record = db.query(Call).filter_by(call_id=call_id).first()
                 if call_record:
                     call_record.status = status
                     call_record.ended_at = end_time
                     db.commit()
+            finally:
+                db.close()
         except Exception as e:
             self.logger.error(f"Failed to update call record: {e}")
     
     async def _decrement_clinic_capacity(self, clinic_id: str):
         """Decrement clinic's concurrent call count."""
         try:
-            with get_db_session() as db:
+            db = next(get_db_session())
+            try:
                 license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
                 if license_record and license_record.current_concurrent_calls > 0:
                     license_record.current_concurrent_calls -= 1
                     db.commit()
+            finally:
+                db.close()
         except Exception as e:
             self.logger.error(f"Failed to decrement clinic capacity: {e}")
     
@@ -604,7 +651,8 @@ class AzureCommunicationService:
             True if audio streaming started successfully
         """
         try:
-            call_state = self.active_calls.get(call_id)
+            async with self._calls_lock:
+                call_state = self.active_calls.get(call_id)
             if not call_state:
                 raise CallNotFoundError(call_id)
             
@@ -638,7 +686,8 @@ class AzureCommunicationService:
             True if audio was sent successfully
         """
         try:
-            call_state = self.active_calls.get(call_id)
+            async with self._calls_lock:
+                call_state = self.active_calls.get(call_id)
             if not call_state or not call_state.acs_call_id:
                 return False
             
@@ -850,7 +899,7 @@ class AzureCommunicationService:
         call_state.websocket_connected = False
         call_state.audio_stream_active = False
     
-    def get_call_status(self, call_id: str) -> Optional[Dict[str, Any]]:
+    async def get_call_status(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
         Get status of a call.
         
@@ -860,7 +909,8 @@ class AzureCommunicationService:
         Returns:
             Call status information or None if not found
         """
-        call_state = self.active_calls.get(call_id)
+        async with self._calls_lock:
+            call_state = self.active_calls.get(call_id)
         if not call_state:
             return None
         
@@ -890,10 +940,10 @@ class AzureCommunicationService:
         """Clean up calls that have exceeded maximum duration."""
         try:
             max_duration = timedelta(minutes=self.settings.azure.communication.max_call_duration_minutes)
-            current_time = datetime.now(timezone.utc)
+            current_time = datetime.now(AST)
             
             expired_calls = []
-            for call_id, call_state in self.active_calls.items():
+            for call_id, call_state in list(self.active_calls.items()):
                 if current_time - call_state.start_time > max_duration:
                     expired_calls.append(call_id)
             

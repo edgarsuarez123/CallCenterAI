@@ -436,6 +436,18 @@ class RedisCacheConfig(BaseSettings):
     )
 
 
+class RedisConfig(BaseSettings):
+    """Redis configuration for call store."""
+    enabled: bool = Field(default=False, description="Enable Redis call store")
+    host: str = Field(default="localhost", description="Redis host")
+    port: int = Field(default=6379, description="Redis port")
+    password: SecretStr = Field(default="", description="Redis password")
+    db: int = Field(default=0, description="Redis database number")
+    ttl_seconds: int = Field(default=3600, description="Call context TTL")
+    
+    model_config = SettingsConfigDict(env_prefix="REDIS_")
+
+
 class AzureConfig(BaseSettings):
     """Azure configuration with validation."""
     
@@ -493,11 +505,53 @@ class ApplicationConfig(BaseSettings):
     google_calendar: GoogleCalendarConfig = Field(default_factory=GoogleCalendarConfig)
     azure: AzureConfig = Field(default_factory=AzureConfig)
     redis_cache: RedisCacheConfig = Field(default_factory=RedisCacheConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
     
     model_config = SettingsConfigDict(
         env_prefix="APP_",
         case_sensitive=False
     )
+
+
+class ConfigurationError(Exception):
+    """Raised when required configuration is missing or invalid."""
+    pass
+
+def validate_required_settings(settings: ApplicationConfig) -> None:
+    """Validate critical settings exist and are properly configured."""
+    critical_checks = []
+    
+    # Azure Communication Services
+    try:
+        conn_str = settings.azure.communication.connection_string.get_secret_value()
+        if not conn_str or len(conn_str) < 10:
+            critical_checks.append("azure.communication.connection_string is empty")
+    except Exception as e:
+        critical_checks.append(f"azure.communication.connection_string: {e}")
+    
+    # Azure Speech Services
+    try:
+        speech_key = settings.azure.speech.speech_key.get_secret_value()
+        if not speech_key:
+            critical_checks.append("azure.speech.speech_key is empty")
+        if not settings.azure.speech.speech_region:
+            critical_checks.append("azure.speech.speech_region is missing")
+    except Exception as e:
+        critical_checks.append(f"azure.speech: {e}")
+    
+    # Database
+    try:
+        db_pass = settings.database.password.get_secret_value()
+        if not db_pass:
+            critical_checks.append("database.password is empty")
+    except Exception as e:
+        critical_checks.append(f"database: {e}")
+    
+    if critical_checks:
+        error_msg = "Critical configuration missing:\n" + "\n".join(f"  - {c}" for c in critical_checks)
+        raise ConfigurationError(error_msg)
+    
+    logger.info("Configuration validation passed")
 
 
 class TestConfig(ApplicationConfig):

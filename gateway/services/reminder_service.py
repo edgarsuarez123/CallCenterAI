@@ -12,7 +12,10 @@ Critical for patient engagement and reducing no-shows.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 from typing import Dict, List, Optional, Any, Tuple
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -51,6 +54,9 @@ class ReminderService:
         self.acs_service: AzureCommunicationService = get_azure_communication_service()
         self.tts_service: TextToSpeechService = get_text_to_speech_service()
         self.bilingual_manager: BilingualManager = get_bilingual_manager()
+        
+        # Concurrency control
+        self._call_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent reminder calls
         
         # Reminder call templates
         self.reminder_templates = {
@@ -127,10 +133,11 @@ class ReminderService:
                 if not appointment.start_time:
                     raise ValidationError("Appointment start_time is required for reminder scheduling")
                 
+                now = datetime.now(AST)
                 scheduled_time = appointment.start_time - timedelta(hours=clinic.reminder_hours_before)
             
             # Check if reminder is too far in the past
-            if scheduled_time < datetime.now(timezone.utc):
+            if scheduled_time < now:  # Use captured 'now'
                 self.logger.warning(f"Reminder scheduled time {scheduled_time} is in the past for appointment {appointment_id}", LogCategory.REMINDER)
                 raise ValidationError("Reminder scheduled time cannot be in the past")
             
@@ -237,7 +244,7 @@ class ReminderService:
                 log_id=log_id,
                 reminder_id=reminder_id,
                 attempt_number=reminder.retry_count,
-                call_started_at=datetime.now(timezone.utc),
+                call_started_at=datetime.now(AST),
                 call_status='initiated'
             )
             db.add(reminder_log)
@@ -252,7 +259,7 @@ class ReminderService:
             )
             
             # Update reminder log with call outcome
-            reminder_log.call_ended_at = datetime.now(timezone.utc)
+            reminder_log.call_ended_at = datetime.now(AST)
             reminder_log.call_status = call_result['status']
             reminder_log.call_duration_seconds = call_result.get('duration_seconds')
             reminder_log.call_outcome = call_result.get('outcome')
@@ -263,7 +270,7 @@ class ReminderService:
             # Update reminder with final status
             if call_result['status'] == 'completed':
                 reminder.status = 'completed'
-                reminder.completed_at = datetime.now(timezone.utc)
+                reminder.completed_at = datetime.now(AST)
                 reminder.call_duration_seconds = call_result.get('duration_seconds')
                 reminder.call_outcome = call_result.get('outcome')
                 reminder.reminder_call_id = call_result.get('call_id')
@@ -272,12 +279,12 @@ class ReminderService:
                 if reminder.retry_count < reminder.max_retries:
                     # Schedule retry
                     retry_delay = timedelta(minutes=30)  # Default retry delay
-                    reminder.next_retry_time = datetime.now(timezone.utc) + retry_delay
+                    reminder.next_retry_time = datetime.now(AST) + retry_delay
                     reminder.status = 'failed'
                 else:
                     # Max retries reached
                     reminder.status = 'failed'
-                    reminder.completed_at = datetime.now(timezone.utc)
+                    reminder.completed_at = datetime.now(AST)
                     reminder.call_outcome = call_result.get('outcome', 'max_retries_exceeded')
             
             db.commit()
@@ -343,32 +350,47 @@ class ReminderService:
         Make the actual reminder call using Azure Communication Services.
         """
         try:
-            # Generate TTS audio for the message
-            # For now, default to English. In a real system, you'd detect patient language
-            audio_bytes = self.tts_service.synthesize_speech(message, "en-US")
-            
-            if not audio_bytes:
-                raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
-            
-            # Make outbound call using ACS
-            call_result = await self.acs_service.make_outbound_call(
-                to_phone=patient_phone,
-                from_phone=self.settings.azure.communication.phone_number,
-                audio_content=audio_bytes,
-                call_context={
-                    'reminder_id': reminder_id,
-                    'appointment_id': appointment.appointment_id,
-                    'call_type': 'reminder'
+            # Check rate limit for reminder calls
+            from services.rate_limiter import get_rate_limiter
+            rate_limiter = get_rate_limiter()
+            if not await rate_limiter.check_reminder_limit(appointment.clinic_id):
+                self.logger.warning(f"Reminder rate limit exceeded for clinic {appointment.clinic_id}")
+                # Reschedule for later
+                await self._reschedule_reminder(appointment.clinic_id, reminder_id, delay_minutes=10)
+                return {
+                    'status': 'rescheduled',
+                    'reason': 'rate_limit_exceeded',
+                    'rescheduled_for': datetime.now(AST) + timedelta(minutes=10)
                 }
-            )
             
-            return {
-                'status': 'completed' if call_result.get('success') else 'failed',
-                'call_id': call_result.get('call_id'),
-                'duration_seconds': call_result.get('duration_seconds'),
-                'outcome': 'answered' if call_result.get('success') else 'failed',
-                'caller_id': self.settings.azure.communication.phone_number
-            }
+            # Limit concurrency
+            async with self._call_semaphore:
+                # Generate TTS audio for the message
+                # For now, default to English. In a real system, you'd detect patient language
+                audio_bytes = await self.tts_service.synthesize_speech(message, "en-US")
+                
+                if not audio_bytes:
+                    raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
+                
+                # Make outbound call using ACS
+                call_result = await self.acs_service.make_outbound_call(
+                    to_phone=patient_phone,
+                    from_phone=self.settings.azure.communication.phone_number,
+                    audio_content=audio_bytes,
+                    call_context={
+                        'reminder_id': reminder_id,
+                        'appointment_id': appointment.appointment_id,
+                        'call_type': 'reminder'
+                    }
+                )
+                
+                return {
+                    'status': 'completed' if call_result.get('success') else 'failed',
+                    'call_id': call_result.get('call_id'),
+                    'duration_seconds': call_result.get('duration_seconds'),
+                    'outcome': 'answered' if call_result.get('success') else 'failed',
+                    'caller_id': self.settings.azure.communication.phone_number
+                }
             
         except AzureCommunicationError as e:
             self.logger.error(f"ACS error making reminder call: {e.message}", LogCategory.REMINDER, exception=e)
@@ -429,7 +451,7 @@ class ReminderService:
         Get reminders that are due for execution.
         """
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(AST)
             
             reminders = db.query(Reminder).filter(
                 and_(
@@ -478,7 +500,7 @@ class ReminderService:
                 return False
             
             reminder.status = 'cancelled'
-            reminder.completed_at = datetime.now(timezone.utc)
+            reminder.completed_at = datetime.now(AST)
             reminder.call_outcome = reason
             
             db.commit()
@@ -495,6 +517,37 @@ class ReminderService:
                 f"Failed to cancel reminder: {e}",
                 error_code=ErrorCode.DATABASE_ERROR
             )
+    
+    async def _reschedule_reminder(self, clinic_id: str, reminder_id: str, delay_minutes: int = 10):
+        """
+        Reschedule a reminder call for later due to rate limiting.
+        
+        Args:
+            clinic_id: Clinic ID
+            reminder_id: Reminder ID to reschedule
+            delay_minutes: Minutes to delay the reminder
+        """
+        try:
+            # In a real implementation, you would:
+            # 1. Update the reminder's scheduled_time in the database
+            # 2. Add it back to the scheduler queue
+            # 3. Log the rescheduling event
+            
+            self.logger.info(
+                f"Rescheduling reminder {reminder_id} for clinic {clinic_id} due to rate limiting",
+                LogCategory.REMINDER,
+                extra_data={
+                    "reminder_id": reminder_id,
+                    "clinic_id": clinic_id,
+                    "delay_minutes": delay_minutes
+                }
+            )
+            
+            # For now, just log the rescheduling
+            # TODO: Implement actual rescheduling logic
+            
+        except Exception as e:
+            self.logger.error(f"Failed to reschedule reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
 
 
 # Global instance for dependency injection

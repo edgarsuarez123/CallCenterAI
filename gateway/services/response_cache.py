@@ -18,7 +18,10 @@ import asyncio
 import hashlib
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
@@ -50,7 +53,7 @@ class CacheEntry:
     
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.now(timezone.utc)
+            self.created_at = datetime.now(AST)
 
 
 @dataclass
@@ -66,7 +69,7 @@ class CacheStatistics:
     
     def __post_init__(self):
         if self.last_reset is None:
-            self.last_reset = datetime.now(timezone.utc)
+            self.last_reset = datetime.now(AST)
     
     @property
     def hit_rate(self) -> float:
@@ -104,7 +107,7 @@ class ResponseCacheService:
         self.default_ttl = self.redis_config.default_ttl
         
         # TTL mapping for different response types
-        self.ttl_mapping = {
+        self.cache_ttl_mapping = {
             "greeting": CacheTier.GREETING.value,
             "goodbye": CacheTier.GREETING.value,
             "name_request": CacheTier.QUESTION.value,
@@ -213,6 +216,9 @@ class ResponseCacheService:
             cache_key = self._generate_cache_key(intent, language, variables)
             
             # Try Redis first if connected
+            if not self._is_connected:
+                await self.initialize()
+            
             if self._is_connected and self.redis_client:
                 try:
                     cached_data = await self.redis_client.get(cache_key)
@@ -294,7 +300,7 @@ class ResponseCacheService:
         try:
             # Determine TTL
             if ttl is None:
-                ttl = self.ttl_mapping.get(intent, self.default_ttl)
+                ttl = self.cache_ttl_mapping.get(intent, self.default_ttl)
             
             # Create cache entry
             entry = CacheEntry(
@@ -378,7 +384,8 @@ class ResponseCacheService:
         if variables:
             # Sort variables for consistent hashing
             sorted_vars = sorted(variables.items())
-            var_hash = hashlib.md5(json.dumps(sorted_vars, sort_keys=True).encode()).hexdigest()[:8]
+            # Use full SHA256 hash to prevent collisions
+            var_hash = hashlib.sha256(json.dumps(sorted_vars, sort_keys=True).encode()).hexdigest()[:16]
             base_key = f"{base_key}:{var_hash}"
         
         return f"{self.key_prefix}response:{base_key}"
@@ -396,13 +403,13 @@ class ResponseCacheService:
         if entry.created_at is None:
             return False
         
-        elapsed = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
+        elapsed = (datetime.now(AST) - entry.created_at).total_seconds()
         return elapsed < entry.ttl
     
     async def _cleanup_local_cache(self):
         """Clean up expired entries from local cache."""
         try:
-            current_time = datetime.now(timezone.utc)
+            current_time = datetime.now(AST)
             expired_keys = []
             
             for key, entry in self._local_cache.items():
@@ -466,7 +473,7 @@ class ResponseCacheService:
                     "local_cache_size": len(self._local_cache)
                 },
                 "redis_info": redis_info,
-                "ttl_mapping": self.ttl_mapping
+                "ttl_mapping": self.cache_ttl_mapping
             }
             
         except Exception as e:
@@ -539,7 +546,7 @@ class ResponseCacheService:
                 "status": "healthy",
                 "redis_connected": False,
                 "local_cache_available": True,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(AST).isoformat()
             }
             
             # Test Redis connection
@@ -571,7 +578,7 @@ class ResponseCacheService:
             return {
                 "status": "unhealthy",
                 "error": str(e),
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(AST).isoformat()
             }
     
     async def close(self):

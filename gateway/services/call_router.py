@@ -13,7 +13,10 @@ This service provides:
 
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+# Atlantic Standard Time (UTC-4)
+AST = timezone(timedelta(hours=-4))
 from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass, field
 from enum import Enum
@@ -157,6 +160,11 @@ class CallRouter:
             "average_wait_time": 0.0
         }
         
+        # Concurrency control
+        self._capacity_lock = asyncio.Lock()
+        self._queue_lock = asyncio.Lock()
+        self._stats_lock = asyncio.Lock()  # Added for statistics race condition fix
+        
         # Configuration
         self.max_total_capacity = 1000
         self.overload_threshold = 0.8  # 80% capacity
@@ -278,7 +286,7 @@ class CallRouter:
             # Update statistics
             routing_time_ms = int((time.time() - start_time) * 1000)
             routing_result.routing_time_ms = routing_time_ms
-            self._update_routing_stats(routing_result)
+            await self._update_routing_stats(routing_result)
             
             self.logger.info(
                 f"Call routed: {call_id}",
@@ -490,20 +498,36 @@ class CallRouter:
         # In a real implementation, this would consider geographic data
         return self._least_loaded_selection(available_providers)
     
-    async def _assign_call_to_provider(self, call_id: str, provider_id: str):
-        """Assign a call to a provider and update capacity."""
-        try:
+    async def increment_provider_calls(self, provider_id: str):
+        """Atomically increment provider's current call count."""
+        async with self._capacity_lock:
             if provider_id in self.provider_capacities:
                 capacity = self.provider_capacities[provider_id]
                 capacity.current_calls += 1
-                capacity.available_capacity = capacity.max_concurrent_calls - capacity.current_calls
-                capacity.last_updated = datetime.now(timezone.utc)
-                
-                # Update total system load
+                capacity.available_capacity = max(0, capacity.max_concurrent_calls - capacity.current_calls)
+                capacity.last_updated = datetime.now(AST)
                 self.current_load += 1
-                
-                self.logger.debug(f"Assigned call {call_id} to provider {provider_id}")
-                
+
+    async def decrement_provider_calls(self, provider_id: str):
+        """Atomically decrement provider's current call count."""
+        async with self._capacity_lock:
+            if provider_id in self.provider_capacities:
+                capacity = self.provider_capacities[provider_id]
+                capacity.current_calls = max(0, capacity.current_calls - 1)
+                capacity.available_capacity = min(
+                    capacity.max_concurrent_calls,
+                    capacity.available_capacity + 1
+                )
+                capacity.last_updated = datetime.now(AST)
+                self.current_load = max(0, self.current_load - 1)
+
+    async def _assign_call_to_provider(self, call_id: str, provider_id: str):
+        """Assign a call to a provider and update capacity."""
+        try:
+            # Use atomic increment instead of direct assignment
+            await self.increment_provider_calls(provider_id)
+            self.logger.debug(f"Assigned call {call_id} to provider {provider_id}")
+                    
         except Exception as e:
             self.logger.error(f"Failed to assign call {call_id} to provider {provider_id}: {e}")
     
@@ -546,7 +570,9 @@ class CallRouter:
                     queue_id=queue_id,
                     caller_type=routing_rule.caller_type,
                     priority=routing_rule.priority,
-                    max_queue_size=routing_rule.max_queue_size
+                    max_queue_size=routing_rule.max_queue_size,
+                    current_size=0,
+                    average_wait_time=0.0
                 )
             
             queue = self.call_queues[queue_id]
@@ -563,7 +589,7 @@ class CallRouter:
             queue.calls.append({
                 "call_id": call_id,
                 "caller_info": caller_info,
-                "queued_at": datetime.now(timezone.utc),
+                "queued_at": datetime.now(AST),
                 "routing_rule": routing_rule
             })
             queue.current_size += 1
@@ -658,23 +684,24 @@ class CallRouter:
     def _is_system_overloaded(self) -> bool:
         """Check if the system is overloaded."""
         if self.total_capacity == 0:
-            return False
+            return True  # No capacity = overloaded
         
         load_ratio = self.current_load / self.total_capacity
         return load_ratio >= self.overload_threshold
     
-    def _update_routing_stats(self, routing_result: RoutingResult):
-        """Update routing statistics."""
-        self.routing_stats["total_routes"] += 1
-        
-        if routing_result.success:
-            self.routing_stats["successful_routes"] += 1
-        else:
-            self.routing_stats["failed_routes"] += 1
-        
-        # Update average routing time
-        total_time = self.routing_stats["average_routing_time"] * (self.routing_stats["total_routes"] - 1)
-        self.routing_stats["average_routing_time"] = (total_time + routing_result.routing_time_ms) / self.routing_stats["total_routes"]
+    async def _update_routing_stats(self, routing_result: RoutingResult):
+        """Update routing statistics with proper locking."""
+        async with self._stats_lock:
+            self.routing_stats["total_routes"] += 1
+            
+            if routing_result.success:
+                self.routing_stats["successful_routes"] += 1
+            else:
+                self.routing_stats["failed_routes"] += 1
+            
+            # Update average routing time
+            total_time = self.routing_stats["average_routing_time"] * (self.routing_stats["total_routes"] - 1)
+            self.routing_stats["average_routing_time"] = (total_time + routing_result.routing_time_ms) / self.routing_stats["total_routes"]
     
     def update_provider_capacity(self, provider_id: str, max_calls: int, 
                                current_calls: int, skills: List[str] = None,
@@ -688,14 +715,14 @@ class CallRouter:
                 available_capacity=max_calls - current_calls,
                 skills=skills or [],
                 languages=languages or [],
-                last_updated=datetime.now(timezone.utc),
+                last_updated=datetime.now(AST),
                 is_available=is_available
             )
             
             # Update total capacity
             old_capacity = self.provider_capacities.get(provider_id, ProviderCapacity(
                 provider_id=provider_id, max_concurrent_calls=0, current_calls=0,
-                available_capacity=0, skills=[], languages=[], last_updated=datetime.now(timezone.utc)
+                available_capacity=0, skills=[], languages=[], last_updated=datetime.now(AST)
             ))
             
             self.total_capacity = self.total_capacity - old_capacity.max_concurrent_calls + max_calls
@@ -707,6 +734,17 @@ class CallRouter:
             
         except Exception as e:
             self.logger.error(f"Failed to update provider capacity for {provider_id}: {e}")
+    
+    async def release_provider_capacity(self, provider_id: str):
+        """Decrement provider capacity when call ends."""
+        async with self._capacity_lock:
+            if provider_id in self.provider_capacities:
+                capacity = self.provider_capacities[provider_id]
+                capacity.current_calls = max(0, capacity.current_calls - 1)
+                capacity.available_capacity = capacity.max_concurrent_calls - capacity.current_calls
+                self.current_load = max(0, self.current_load - 1)
+                
+                self.logger.debug(f"Released capacity for provider {provider_id}: {capacity.current_calls}/{capacity.max_concurrent_calls}")
     
     def remove_provider(self, provider_id: str):
         """Remove a provider from the routing system."""
@@ -779,27 +817,28 @@ class CallRouter:
     async def process_queued_calls(self):
         """Process queued calls when capacity becomes available."""
         try:
-            for queue_id, queue in self.call_queues.items():
-                if queue.current_size == 0:
-                    continue
-                
-                # Try to route queued calls
-                while queue.calls and not self._is_system_overloaded():
-                    queued_call = queue.calls.popleft()
-                    call_id = queued_call["call_id"]
-                    routing_rule = queued_call["routing_rule"]
-                    caller_info = queued_call["caller_info"]
+            async with self._queue_lock:
+                for queue_id, queue in self.call_queues.items():
+                    if queue.current_size == 0:
+                        continue
                     
-                    # Try to route the call
-                    routing_result = await self._execute_routing(call_id, routing_rule, caller_info)
-                    
-                    if routing_result.success and routing_result.provider_id:
-                        queue.current_size -= 1
-                        self.logger.info(f"Successfully routed queued call {call_id} to provider {routing_result.provider_id}")
-                    else:
-                        # Put the call back at the front of the queue
-                        queue.calls.appendleft(queued_call)
-                        break
+                    # Try to route queued calls
+                    while queue.calls and not self._is_system_overloaded():
+                        queued_call = queue.calls.popleft()
+                        call_id = queued_call["call_id"]
+                        routing_rule = queued_call["routing_rule"]
+                        caller_info = queued_call["caller_info"]
+                        
+                        # Try to route the call
+                        routing_result = await self._execute_routing(call_id, routing_rule, caller_info)
+                        
+                        if routing_result.success and routing_result.provider_id:
+                            queue.current_size -= 1
+                            self.logger.info(f"Successfully routed queued call {call_id} to provider {routing_result.provider_id}")
+                        else:
+                            # Put the call back at the front of the queue
+                            queue.calls.appendleft(queued_call)
+                            break
                 
         except Exception as e:
             self.logger.error(f"Failed to process queued calls: {e}")
@@ -807,7 +846,7 @@ class CallRouter:
     async def cleanup_expired_queues(self):
         """Clean up expired calls in queues."""
         try:
-            current_time = datetime.now(timezone.utc)
+            current_time = datetime.now(AST)
             
             for queue_id, queue in self.call_queues.items():
                 expired_calls = []
