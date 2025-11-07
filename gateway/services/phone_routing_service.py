@@ -22,20 +22,32 @@ class PhoneRoutingService:
         Returns:
             Clinic ID or None if not found
         """
+        # Validate input
+        if not phone_number or not isinstance(phone_number, str) or not phone_number.strip():
+            logger.warning(f"Invalid phone number provided: {phone_number}", LogCategory.ROUTING)
+            return None
+        
+        # Normalize phone number (remove spaces, dashes, parentheses)
+        normalized_phone = phone_number.strip().replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+        
         # Check cache first
-        if phone_number in self._phone_to_clinic_cache:
-            return self._phone_to_clinic_cache[phone_number]
+        if normalized_phone in self._phone_to_clinic_cache:
+            return self._phone_to_clinic_cache[normalized_phone]
         
-        # Query database
-        clinic = self.db.query(Clinic).filter(
-            Clinic.phone_number == phone_number,
-            Clinic.is_deleted == 'no'
-        ).first()
-        
-        if clinic:
-            self._phone_to_clinic_cache[phone_number] = clinic.clinic_id
-            logger.info(f"Mapped phone {phone_number} to clinic {clinic.clinic_id}", LogCategory.ROUTING)
-            return clinic.clinic_id
+        # Query database (with error handling)
+        try:
+            clinic = self.db.query(Clinic).filter(
+                Clinic.phone_number == phone_number,
+                Clinic.is_deleted == 'no'
+            ).first()
+            
+            if clinic and clinic.clinic_id:
+                self._phone_to_clinic_cache[normalized_phone] = clinic.clinic_id
+                logger.info(f"Mapped phone {phone_number} to clinic {clinic.clinic_id}", LogCategory.ROUTING)
+                return clinic.clinic_id
+        except Exception as e:
+            logger.error(f"Error querying clinic for phone {phone_number}: {e}", LogCategory.ROUTING, exception=e)
+            return None
         
         logger.warning(f"No clinic found for phone {phone_number}", LogCategory.ROUTING)
         return None

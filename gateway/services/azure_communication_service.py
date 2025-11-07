@@ -251,8 +251,8 @@ class AzureCommunicationService:
     async def _check_clinic_capacity(self, clinic_id: str):
         """Check if clinic has capacity for new calls."""
         try:
-            db = next(get_db_session())
-            try:
+            # Issue 54: Use context manager instead of next()
+            with get_db_session() as db:
                 # Get clinic license
                 license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
                 if not license_record:
@@ -274,9 +274,13 @@ class AzureCommunicationService:
                 
                 # Increment concurrent call count
                 license_record.current_concurrent_calls += 1
-                db.commit()
-            finally:
-                db.close()
+                try:
+                    db.commit()
+                except Exception as commit_error:
+                    db.rollback()
+                    # Issue 75: Decrement counter if commit fails
+                    license_record.current_concurrent_calls -= 1
+                    raise AzureCommunicationError("capacity_update_failed", f"Failed to update clinic capacity: {commit_error}")
                 
         except Exception as e:
             if isinstance(e, AzureCommunicationError):
@@ -307,17 +311,40 @@ class AzureCommunicationService:
                 )
                 db.execute(stmt)
                 
-                # Create call record with tokenized phone
-                call_record = Call(
-                    call_sid=call_id,  # Using our call_id as call_sid for now
-                    call_id=call_id,
-                    caller_phone_token=phone_token,  # Now properly tokenized
-                    status=CallStatus.ACTIVE.value,
-                    started_at=datetime.now(AST)
-                )
+                # Issue 119: Check for existing call records before creating new ones
+                from models.models import Call
+                existing_call = db.query(Call).filter_by(call_id=call_id).first()
+                if existing_call:
+                    # Issue 119: Call record already exists - update it instead of creating duplicate
+                    self.logger.info(f"Call record already exists for {call_id}, updating instead of creating duplicate")
+                    existing_call.caller_phone_token = phone_token
+                    existing_call.status = CallStatus.ACTIVE.value
+                    existing_call.started_at = datetime.now(AST)
+                    existing_call.clinic_id = clinic_id
+                    call_record = existing_call
+                else:
+                    # Create call record with tokenized phone
+                    call_record = Call(
+                        call_sid=call_id,  # Using our call_id as call_sid for now
+                        call_id=call_id,
+                        caller_phone_token=phone_token,  # Now properly tokenized
+                        status=CallStatus.ACTIVE.value,
+                        started_at=datetime.now(AST),
+                        clinic_id=clinic_id
+                    )
+                    db.add(call_record)
                 
-                db.add(call_record)
-                db.commit()
+                try:
+                    db.commit()
+                except Exception as commit_error:
+                    # Issue 119: Handle duplicate key errors gracefully
+                    if "duplicate" in str(commit_error).lower() or "unique" in str(commit_error).lower():
+                        self.logger.warning(f"Duplicate call record for {call_id}, skipping creation")
+                        db.rollback()
+                    else:
+                        db.rollback()
+                        self.logger.error(f"Failed to commit call record: {commit_error}")
+                        # Don't raise here as the call is already active
                 
         except Exception as e:
             self.logger.error(f"Failed to store call record: {e}")
@@ -433,6 +460,33 @@ class AzureCommunicationService:
             True if call was registered successfully
         """
         try:
+            # Issue 110: Check for existing calls before creating new one
+            async with self._calls_lock:
+                # Check if call with same call_id already exists
+                if call_id in self.active_calls:
+                    existing_call = self.active_calls[call_id]
+                    # Issue 110: If call exists with same acs_call_id, return success (idempotent)
+                    if existing_call.acs_call_id == acs_call_id:
+                        logger.info(f"Call {call_id} already registered with ACS call ID {acs_call_id}")
+                        return True
+                    else:
+                        # Different acs_call_id for same call_id - this is an error
+                        raise AzureCommunicationError(
+                            "duplicate_call_id",
+                            f"Call {call_id} already exists with different ACS call ID"
+                        )
+                
+                # Issue 110: Check if acs_call_id is already associated with another call
+                for existing_call_id, existing_state in self.active_calls.items():
+                    if existing_state.acs_call_id == acs_call_id:
+                        # Same ACS call ID but different call_id - this might be a duplicate
+                        logger.warning(
+                            f"ACS call ID {acs_call_id} already associated with call {existing_call_id}, "
+                            f"attempting to register as {call_id}"
+                        )
+                        # Return the existing call state (idempotent behavior)
+                        return True
+            
             # Check rate limit before registering call
             from services.rate_limiter import get_rate_limiter
             rate_limiter = get_rate_limiter()
@@ -455,6 +509,8 @@ class AzureCommunicationService:
             return True
             
         except Exception as e:
+            if isinstance(e, AzureCommunicationError):
+                raise
             logger.error(f"Failed to register incoming call {call_id}: {e}")
             raise AzureCommunicationError("register_failed", f"Failed to register incoming call: {str(e)}")
 
@@ -473,6 +529,27 @@ class AzureCommunicationService:
                     logger.debug(f"Stored call ID mapping: {call_id} -> {acs_call_id}")
         except Exception as e:
             logger.error(f"Failed to store call ID mapping: {e}")
+    
+    async def get_call_id_from_mapping(self, acs_call_id: str) -> Optional[str]:
+        """
+        Get internal call_id from ACS call_id mapping.
+        
+        Args:
+            acs_call_id: ACS call connection ID
+            
+        Returns:
+            Internal call_id if found, None otherwise
+        """
+        try:
+            async with self._calls_lock:
+                # Search for call_id by acs_call_id
+                for call_id, call_state in self.active_calls.items():
+                    if call_state.acs_call_id == acs_call_id:
+                        return call_id
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get call ID from mapping: {e}")
+            return None
 
     async def answer_call(self, call_id: str) -> bool:
         """
@@ -614,29 +691,35 @@ class AzureCommunicationService:
     async def _update_call_record(self, call_id: str, status: str, end_time: datetime):
         """Update call record in database."""
         try:
-            db = next(get_db_session())
-            try:
+            # Issue 55: Use context manager instead of next()
+            with get_db_session() as db:
                 call_record = db.query(Call).filter_by(call_id=call_id).first()
                 if call_record:
                     call_record.status = status
                     call_record.ended_at = end_time
-                    db.commit()
-            finally:
-                db.close()
+                    try:
+                        db.commit()
+                    except Exception as commit_error:
+                        db.rollback()
+                        self.logger.error(f"Failed to commit call record update: {commit_error}")
+                        raise
         except Exception as e:
             self.logger.error(f"Failed to update call record: {e}")
     
     async def _decrement_clinic_capacity(self, clinic_id: str):
         """Decrement clinic's concurrent call count."""
         try:
-            db = next(get_db_session())
-            try:
+            # Issue 55: Use context manager instead of next()
+            with get_db_session() as db:
                 license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
                 if license_record and license_record.current_concurrent_calls > 0:
                     license_record.current_concurrent_calls -= 1
-                    db.commit()
-            finally:
-                db.close()
+                    try:
+                        db.commit()
+                    except Exception as commit_error:
+                        db.rollback()
+                        self.logger.error(f"Failed to commit clinic capacity decrement: {commit_error}")
+                        raise
         except Exception as e:
             self.logger.error(f"Failed to decrement clinic capacity: {e}")
     
@@ -850,12 +933,13 @@ class AzureCommunicationService:
                 }
             )
             
-            # Find call by ACS call ID
+            # Find call by ACS call ID (with lock)
             call_state = None
-            for state in self.active_calls.values():
-                if state.acs_call_id == call_connection_id:
-                    call_state = state
-                    break
+            async with self._calls_lock:
+                for state in self.active_calls.values():
+                    if state.acs_call_id == call_connection_id:
+                        call_state = state
+                        break
             
             if not call_state:
                 self.logger.warning(f"No active call found for ACS call ID: {call_connection_id}")
@@ -927,14 +1011,16 @@ class AzureCommunicationService:
             "language_locked": call_state.language_locked
         }
     
-    def get_active_calls_count(self) -> int:
+    async def get_active_calls_count(self) -> int:
         """Get count of active calls."""
-        return len(self.active_calls)
+        async with self._calls_lock:
+            return len(self.active_calls)
     
-    def get_clinic_active_calls_count(self, clinic_id: str) -> int:
+    async def get_clinic_active_calls_count(self, clinic_id: str) -> int:
         """Get count of active calls for a specific clinic."""
-        return sum(1 for call_state in self.active_calls.values() 
-                  if call_state.clinic_id == clinic_id and call_state.status == CallStatus.ACTIVE.value)
+        async with self._calls_lock:
+            return sum(1 for call_state in self.active_calls.values() 
+                      if call_state.clinic_id == clinic_id and call_state.status == CallStatus.ACTIVE.value)
     
     async def cleanup_expired_calls(self):
         """Clean up calls that have exceeded maximum duration."""
@@ -943,9 +1029,10 @@ class AzureCommunicationService:
             current_time = datetime.now(AST)
             
             expired_calls = []
-            for call_id, call_state in list(self.active_calls.items()):
-                if current_time - call_state.start_time > max_duration:
-                    expired_calls.append(call_id)
+            async with self._calls_lock:
+                for call_id, call_state in list(self.active_calls.items()):
+                    if current_time - call_state.start_time > max_duration:
+                        expired_calls.append(call_id)
             
             for call_id in expired_calls:
                 await self.end_call(call_id, "timeout")

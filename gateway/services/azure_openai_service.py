@@ -134,6 +134,10 @@ class AzureOpenAIService:
         self.intent_stats: Dict[str, Dict[str, Any]] = {}
         self.response_stats: Dict[str, Dict[str, Any]] = {}
         
+        # Initialize locks for thread safety
+        self._conversations_lock = asyncio.Lock()
+        self._stats_lock = asyncio.Lock()
+        
         # Intent classification prompts
         self.intent_prompts = {
             LanguageCode.ENGLISH: """
@@ -235,6 +239,7 @@ class AzureOpenAIService:
             # Make API call with retries
             for attempt in range(self.max_intent_retries):
                 try:
+                    # Issue 96: Handle rate limiting with retries and backoff
                     response = await self.client.chat.completions.create(
                         model=self.deployment_name,
                         messages=[
@@ -246,8 +251,14 @@ class AzureOpenAIService:
                         timeout=self.response_timeout_seconds
                     )
                     
-                    # Parse response
+                    # Parse response (with null checks)
+                    if not response.choices or len(response.choices) == 0:
+                        raise ValueError("Empty response from OpenAI")
+                    
                     response_text = response.choices[0].message.content
+                    if not response_text:
+                        raise ValueError("Empty response content from OpenAI")
+                    
                     intent_data = json.loads(response_text)
                     
                     # Extract intent
@@ -277,7 +288,7 @@ class AzureOpenAIService:
                     )
                     
                     # Update statistics
-                    self._update_intent_stats(call_id, result)
+                    await self._update_intent_stats(call_id, result)
                     
                     # Store in conversation history
                     await self._add_to_conversation(call_id, "user", user_input, language, intent, entities)
@@ -306,13 +317,34 @@ class AzureOpenAIService:
                         # Return fallback result
                         return self._create_fallback_intent_result(user_input, call_id, language, start_time)
                 except Exception as e:
-                    self.logger.warning(
-                        f"Intent classification attempt {attempt + 1} failed: {e}",
-                        LogCategory.AZURE_OPENAI
-                    )
-                    if attempt == self.max_intent_retries - 1:
-                        # Return fallback result
-                        return self._create_fallback_intent_result(user_input, call_id, language, start_time)
+                    error_str = str(e).lower()
+                    # Issue 96: Check for rate limit errors
+                    if 'rate limit' in error_str or '429' in error_str or 'too many requests' in error_str:
+                        if attempt < self.max_intent_retries - 1:
+                            # Issue 96: Exponential backoff for rate limit errors
+                            wait_time = 1.0 * (2 ** attempt)
+                            self.logger.warning(
+                                f"Rate limit exceeded for intent classification (attempt {attempt + 1}), retrying in {wait_time}s",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            # Issue 96: Max retries reached, return fallback
+                            self.logger.error(
+                                f"Rate limit exceeded after {self.max_intent_retries} retries for intent classification",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            return self._create_fallback_intent_result(user_input, call_id, language, start_time)
+                    else:
+                        # Non-rate-limit error
+                        self.logger.warning(
+                            f"Intent classification attempt {attempt + 1} failed: {e}",
+                            LogCategory.AZURE_OPENAI
+                        )
+                        if attempt == self.max_intent_retries - 1:
+                            # Return fallback result
+                            return self._create_fallback_intent_result(user_input, call_id, language, start_time)
             
         except Exception as e:
             self.logger.error(
@@ -403,7 +435,7 @@ class AzureOpenAIService:
                     )
                     
                     # Update statistics
-                    self._update_response_stats(call_id, result)
+                    await self._update_response_stats(call_id, result)
                     
                     # Store in conversation history
                     await self._add_to_conversation(call_id, "assistant", cached_response, language, intent, entities or [])
@@ -447,8 +479,8 @@ class AzureOpenAIService:
             if self.enable_response_caching and intent:
                 await self._cache_ai_response(intent, language, response_text, entities, call_id)
             
-            # Update statistics
-            self._update_response_stats(call_id, result)
+            # Update statistics (with await - it's async)
+            await self._update_response_stats(call_id, result)
             
             # Store in conversation history
             await self._add_to_conversation(call_id, "assistant", response_text, language, intent, response_entities)
@@ -619,9 +651,19 @@ class AzureOpenAIService:
         # Build conversation context
         messages = [{"role": "system", "content": system_prompt}]
         
-        if self.enable_context_awareness and call_id in self.conversations:
-            # Add recent conversation history
-            recent_messages = self.conversations[call_id][-self.context_window_size:]
+        if self.enable_context_awareness:
+            async with self._conversations_lock:
+                if call_id in self.conversations:
+                    # Add recent conversation history (with bounds check)
+                    conversation = self.conversations[call_id]
+                    if conversation:
+                        start_idx = max(0, len(conversation) - self.context_window_size)
+                        recent_messages = conversation[start_idx:]
+                    else:
+                        recent_messages = []
+                else:
+                    recent_messages = []
+            
             for msg in recent_messages:
                 messages.append({
                     "role": msg.role,
@@ -631,16 +673,54 @@ class AzureOpenAIService:
         # Add current user input
         messages.append({"role": "user", "content": user_input})
         
-        # Generate response
-        response = await self.client.chat.completions.create(
-            model=self.deployment_name,
-            messages=messages,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            timeout=self.response_timeout_seconds
-        )
+        # Issue 96: Handle rate limiting with retries and backoff
+        max_retries = 3
+        retry_delay = 1.0  # Start with 1 second delay
         
-        return response.choices[0].message.content
+        for attempt in range(max_retries):
+            try:
+                # Generate response
+                response = await self.client.chat.completions.create(
+                    model=self.deployment_name,
+                    messages=messages,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    timeout=self.response_timeout_seconds
+                )
+                break  # Success, exit retry loop
+            except Exception as api_error:
+                error_str = str(api_error).lower()
+                # Issue 96: Check for rate limit errors
+                if 'rate limit' in error_str or '429' in error_str or 'too many requests' in error_str:
+                    if attempt < max_retries - 1:
+                        # Issue 96: Exponential backoff for rate limit errors
+                        wait_time = retry_delay * (2 ** attempt)
+                        self.logger.warning(
+                            f"Rate limit exceeded for call {call_id}, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})",
+                            LogCategory.AZURE_OPENAI
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        # Issue 96: Max retries reached, return fallback
+                        self.logger.error(
+                            f"Rate limit exceeded after {max_retries} retries for call {call_id}",
+                            LogCategory.AZURE_OPENAI
+                        )
+                        raise
+                else:
+                    # Non-rate-limit error, re-raise immediately
+                    raise
+        
+        # Validate response (with null checks)
+        if not response.choices or len(response.choices) == 0:
+            raise ValueError("Empty response from OpenAI")
+        
+        response_content = response.choices[0].message.content
+        if not response_content:
+            raise ValueError("Empty response content from OpenAI")
+        
+        return response_content
     
     def _extract_variables_from_entities(self, entities: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """
@@ -703,9 +783,19 @@ class AzureOpenAIService:
             # Build conversation context
             messages = [{"role": "system", "content": system_prompt}]
             
-            if self.enable_context_awareness and call_id in self.conversations:
-                # Add recent conversation history
-                recent_messages = self.conversations[call_id][-self.context_window_size:]
+            if self.enable_context_awareness:
+                async with self._conversations_lock:
+                    if call_id in self.conversations:
+                        # Add recent conversation history (with bounds check)
+                        conversation = self.conversations[call_id]
+                        if conversation:
+                            start_idx = max(0, len(conversation) - self.context_window_size)
+                            recent_messages = conversation[start_idx:]
+                        else:
+                            recent_messages = []
+                    else:
+                        recent_messages = []
+                
                 for msg in recent_messages:
                     messages.append({
                         "role": msg.role,
@@ -715,19 +805,50 @@ class AzureOpenAIService:
             # Add current user input
             messages.append({"role": "user", "content": user_input})
             
-            # Generate streaming response
-            stream = await self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=messages,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                stream=True,
-                timeout=self.response_timeout_seconds
-            )
+            # Issue 96: Handle rate limiting with retries and backoff for streaming
+            max_retries = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    # Generate streaming response
+                    stream = await self.client.chat.completions.create(
+                        model=self.deployment_name,
+                        messages=messages,
+                        max_tokens=self.max_tokens,
+                        temperature=self.temperature,
+                        stream=True,
+                        timeout=self.response_timeout_seconds
+                    )
+                    break  # Success, exit retry loop
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    # Issue 96: Check for rate limit errors
+                    if 'rate limit' in error_str or '429' in error_str or 'too many requests' in error_str:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)
+                            self.logger.warning(
+                                f"Rate limit exceeded for streaming response (attempt {attempt + 1}), retrying in {wait_time}s",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            self.logger.error(
+                                f"Rate limit exceeded after {max_retries} retries for streaming response",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            raise
+                    else:
+                        raise
             
             full_response = ""
             async for chunk in stream:
-                if chunk.choices[0].delta.content:
+                # Validate chunk (with null checks)
+                if not chunk.choices or len(chunk.choices) == 0:
+                    continue
+                
+                if chunk.choices[0].delta and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     full_response += content
                     yield content
@@ -797,19 +918,65 @@ class AzureOpenAIService:
             Text: "{text}"
             """
             
-            response = await self.client.chat.completions.create(
-                model=self.deployment_name,
-                messages=[
-                    {"role": "system", "content": "You are an expert entity extractor for healthcare conversations."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=500,
-                temperature=0.1,
-                timeout=10
-            )
+            # Issue 96: Handle rate limiting with retries and backoff for entity extraction
+            max_retries = 3
+            retry_delay = 1.0
+            
+            for attempt in range(max_retries):
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.deployment_name,
+                        messages=[
+                            {"role": "system", "content": "You are an expert entity extractor for healthcare conversations."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=500,
+                        temperature=0.1,
+                        timeout=10
+                    )
+                    break  # Success, exit retry loop
+                except Exception as api_error:
+                    error_str = str(api_error).lower()
+                    # Issue 96: Check for rate limit errors
+                    if 'rate limit' in error_str or '429' in error_str or 'too many requests' in error_str:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)
+                            self.logger.warning(
+                                f"Rate limit exceeded for entity extraction (attempt {attempt + 1}), retrying in {wait_time}s",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            await asyncio.sleep(wait_time)
+                            continue
+                        else:
+                            self.logger.error(
+                                f"Rate limit exceeded after {max_retries} retries for entity extraction",
+                                LogCategory.AZURE_OPENAI
+                            )
+                            return []  # Return empty entities on rate limit failure
+                    else:
+                        # Non-rate-limit error, return empty entities
+                        self.logger.warning(f"Entity extraction failed: {api_error}")
+                        return []
+            
+            # Validate response (with null checks)
+            if not response.choices or len(response.choices) == 0:
+                self.logger.warning("Empty response from OpenAI for entity extraction")
+                return []
             
             response_text = response.choices[0].message.content
-            entities_data = json.loads(response_text)
+            if not response_text:
+                self.logger.warning("Empty response content from OpenAI for entity extraction")
+                return []
+            
+            try:
+                entities_data = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                self.logger.warning(f"Failed to parse entity extraction response: {e}")
+                return []
+            
+            if not isinstance(entities_data, list):
+                self.logger.warning("Entity extraction response is not a list")
+                return []
             
             entities = []
             for entity_data in entities_data:
@@ -837,96 +1004,110 @@ class AzureOpenAIService:
                                  entities: Optional[List[Dict[str, Any]]] = None):
         """Add a message to the conversation history."""
         try:
-            if call_id not in self.conversations:
-                self.conversations[call_id] = []
-            
-            # Convert entities to Entity objects
-            entity_objects = []
-            if entities:
-                for entity_data in entities:
-                    try:
-                        entity = Entity(
-                            type=EntityType(entity_data.get("type", "unknown")),
-                            value=entity_data.get("value", ""),
-                            confidence=float(entity_data.get("confidence", 0.0)),
-                            start_position=int(entity_data.get("start_position", 0)),
-                            end_position=int(entity_data.get("end_position", 0))
-                        )
-                        entity_objects.append(entity)
-                    except (ValueError, KeyError):
-                        continue
-            
-            message = ConversationMessage(
-                role=role,
-                content=content,
-                timestamp=datetime.now(timezone.utc),
-                language=language,
-                intent=intent,
-                entities=entity_objects
-            )
-            
-            self.conversations[call_id].append(message)
-            
-            # Limit conversation history size
-            if len(self.conversations[call_id]) > 100:
-                self.conversations[call_id] = self.conversations[call_id][-50:]
+            async with self._conversations_lock:
+                if call_id not in self.conversations:
+                    self.conversations[call_id] = []
+                
+                # Convert entities to Entity objects
+                entity_objects = []
+                if entities:
+                    for entity_data in entities:
+                        try:
+                            entity = Entity(
+                                type=EntityType(entity_data.get("type", "unknown")),
+                                value=entity_data.get("value", ""),
+                                confidence=float(entity_data.get("confidence", 0.0)),
+                                start_position=int(entity_data.get("start_position", 0)),
+                                end_position=int(entity_data.get("end_position", 0))
+                            )
+                            entity_objects.append(entity)
+                        except (ValueError, KeyError):
+                            continue
+                
+                message = ConversationMessage(
+                    role=role,
+                    content=content,
+                    timestamp=datetime.now(timezone.utc),
+                    language=language,
+                    intent=intent,
+                    entities=entity_objects
+                )
+                
+                self.conversations[call_id].append(message)
+                
+                # Issue 49, 97: Properly truncate conversation history when it exceeds the limit
+                # Keep the most recent messages and system message
+                max_messages = 50  # Maximum conversation history size
+                if len(self.conversations[call_id]) > max_messages:
+                    # Keep the most recent messages, preserving important context
+                    # Remove oldest messages but keep at least the last max_messages
+                    self.conversations[call_id] = self.conversations[call_id][-max_messages:]
+                    self.logger.debug(f"Truncated conversation history for call {call_id} to {max_messages} messages")
                 
         except Exception as e:
             self.logger.error(f"Failed to add message to conversation: {e}")
     
-    def _update_intent_stats(self, call_id: str, result: IntentResult):
+    async def _update_intent_stats(self, call_id: str, result: IntentResult):
         """Update intent classification statistics."""
-        if call_id not in self.intent_stats:
-            self.intent_stats[call_id] = {
-                "start_time": datetime.now(timezone.utc),
-                "total_classifications": 0,
-                "successful_classifications": 0,
-                "high_confidence_classifications": 0,
-                "fallback_classifications": 0,
-                "intent_counts": {},
-                "total_processing_time": 0
-            }
+        if not call_id:
+            return
         
-        stats = self.intent_stats[call_id]
-        stats["total_classifications"] += 1
-        stats["total_processing_time"] += result.processing_time_ms
-        
-        if not result.fallback_used:
-            stats["successful_classifications"] += 1
+        async with self._stats_lock:
+            if call_id not in self.intent_stats:
+                self.intent_stats[call_id] = {
+                    "start_time": datetime.now(timezone.utc),
+                    "total_classifications": 0,
+                    "successful_classifications": 0,
+                    "high_confidence_classifications": 0,
+                    "fallback_classifications": 0,
+                    "intent_counts": {},
+                    "total_processing_time": 0
+                }
             
-            if result.confidence >= self.intent_confidence_threshold:
-                stats["high_confidence_classifications"] += 1
-        else:
-            stats["fallback_classifications"] += 1
-        
-        intent_name = result.intent.value
-        if intent_name not in stats["intent_counts"]:
-            stats["intent_counts"][intent_name] = 0
-        stats["intent_counts"][intent_name] += 1
+            stats = self.intent_stats[call_id]
+            stats["total_classifications"] += 1
+            stats["total_processing_time"] += result.processing_time_ms
+            
+            if not result.fallback_used:
+                stats["successful_classifications"] += 1
+                
+                if result.confidence >= self.intent_confidence_threshold:
+                    stats["high_confidence_classifications"] += 1
+            else:
+                stats["fallback_classifications"] += 1
+            
+            intent_name = result.intent.value
+            if intent_name not in stats["intent_counts"]:
+                stats["intent_counts"][intent_name] = 0
+            stats["intent_counts"][intent_name] += 1
     
-    def _update_response_stats(self, call_id: str, result: ResponseResult):
+    async def _update_response_stats(self, call_id: str, result: ResponseResult):
         """Update response generation statistics."""
-        if call_id not in self.response_stats:
-            self.response_stats[call_id] = {
-                "start_time": datetime.now(timezone.utc),
-                "total_responses": 0,
-                "successful_responses": 0,
-                "fallback_responses": 0,
-                "total_processing_time": 0,
-                "total_response_length": 0
-            }
+        if not call_id:
+            return
         
-        stats = self.response_stats[call_id]
-        stats["total_responses"] += 1
-        stats["total_processing_time"] += result.processing_time_ms
-        stats["total_response_length"] += len(result.response_text)
-        
-        if not result.fallback_used:
-            stats["successful_responses"] += 1
-        else:
-            stats["fallback_responses"] += 1
+        async with self._stats_lock:
+            if call_id not in self.response_stats:
+                self.response_stats[call_id] = {
+                    "start_time": datetime.now(timezone.utc),
+                    "total_responses": 0,
+                    "successful_responses": 0,
+                    "fallback_responses": 0,
+                    "total_processing_time": 0,
+                    "total_response_length": 0
+                }
+            
+            stats = self.response_stats[call_id]
+            stats["total_responses"] += 1
+            stats["total_processing_time"] += result.processing_time_ms
+            stats["total_response_length"] += len(result.response_text) if result.response_text else 0
+            
+            if not result.fallback_used:
+                stats["successful_responses"] += 1
+            else:
+                stats["fallback_responses"] += 1
     
-    def get_conversation_history(self, call_id: str, limit: int = 10) -> List[ConversationMessage]:
+    async def get_conversation_history(self, call_id: str, limit: int = 10) -> List[ConversationMessage]:
         """
         Get conversation history for a call.
         
@@ -937,11 +1118,17 @@ class AzureOpenAIService:
         Returns:
             List of conversation messages
         """
-        if call_id not in self.conversations:
+        if not call_id:
             return []
         
-        messages = self.conversations[call_id]
-        return messages[-limit:] if limit > 0 else messages
+        async with self._conversations_lock:
+            if call_id not in self.conversations:
+                return []
+            
+            messages = self.conversations[call_id]
+            if limit > 0 and len(messages) > limit:
+                return messages[-limit:]
+            return messages
     
     def get_intent_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -959,6 +1146,7 @@ class AzureOpenAIService:
         stats = self.intent_stats[call_id].copy()
         stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
+        # Division by zero check
         if stats["total_classifications"] > 0:
             stats["success_rate"] = stats["successful_classifications"] / stats["total_classifications"]
             stats["high_confidence_rate"] = stats["high_confidence_classifications"] / stats["total_classifications"]
@@ -988,6 +1176,7 @@ class AzureOpenAIService:
         stats = self.response_stats[call_id].copy()
         stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
+        # Division by zero check
         if stats["total_responses"] > 0:
             stats["success_rate"] = stats["successful_responses"] / stats["total_responses"]
             stats["fallback_rate"] = stats["fallback_responses"] / stats["total_responses"]
@@ -1001,16 +1190,21 @@ class AzureOpenAIService:
         
         return stats
     
-    def get_active_conversations_count(self) -> int:
+    async def get_active_conversations_count(self) -> int:
         """Get count of active conversations."""
-        return len(self.conversations)
+        async with self._conversations_lock:
+            return len(self.conversations)
     
     async def cleanup_expired_conversations(self):
         """Remove old conversations from memory."""
         current_time = datetime.now(timezone.utc)
         expired_calls = []
         
-        for call_id, messages in self.conversations.items():
+        # Create a copy of conversations to iterate over safely
+        async with self._conversations_lock:
+            conversations_copy = dict(self.conversations)
+        
+        for call_id, messages in conversations_copy.items():
             if not messages:
                 expired_calls.append(call_id)
                 continue
@@ -1022,19 +1216,26 @@ class AzureOpenAIService:
             if time_since_last_message > 300:  # 5 minutes = 300 seconds
                 expired_calls.append(call_id)
         
-        for call_id in expired_calls:
-            del self.conversations[call_id]
-            if call_id in self.intent_stats:
-                del self.intent_stats[call_id]
-            if call_id in self.response_stats:
-                del self.response_stats[call_id]
-            
-            self.logger.info(f"Cleaned up expired OpenAI conversation: {call_id}")
+        # Remove expired conversations with lock
+        async with self._conversations_lock:
+            for call_id in expired_calls:
+                if call_id in self.conversations:
+                    del self.conversations[call_id]
+                if call_id in self.intent_stats:
+                    del self.intent_stats[call_id]
+                if call_id in self.response_stats:
+                    del self.response_stats[call_id]
+                
+                self.logger.info(f"Cleaned up expired OpenAI conversation: {call_id}")
     
     async def end_conversation(self, call_id: str):
         """Explicitly end and clean up a conversation when call finishes."""
-        if call_id in self.conversations:
-            del self.conversations[call_id]
+        if not call_id:
+            return
+        
+        async with self._conversations_lock:
+            if call_id in self.conversations:
+                del self.conversations[call_id]
             if call_id in self.intent_stats:
                 del self.intent_stats[call_id]
             if call_id in self.response_stats:

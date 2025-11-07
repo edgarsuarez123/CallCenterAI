@@ -107,6 +107,10 @@ class SpeechToTextService:
         # Performance tracking
         self.transcription_stats: Dict[str, Dict[str, Any]] = {}
         
+        # Thread safety locks (both async and sync for different contexts)
+        self._lock = asyncio.Lock()  # For async operations
+        self._sync_lock = threading.Lock()  # For sync event handlers
+        
         # Initialize speech configuration
         self._initialize_speech_config()
     
@@ -175,33 +179,41 @@ class SpeechToTextService:
             True if recognition started successfully
         """
         try:
-            if call_id in self.active_recognizers:
-                self.logger.warning(f"Recognition already active for call: {call_id}")
-                return True
-            
-            # Store callbacks
-            if transcription_callback:
-                self.transcription_callbacks[call_id] = transcription_callback
-            if language_detection_callback:
-                self.language_detection_callbacks[call_id] = language_detection_callback
-            
-            # Initialize status
-            self.recognition_status[call_id] = TranscriptionStatus.DETECTING_LANGUAGE
-            self.transcription_stats[call_id] = {
-                "start_time": datetime.now(timezone.utc),
-                "total_transcriptions": 0,
-                "final_transcriptions": 0,
-                "language_detections": 0,
-                "average_confidence": 0.0,
-                "total_audio_duration": 0
-            }
-            
-            # Create audio input stream
-            audio_stream = speechsdk.audio.PushAudioInputStream()
-            audio_config = AudioConfig(stream=audio_stream)
-            
-            # Store audio stream for this call
-            self.audio_streams[call_id] = audio_stream
+            # Issue 162: Use lock to ensure only one recognition is started at a time
+            async with self._lock:
+                if call_id in self.active_recognizers:
+                    # Issue 162: Check if recognition is actually active
+                    existing_recognizer = self.active_recognizers[call_id]
+                    if existing_recognizer:
+                        self.logger.warning(f"Recognition already active for call: {call_id}")
+                        return True
+                    else:
+                        # Recognizer exists but is None - clean up and continue
+                        del self.active_recognizers[call_id]
+                
+                # Store callbacks
+                if transcription_callback:
+                    self.transcription_callbacks[call_id] = transcription_callback
+                if language_detection_callback:
+                    self.language_detection_callbacks[call_id] = language_detection_callback
+                
+                # Initialize status
+                self.recognition_status[call_id] = TranscriptionStatus.DETECTING_LANGUAGE
+                self.transcription_stats[call_id] = {
+                    "start_time": datetime.now(timezone.utc),
+                    "total_transcriptions": 0,
+                    "final_transcriptions": 0,
+                    "language_detections": 0,
+                    "average_confidence": 0.0,
+                    "total_audio_duration": 0
+                }
+                
+                # Create audio input stream
+                audio_stream = speechsdk.audio.PushAudioInputStream()
+                audio_config = AudioConfig(stream=audio_stream)
+                
+                # Store audio stream for this call
+                self.audio_streams[call_id] = audio_stream
             
             # Create recognizer with language detection
             recognizer = SpeechRecognizer(
@@ -216,8 +228,15 @@ class SpeechToTextService:
             # Start continuous recognition
             recognizer.start_continuous_recognition()
             
-            # Store recognizer
-            self.active_recognizers[call_id] = recognizer
+            # Issue 162: Store recognizer with lock to ensure atomic update
+            async with self._lock:
+                # Issue 162: Double-check that recognition wasn't started by another thread
+                if call_id in self.active_recognizers and self.active_recognizers[call_id]:
+                    self.logger.warning(f"Recognition was started by another thread for call: {call_id}")
+                    # Stop the recognizer we just started
+                    recognizer.stop_continuous_recognition()
+                    return True
+                self.active_recognizers[call_id] = recognizer
             
             self.logger.info(
                 f"Continuous speech recognition started for call: {call_id}",
@@ -243,19 +262,23 @@ class SpeechToTextService:
         
         def on_session_started(evt):
             self.logger.debug(f"Speech recognition session started for call: {call_id}")
-            self.recognition_status[call_id] = TranscriptionStatus.LISTENING
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.LISTENING
         
         def on_session_stopped(evt):
             self.logger.debug(f"Speech recognition session stopped for call: {call_id}")
-            self.recognition_status[call_id] = TranscriptionStatus.IDLE
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.IDLE
         
         def on_speech_start_detected(evt):
             self.logger.debug(f"Speech start detected for call: {call_id}")
-            self.recognition_status[call_id] = TranscriptionStatus.PROCESSING
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.PROCESSING
         
         def on_speech_end_detected(evt):
             self.logger.debug(f"Speech end detected for call: {call_id}")
-            self.recognition_status[call_id] = TranscriptionStatus.LISTENING
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.LISTENING
         
         def on_recognizing(evt):
             """Handle partial recognition results."""
@@ -282,10 +305,12 @@ class SpeechToTextService:
                     # Update stats
                     self._update_transcription_stats(call_id, result)
                     
-                    # Call callback if registered
-                    if call_id in self.transcription_callbacks:
+                    # Call callback if registered (with sync lock for event handler)
+                    with self._sync_lock:
+                        callback = self.transcription_callbacks.get(call_id)
+                    if callback:
                         try:
-                            self.transcription_callbacks[call_id](result)
+                            callback(result)
                         except Exception as e:
                             self.logger.error(f"Error in transcription callback: {e}")
                     
@@ -335,10 +360,12 @@ class SpeechToTextService:
                     # Update stats
                     self._update_transcription_stats(call_id, result)
                     
-                    # Call callback if registered
-                    if call_id in self.transcription_callbacks:
+                    # Call callback if registered (with sync lock for event handler)
+                    with self._sync_lock:
+                        callback = self.transcription_callbacks.get(call_id)
+                    if callback:
                         try:
-                            self.transcription_callbacks[call_id](result)
+                            callback(result)
                         except Exception as e:
                             self.logger.error(f"Error in transcription callback: {e}")
                     
@@ -367,7 +394,8 @@ class SpeechToTextService:
                     "error_details": evt.result.error_details
                 }
             )
-            self.recognition_status[call_id] = TranscriptionStatus.ERROR
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.ERROR
         
         # Register event handlers
         recognizer.session_started.connect(on_session_started)
@@ -380,61 +408,25 @@ class SpeechToTextService:
     
     def _update_transcription_stats(self, call_id: str, result: TranscriptionResult):
         """Update transcription statistics."""
-        if call_id not in self.transcription_stats:
-            return
-        
-        stats = self.transcription_stats[call_id]
-        stats["total_transcriptions"] += 1
-        
-        if result.is_final:
-            stats["final_transcriptions"] += 1
-        
-        # Update average confidence
-        total_confidence = stats["average_confidence"] * (stats["total_transcriptions"] - 1)
-        stats["average_confidence"] = (total_confidence + result.confidence) / stats["total_transcriptions"]
-    
-    async def process_audio_chunk(self, call_id: str, audio_chunk: AudioChunk) -> bool:
-        """
-        Process an audio chunk for speech recognition.
-        
-        Args:
-            call_id: ID of the call
-            audio_chunk: Audio chunk to process
-            
-        Returns:
-            True if audio was processed successfully
-        """
+        # Note: This is called from event handlers which are synchronous
+        # Use sync lock for thread safety
         try:
-            if call_id not in self.active_recognizers:
-                return False
-            
-            recognizer = self.active_recognizers[call_id]
-            
-            # Get the audio input stream from the recognizer
-            # Note: In a real implementation, you would need to access the stream
-            # This is a simplified version for demonstration
-            
-            # For now, we'll simulate processing
-            self.logger.debug(
-                f"Processing audio chunk for call {call_id}",
-                LogCategory.AZURE_SPEECH,
-                extra_data={
-                    "call_id": call_id,
-                    "chunk_id": audio_chunk.chunk_id,
-                    "data_size": len(audio_chunk.data),
-                    "sequence_number": audio_chunk.sequence_number
-                }
-            )
-            
-            return True
-            
+            with self._sync_lock:
+                if call_id not in self.transcription_stats:
+                    return
+                
+                stats = self.transcription_stats[call_id]
+                stats["total_transcriptions"] += 1
+                
+                if result.is_final:
+                    stats["final_transcriptions"] += 1
+                
+                # Update average confidence (with division by zero check)
+                if stats["total_transcriptions"] > 0:
+                    total_confidence = stats["average_confidence"] * (stats["total_transcriptions"] - 1)
+                    stats["average_confidence"] = (total_confidence + result.confidence) / stats["total_transcriptions"]
         except Exception as e:
-            self.logger.error(
-                f"Failed to process audio chunk for call {call_id}: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            return False
+            self.logger.error(f"Error updating transcription stats: {e}")
     
     async def detect_language(self, call_id: str, audio_samples: List[AudioChunk]) -> Optional[LanguageDetectionResult]:
         """
@@ -521,17 +513,27 @@ class SpeechToTextService:
                 await asyncio.sleep(0.1)
             
             # Stop recognition
-            recognizer.stop_continuous_recognition()
-            audio_stream.close()
+            try:
+                recognizer.stop_continuous_recognition()
+            except Exception as e:
+                self.logger.warning(f"Error stopping recognition: {e}")
+            finally:
+                # Always close audio stream
+                try:
+                    audio_stream.close()
+                except Exception as e:
+                    self.logger.warning(f"Error closing audio stream: {e}")
             
-            # Store result
+            # Store result (with lock)
             if detection_result:
-                self.language_detection_results[call_id] = detection_result
+                async with self._lock:
+                    self.language_detection_results[call_id] = detection_result
+                    callback = self.language_detection_callbacks.get(call_id)
                 
                 # Call callback if registered
-                if call_id in self.language_detection_callbacks:
+                if callback:
                     try:
-                        self.language_detection_callbacks[call_id](detection_result)
+                        callback(detection_result)
                     except Exception as e:
                         self.logger.error(f"Error in language detection callback: {e}")
             
@@ -557,15 +559,21 @@ class SpeechToTextService:
             True if language was locked successfully
         """
         try:
-            if call_id not in self.language_detection_results:
+            # Check and get detection result with lock
+            async with self._lock:
+                if call_id not in self.language_detection_results:
+                    return False
+                detection_result = self.language_detection_results[call_id]
+            
+            if not detection_result:
                 return False
             
             # Update detection result
-            detection_result = self.language_detection_results[call_id]
             detection_result.is_locked = True
             
-            # Update recognition status
-            self.recognition_status[call_id] = TranscriptionStatus.LANGUAGE_LOCKED
+            # Update recognition status (with sync lock)
+            with self._sync_lock:
+                self.recognition_status[call_id] = TranscriptionStatus.LANGUAGE_LOCKED
             
             self.logger.info(
                 f"Language locked for call {call_id}: {language}",
@@ -597,10 +605,11 @@ class SpeechToTextService:
             True if recognition was stopped successfully
         """
         try:
-            if call_id not in self.active_recognizers:
-                return True  # Already stopped
-            
-            recognizer = self.active_recognizers[call_id]
+            # Check and get recognizer with lock
+            async with self._lock:
+                if call_id not in self.active_recognizers:
+                    return True  # Already stopped
+                recognizer = self.active_recognizers[call_id]
             
             # Disconnect all event handlers to prevent memory leak
             try:
@@ -615,22 +624,34 @@ class SpeechToTextService:
                 self.logger.warning(f"Error disconnecting STT handlers: {e}")
             
             # Stop recognition
-            recognizer.stop_continuous_recognition()
+            try:
+                recognizer.stop_continuous_recognition()
+            except Exception as e:
+                self.logger.warning(f"Error stopping recognition: {e}")
             
-            # Clean up audio stream and close native resources
-            if call_id in self.audio_streams:
-                audio_stream = self.audio_streams[call_id]
-                audio_stream.close()  # Close native resources
-                del self.audio_streams[call_id]
-            
-            # Clean up other resources
-            del self.active_recognizers[call_id]
-            if call_id in self.recognition_status:
-                del self.recognition_status[call_id]
-            if call_id in self.transcription_callbacks:
-                del self.transcription_callbacks[call_id]
-            if call_id in self.language_detection_callbacks:
-                del self.language_detection_callbacks[call_id]
+            # Clean up audio stream and close native resources (with lock)
+            async with self._lock:
+                if call_id in self.audio_streams:
+                    audio_stream = self.audio_streams[call_id]
+                    try:
+                        audio_stream.close()  # Close native resources
+                    except Exception as e:
+                        self.logger.warning(f"Error closing audio stream: {e}")
+                    del self.audio_streams[call_id]
+                
+                # Clean up other resources
+                if call_id in self.active_recognizers:
+                    del self.active_recognizers[call_id]
+                if call_id in self.recognition_status:
+                    del self.recognition_status[call_id]
+                if call_id in self.transcription_callbacks:
+                    del self.transcription_callbacks[call_id]
+                if call_id in self.language_detection_callbacks:
+                    del self.language_detection_callbacks[call_id]
+                if call_id in self.transcription_stats:
+                    del self.transcription_stats[call_id]
+                if call_id in self.language_detection_results:
+                    del self.language_detection_results[call_id]
             
             self.logger.info(
                 f"Continuous speech recognition stopped for call: {call_id}",
@@ -686,7 +707,8 @@ class SpeechToTextService:
         Returns:
             Current recognition status or None
         """
-        return self.recognition_status.get(call_id)
+        with self._sync_lock:
+            return self.recognition_status.get(call_id)
     
     def get_language_detection_result(self, call_id: str) -> Optional[LanguageDetectionResult]:
         """
@@ -698,7 +720,11 @@ class SpeechToTextService:
         Returns:
             Language detection result or None
         """
-        return self.language_detection_results.get(call_id)
+        # Note: language_detection_results is accessed from both async and sync contexts
+        # Since this is a sync method, we'll use sync lock for consistency
+        # For async access, we use async lock
+        with self._sync_lock:
+            return self.language_detection_results.get(call_id)
     
     def get_transcription_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -710,16 +736,18 @@ class SpeechToTextService:
         Returns:
             Transcription statistics or None
         """
-        if call_id not in self.transcription_stats:
-            return None
-        
-        stats = self.transcription_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
-        return stats
+        with self._sync_lock:
+            if call_id not in self.transcription_stats:
+                return None
+            
+            stats = self.transcription_stats[call_id].copy()
+            stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
+            return stats
     
     def get_active_calls_count(self) -> int:
         """Get count of active recognition sessions."""
-        return len(self.active_recognizers)
+        with self._sync_lock:
+            return len(self.active_recognizers)
     
     async def process_audio_chunk(self, call_id: str, audio_data: bytes):
         """
@@ -730,24 +758,31 @@ class SpeechToTextService:
             audio_data: Raw audio bytes (PCM 16kHz 16-bit mono)
         """
         try:
-            if call_id not in self.active_recognizers:
-                self.logger.warning(f"No active recognizer for call {call_id}")
-                return
+            # Check and get audio stream with lock
+            async with self._lock:
+                if call_id not in self.active_recognizers:
+                    self.logger.warning(f"No active recognizer for call {call_id}")
+                    return
+                audio_stream = self.audio_streams.get(call_id)
             
-            # Get audio stream for this recognizer
-            audio_stream = self.audio_streams.get(call_id)
             if audio_stream:
-                # Push audio data to recognizer
-                audio_stream.write(audio_data)
-                
-                self.logger.debug(
-                    f"Pushed audio chunk to STT",
-                    LogCategory.AZURE_SPEECH,
-                    extra_data={
-                        "call_id": call_id,
-                        "chunk_size": len(audio_data)
-                    }
-                )
+                try:
+                    # Push audio data to recognizer
+                    audio_stream.write(audio_data)
+                    self.logger.debug(
+                        f"Pushed audio chunk to STT",
+                        LogCategory.AZURE_SPEECH,
+                        extra_data={
+                            "call_id": call_id,
+                            "chunk_size": len(audio_data)
+                        }
+                    )
+                except Exception as e:
+                    self.logger.error(f"Error writing to audio stream: {e}")
+                    return
+            else:
+                self.logger.warning(f"No audio stream found for call {call_id}")
+                return
             
         except Exception as e:
             self.logger.error(f"Failed to process audio chunk for {call_id}: {e}")
@@ -758,10 +793,12 @@ class SpeechToTextService:
             current_time = datetime.now(timezone.utc)
             expired_calls = []
             
-            for call_id, stats in self.transcription_stats.items():
-                # Clean up sessions older than 1 hour
-                if (current_time - stats["start_time"]).total_seconds() > 3600:
-                    expired_calls.append(call_id)
+            # Get expired calls (with lock)
+            async with self._lock:
+                for call_id, stats in list(self.transcription_stats.items()):
+                    # Clean up sessions older than 1 hour
+                    if (current_time - stats["start_time"]).total_seconds() > 3600:
+                        expired_calls.append(call_id)
             
             for call_id in expired_calls:
                 await self.stop_continuous_recognition(call_id)

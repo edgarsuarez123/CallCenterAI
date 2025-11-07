@@ -97,6 +97,8 @@ class ResponseCacheService:
         self.logger = logger
         self.redis_client: Optional[redis.Redis] = None
         self._connection_lock = asyncio.Lock()
+        self._stats_lock = asyncio.Lock()  # Lock for statistics updates
+        self._cache_lock = asyncio.Lock()  # Lock for local cache access
         self._stats = CacheStatistics()
         self._local_cache: Dict[str, CacheEntry] = {}  # Fallback cache
         self._is_connected = False
@@ -210,7 +212,9 @@ class ResponseCacheService:
             Optional[str]: Cached response if found, None otherwise
         """
         try:
-            self._stats.total_requests += 1
+            # Update statistics with lock
+            async with self._stats_lock:
+                self._stats.total_requests += 1
             
             # Generate cache key
             cache_key = self._generate_cache_key(intent, language, variables)
@@ -223,18 +227,29 @@ class ResponseCacheService:
                 try:
                     cached_data = await self.redis_client.get(cache_key)
                     if cached_data:
-                        entry_data = json.loads(cached_data)
-                        entry = CacheEntry(**entry_data)
+                        try:
+                            entry_data = json.loads(cached_data)
+                            entry = CacheEntry(**entry_data)
+                        except (json.JSONDecodeError, TypeError, KeyError) as e:
+                            self.logger.warning(f"Failed to parse cached data: {e}", LogCategory.CACHE)
+                            cached_data = None
                         
-                        # Check if entry is still valid
-                        if self._is_entry_valid(entry):
-                            self._stats.hits += 1
-                            self.logger.debug(
-                                f"Cache hit for {intent}:{language}",
-                                LogCategory.CACHE,
-                                extra_data={"cache_key": cache_key}
-                            )
-                            return entry.response
+                        if cached_data and entry:
+                            # Issue 160: Re-validate entry after retrieval to handle cache invalidation race conditions
+                            # Check if entry is still valid after retrieving from Redis
+                            if self._is_entry_valid(entry):
+                                async with self._stats_lock:
+                                    self._stats.hits += 1
+                                self.logger.debug(
+                                    f"Cache hit for {intent}:{language}",
+                                    LogCategory.CACHE,
+                                    extra_data={"cache_key": cache_key}
+                                )
+                                # Issue 160: Return entry only if still valid after retrieval
+                                return entry.response
+                            else:
+                                # Entry expired between check and return - remove it
+                                await self.redis_client.delete(cache_key)
                         else:
                             # Remove expired entry
                             await self.redis_client.delete(cache_key)
@@ -246,25 +261,29 @@ class ResponseCacheService:
                     )
                     self._is_connected = False
             
-            # Fallback to local cache
-            if cache_key in self._local_cache:
-                entry = self._local_cache[cache_key]
-                if self._is_entry_valid(entry):
-                    self._stats.hits += 1
-                    self.logger.debug(
-                        f"Local cache hit for {intent}:{language}",
-                        LogCategory.CACHE
-                    )
-                    return entry.response
-                else:
-                    # Remove expired entry
-                    del self._local_cache[cache_key]
+            # Fallback to local cache (with lock)
+            async with self._cache_lock:
+                if cache_key in self._local_cache:
+                    entry = self._local_cache[cache_key]
+                    if entry and self._is_entry_valid(entry):
+                        async with self._stats_lock:
+                            self._stats.hits += 1
+                        self.logger.debug(
+                            f"Local cache hit for {intent}:{language}",
+                            LogCategory.CACHE
+                        )
+                        return entry.response
+                    else:
+                        # Remove expired entry
+                        del self._local_cache[cache_key]
             
-            self._stats.misses += 1
+            async with self._stats_lock:
+                self._stats.misses += 1
             return None
             
         except Exception as e:
-            self._stats.errors += 1
+            async with self._stats_lock:
+                self._stats.errors += 1
             self.logger.error(
                 f"Error getting cached response: {e}",
                 LogCategory.CACHE,
@@ -338,8 +357,15 @@ class ResponseCacheService:
                     )
                     self._is_connected = False
             
-            # Fallback to local cache
-            self._local_cache[cache_key] = entry
+            # Fallback to local cache (with lock)
+            async with self._cache_lock:
+                self._local_cache[cache_key] = entry
+            
+            # Issue 176: Verify cache write succeeded
+            async with self._cache_lock:
+                if cache_key not in self._local_cache:
+                    self.logger.error(f"Failed to write to local cache for {intent}:{language}")
+                    return False
             
             # Clean up old local cache entries
             await self._cleanup_local_cache()
@@ -352,7 +378,8 @@ class ResponseCacheService:
             return True
             
         except Exception as e:
-            self._stats.errors += 1
+            async with self._stats_lock:
+                self._stats.errors += 1
             self.logger.error(
                 f"Error caching response: {e}",
                 LogCategory.CACHE,
@@ -408,29 +435,53 @@ class ResponseCacheService:
     
     async def _cleanup_local_cache(self):
         """Clean up expired entries from local cache."""
+        # Issue 191: Use a flag to prevent concurrent cleanup
+        # Check if cleanup is already in progress
+        if hasattr(self, '_cleanup_in_progress') and self._cleanup_in_progress:
+            return  # Cleanup already in progress, skip
+        
         try:
+            # Issue 191: Set cleanup flag to prevent concurrent cleanup
+            self._cleanup_in_progress = True
+            
             current_time = datetime.now(AST)
             expired_keys = []
             
-            for key, entry in self._local_cache.items():
-                if not self._is_entry_valid(entry):
-                    expired_keys.append(key)
+            # Get expired keys with lock
+            async with self._cache_lock:
+                for key, entry in list(self._local_cache.items()):  # Create copy to avoid modification during iteration
+                    if entry and not self._is_entry_valid(entry):
+                        expired_keys.append(key)
             
-            for key in expired_keys:
-                del self._local_cache[key]
-                self._stats.evictions += 1
+            # Remove expired keys with lock
+            if expired_keys:
+                async with self._cache_lock:
+                    # Issue 191: Re-check keys are still expired (might have been updated by another thread)
+                    for key in expired_keys:
+                        if key in self._local_cache:
+                            entry = self._local_cache[key]
+                            # Re-validate entry is still expired
+                            if entry and not self._is_entry_valid(entry):
+                                del self._local_cache[key]
+                                async with self._stats_lock:
+                                    self._stats.evictions += 1
             
             if expired_keys:
                 self.logger.debug(
                     f"Cleaned up {len(expired_keys)} expired local cache entries",
                     LogCategory.CACHE
                 )
+        finally:
+            # Issue 191: Always clear cleanup flag, even if exception occurs
+            self._cleanup_in_progress = False
                 
         except Exception as e:
             self.logger.error(
                 f"Error cleaning up local cache: {e}",
                 LogCategory.CACHE
             )
+            # Issue 191: Ensure cleanup flag is cleared on error
+            self._cleanup_in_progress = False
     
     async def get_cache_statistics(self) -> Dict[str, Any]:
         """
@@ -445,32 +496,37 @@ class ResponseCacheService:
             if self._is_connected and self.redis_client:
                 try:
                     info = await self.redis_client.info("memory")
-                    redis_info = {
-                        "redis_used_memory": info.get("used_memory_human", "unknown"),
-                        "redis_connected_clients": info.get("connected_clients", 0),
-                        "redis_evicted_keys": info.get("evicted_keys", 0)
-                    }
+                    if info:
+                        redis_info = {
+                            "redis_used_memory": info.get("used_memory_human", "unknown"),
+                            "redis_connected_clients": info.get("connected_clients", 0),
+                            "redis_evicted_keys": info.get("evicted_keys", 0)
+                        }
                 except Exception as e:
                     self.logger.warning(f"Could not get Redis info: {e}")
             
-            # Calculate cache size
-            cache_size = len(self._local_cache)
+            # Calculate cache size (with lock)
+            async with self._cache_lock:
+                cache_size = len(self._local_cache)
+            
             if self._is_connected and self.redis_client:
                 try:
                     # Count keys with our prefix
                     pattern = f"{self.key_prefix}response:*"
                     keys = await self.redis_client.keys(pattern)
-                    cache_size = len(keys)
+                    if keys:
+                        cache_size = len(keys)
                 except Exception:
                     pass
             
-            self._stats.cache_size = cache_size
+            async with self._stats_lock:
+                self._stats.cache_size = cache_size
             
             return {
                 "statistics": asdict(self._stats),
                 "connection_status": {
                     "redis_connected": self._is_connected,
-                    "local_cache_size": len(self._local_cache)
+                    "local_cache_size": cache_size
                 },
                 "redis_info": redis_info,
                 "ttl_mapping": self.cache_ttl_mapping
@@ -503,21 +559,23 @@ class ResponseCacheService:
             if self._is_connected and self.redis_client:
                 try:
                     keys = await self.redis_client.keys(pattern)
-                    if keys:
+                    if keys and len(keys) > 0:
                         cleared_count += await self.redis_client.delete(*keys)
                 except Exception as e:
                     self.logger.warning(f"Error clearing Redis cache: {e}")
             
-            # Clear local cache
-            if pattern == f"{self.key_prefix}response:*" or pattern is None:
-                cleared_count += len(self._local_cache)
-                self._local_cache.clear()
-            else:
-                # Clear matching local cache entries
-                keys_to_remove = [k for k in self._local_cache.keys() if pattern.replace("*", "") in k]
-                for key in keys_to_remove:
-                    del self._local_cache[key]
-                cleared_count += len(keys_to_remove)
+            # Clear local cache (with lock)
+            async with self._cache_lock:
+                if pattern == f"{self.key_prefix}response:*" or pattern is None:
+                    cleared_count += len(self._local_cache)
+                    self._local_cache.clear()
+                else:
+                    # Clear matching local cache entries
+                    keys_to_remove = [k for k in self._local_cache.keys() if pattern.replace("*", "") in k]
+                    for key in keys_to_remove:
+                        if key in self._local_cache:
+                            del self._local_cache[key]
+                    cleared_count += len(keys_to_remove)
             
             self.logger.info(
                 f"Cleared {cleared_count} cache entries",
@@ -558,12 +616,14 @@ class ResponseCacheService:
                     health_status["redis_connected"] = False
                     health_status["redis_error"] = str(e)
             
-            # Test local cache
+            # Test local cache (with lock)
             try:
-                test_key = f"{self.key_prefix}health_check"
-                test_entry = CacheEntry(response="test", ttl=1)
-                self._local_cache[test_key] = test_entry
-                del self._local_cache[test_key]
+                async with self._cache_lock:
+                    test_key = f"{self.key_prefix}health_check"
+                    test_entry = CacheEntry(response="test", ttl=1)
+                    self._local_cache[test_key] = test_entry
+                    if test_key in self._local_cache:
+                        del self._local_cache[test_key]
             except Exception as e:
                 health_status["local_cache_available"] = False
                 health_status["local_cache_error"] = str(e)

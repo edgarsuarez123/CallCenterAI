@@ -148,6 +148,8 @@ class StructuredLogger:
     
     def __init__(self, name: str = "callcenter_ai", level: Optional[LogLevel] = None):
         self.name = name
+        # Initialize lock for thread safety
+        self._lock = threading.Lock()
         
         # Get configuration
         settings = get_settings()
@@ -352,11 +354,12 @@ class StructuredLogger:
     
     def _get_security_context(self) -> Dict[str, Any]:
         """Get current security context."""
-        return {
-            'failed_auth_attempts': dict(self._failed_auth_attempts),
-            'security_events_count': len(self._security_events),
-            'last_security_event': self._security_events[-1] if self._security_events else None
-        }
+        with self._lock:
+            return {
+                'failed_auth_attempts': dict(self._failed_auth_attempts),
+                'security_events_count': len(self._security_events),
+                'last_security_event': self._security_events[-1] if self._security_events else None
+            }
     
     def _calculate_avg_query_time(self) -> float:
         """Calculate average query time from recent slow queries."""

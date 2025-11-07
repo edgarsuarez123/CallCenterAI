@@ -90,12 +90,21 @@ class ClinicManagementService:
             # Log the creation
             self._log_audit("clinics", clinic_id, "CREATE", None, clinic_data.dict())
             
-            self.db.commit()
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit clinic creation: {str(commit_error)}")
+            
             return clinic
             
         except IntegrityError as e:
             self.db.rollback()
-            raise ValueError(f"Clinic with phone number {clinic_data.phone_number} already exists")
+            raise ValueError(f"Clinic with phone number {clinic_data.phone_number} already exists: {str(e)}")
+        except ValueError:
+            # Re-raise ValueError as-is
+            raise
         except Exception as e:
             self.db.rollback()
             raise ValueError(f"Failed to create clinic: {str(e)}")
@@ -139,7 +148,13 @@ class ClinicManagementService:
         # Log the update
         self._log_audit("clinics", clinic_id, "UPDATE", old_values, update_data)
         
-        self.db.commit()
+        # Commit with error handling
+        try:
+            self.db.commit()
+        except Exception as commit_error:
+            self.db.rollback()
+            raise ValueError(f"Failed to commit clinic update: {str(commit_error)}")
+        
         return clinic
     
     def list_clinics(self, search: ClinicSearchRequest) -> List[Clinic]:
@@ -193,7 +208,13 @@ class ClinicManagementService:
         # Log the deactivation
         self._log_audit("clinics", clinic_id, "DEACTIVATE", old_values, {"is_active": "no"})
         
-        self.db.commit()
+        # Commit with error handling
+        try:
+            self.db.commit()
+        except Exception as commit_error:
+            self.db.rollback()
+            raise ValueError(f"Failed to commit clinic deactivation: {str(commit_error)}")
+        
         return True
     
     def get_clinic_license(self, clinic_id: str) -> Optional[ClinicLicense]:
@@ -250,12 +271,23 @@ class ClinicManagementService:
             self._log_audit("clinic_licenses", license.license_id, "UPDATE", 
                            old_license_values, license_data)
             
-            self.db.commit()
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit license update: {str(commit_error)}")
+            
             return True
+        except ValueError:
+            # Re-raise ValueError as-is
+            raise
         except Exception as e:
             self.db.rollback()
-            self.logger.error(f"Failed to update clinic license for {clinic_id}: {e}")
-            raise
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to update clinic license for {clinic_id}: {e}")
+            raise ValueError(f"Failed to update clinic license: {str(e)}")
     
     def get_clinic_config(self, clinic_id: str, config_key: str) -> Optional[str]:
         """Get a specific configuration value for a clinic."""
@@ -307,7 +339,13 @@ class ClinicManagementService:
                 "description": config.description
             })
         
-        self.db.commit()
+        # Commit with error handling
+        try:
+            self.db.commit()
+        except Exception as commit_error:
+            self.db.rollback()
+            raise ValueError(f"Failed to commit system config update: {str(commit_error)}")
+        
         return True
     
     def _generate_clinic_id(self, phone_number: str) -> str:

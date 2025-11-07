@@ -275,20 +275,30 @@ class NaturalLanguageProcessor:
 
     def _extract_intent(self, text: str, context: Dict[str, Any] = None) -> Tuple[IntentType, float]:
         """Extract intent from text with specificity scoring and context awareness"""
+        if not text or not text.strip():
+            return IntentType.UNCLEAR, 0.0
+        
         text_lower = text.lower()
         matches = []
         
         # Collect all matches with confidence scores
         for intent_type, patterns in self.compiled_patterns.items():
             for compiled_pattern, base_confidence in patterns:
-                match_obj = compiled_pattern.search(text_lower)
-                if match_obj:
-                    # Adjust confidence based on match specificity
-                    match_length = len(match_obj.group(0))
-                    specificity_bonus = match_length / len(text_lower) * 0.1
-                    
-                    final_confidence = min(1.0, base_confidence + specificity_bonus)
-                    matches.append((intent_type, final_confidence, match_length))
+                try:
+                    match_obj = compiled_pattern.search(text_lower)
+                    if match_obj:
+                        # Adjust confidence based on match specificity (with division by zero check)
+                        match_length = len(match_obj.group(0))
+                        if len(text_lower) > 0:
+                            specificity_bonus = match_length / len(text_lower) * 0.1
+                        else:
+                            specificity_bonus = 0.0
+                        
+                        final_confidence = min(1.0, base_confidence + specificity_bonus)
+                        matches.append((intent_type, final_confidence, match_length))
+                except Exception as e:
+                    self.logger.warning(f"Error matching pattern for {intent_type}: {e}")
+                    continue
         
         if not matches:
             return IntentType.UNCLEAR, 0.0
@@ -339,101 +349,174 @@ class NaturalLanguageProcessor:
 
     def _extract_name(self, text: str) -> Optional[str]:
         """Extract name from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.name_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                name = match.group(1).strip()
-                # Clean up the name
-                name = re.sub(r'[^\w\s]', '', name)
-                name = ' '.join(word.capitalize() for word in name.split())
-                if len(name) > 1:  # Avoid single characters
-                    return name
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match and match.groups() and len(match.groups()) > 0:
+                    name = match.group(1).strip()
+                    if name:
+                        # Clean up the name
+                        name = re.sub(r'[^\w\s]', '', name)
+                        name = ' '.join(word.capitalize() for word in name.split())
+                        if len(name) > 1:  # Avoid single characters
+                            return name
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting name with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_date_of_birth(self, text: str) -> Optional[str]:
         """Extract date of birth from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.dob_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Handle patterns with and without groups
-                if match.groups():
-                    return match.group(1).strip()
-                else:
-                    return match.group(0).strip()
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    # Handle patterns with and without groups (with bounds check)
+                    if match.groups() and len(match.groups()) > 0:
+                        dob = match.group(1).strip()
+                        if dob:
+                            return dob
+                    else:
+                        dob = match.group(0).strip()
+                        if dob:
+                            return dob
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting DOB with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_insurance_provider(self, text: str) -> Optional[str]:
         """Extract insurance provider from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.insurance_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Handle patterns with and without groups
-                if match.groups():
-                    provider = match.group(1).strip()
-                else:
-                    provider = match.group(0).strip()
-                # Clean up the provider name
-                provider = re.sub(r'[^\w\s]', '', provider)
-                provider = ' '.join(word.capitalize() for word in provider.split())
-                if len(provider) > 1:
-                    return provider
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    # Handle patterns with and without groups (with bounds check)
+                    if match.groups() and len(match.groups()) > 0:
+                        provider = match.group(1).strip()
+                    else:
+                        provider = match.group(0).strip()
+                    
+                    if provider:
+                        # Clean up the provider name
+                        provider = re.sub(r'[^\w\s]', '', provider)
+                        provider = ' '.join(word.capitalize() for word in provider.split())
+                        if len(provider) > 1:
+                            return provider
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting insurance provider with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_provider_name(self, text: str) -> Optional[str]:
         """Extract provider name from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.provider_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Handle patterns with and without groups
-                if match.groups():
-                    provider = match.group(1).strip()
-                else:
-                    provider = match.group(0).strip()
-                # Clean up the provider name
-                provider = re.sub(r'[^\w\s]', '', provider)
-                provider = ' '.join(word.capitalize() for word in provider.split())
-                if len(provider) > 1:
-                    return provider
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    # Handle patterns with and without groups (with bounds check)
+                    if match.groups() and len(match.groups()) > 0:
+                        provider = match.group(1).strip()
+                    else:
+                        provider = match.group(0).strip()
+                    
+                    if provider:
+                        # Clean up the provider name
+                        provider = re.sub(r'[^\w\s]', '', provider)
+                        provider = ' '.join(word.capitalize() for word in provider.split())
+                        if len(provider) > 1:
+                            return provider
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting provider name with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_appointment_date(self, text: str) -> Optional[str]:
         """Extract appointment date from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.date_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Handle patterns with and without groups
-                if match.groups():
-                    return match.group(1).strip()
-                else:
-                    return match.group(0).strip()
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    # Handle patterns with and without groups (with bounds check)
+                    if match.groups() and len(match.groups()) > 0:
+                        date_str = match.group(1).strip()
+                        if date_str:
+                            return date_str
+                    else:
+                        date_str = match.group(0).strip()
+                        if date_str:
+                            return date_str
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting appointment date with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_appointment_time(self, text: str) -> Optional[str]:
         """Extract appointment time from text"""
+        if not text or not text.strip():
+            return None
+        
         for pattern in self.time_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                # Handle patterns with and without groups
-                if match.groups():
-                    return match.group(1).strip()
-                else:
-                    return match.group(0).strip()
+            try:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    # Handle patterns with and without groups (with bounds check)
+                    if match.groups() and len(match.groups()) > 0:
+                        time_str = match.group(1).strip()
+                        if time_str:
+                            return time_str
+                    else:
+                        time_str = match.group(0).strip()
+                        if time_str:
+                            return time_str
+            except (AttributeError, IndexError) as e:
+                self.logger.warning(f"Error extracting appointment time with pattern {pattern}: {e}")
+                continue
         return None
 
     def _extract_phone_number(self, text: str) -> Optional[str]:
         """Extract phone number from text"""
-        phone_pattern = r'\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b'
-        match = re.search(phone_pattern, text)
-        if match:
-            return f"({match.group(1)}) {match.group(2)}-{match.group(3)}"
+        if not text or not text.strip():
+            return None
+        
+        try:
+            phone_pattern = r'\b(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})\b'
+            match = re.search(phone_pattern, text)
+            if match and match.groups() and len(match.groups()) >= 3:
+                return f"({match.group(1)}) {match.group(2)}-{match.group(3)}"
+        except (AttributeError, IndexError) as e:
+            self.logger.warning(f"Error extracting phone number: {e}")
         return None
 
     def _extract_email(self, text: str) -> Optional[str]:
         """Extract email from text"""
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        match = re.search(email_pattern, text)
-        if match:
-            return match.group(0)
+        if not text or not text.strip():
+            return None
+        
+        try:
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            match = re.search(email_pattern, text)
+            if match:
+                email = match.group(0)
+                if email:
+                    return email
+        except (AttributeError, IndexError) as e:
+            self.logger.warning(f"Error extracting email: {e}")
         return None
 
     def is_confirmation(self, text: str) -> bool:

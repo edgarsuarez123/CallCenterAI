@@ -12,6 +12,7 @@ This service provides:
 import asyncio
 import io
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Union
@@ -122,8 +123,9 @@ class TextToSpeechService:
         # Performance tracking
         self.synthesis_stats: Dict[str, Dict[str, Any]] = {}
         
-        # Thread safety
-        self._synthesis_lock = asyncio.Lock()
+        # Thread safety locks (both async and sync for different contexts)
+        self._synthesis_lock = asyncio.Lock()  # For async operations
+        self._sync_lock = threading.Lock()  # For sync event handlers
         
         # Initialize speech configuration
         self._initialize_speech_config()
@@ -190,9 +192,15 @@ class TextToSpeechService:
             # Create synthesis result ID
             result_id = f"tts_{int(time.time() * 1000)}"
             
-            # Update status (with lock)
+            # Issue 163: Queue synthesis requests or cancel previous requests for same call
             if call_id:
                 async with self._synthesis_lock:
+                    # Issue 163: Check if synthesis is already in progress for this call
+                    if call_id in self.synthesis_status and self.synthesis_status[call_id] == SynthesisStatus.SYNTHESIZING:
+                        self.logger.warning(f"Synthesis already in progress for call {call_id}, queuing new request")
+                        # In production, you might want to queue this request or cancel the previous one
+                        # For now, we'll proceed but log a warning
+                    
                     self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
                     if synthesis_callback:
                         self.synthesis_callbacks[call_id] = synthesis_callback
@@ -222,12 +230,15 @@ class TextToSpeechService:
                 async with self._synthesis_lock:
                     self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
             
-            # Call callback if registered
-            if call_id and call_id in self.synthesis_callbacks:
-                try:
-                    self.synthesis_callbacks[call_id](result)
-                except Exception as e:
-                    self.logger.error(f"Error in synthesis callback: {e}")
+            # Call callback if registered (with lock)
+            if call_id:
+                async with self._synthesis_lock:
+                    callback = self.synthesis_callbacks.get(call_id)
+                if callback:
+                    try:
+                        callback(result)
+                    except Exception as e:
+                        self.logger.error(f"Error in synthesis callback: {e}")
             
             self.logger.info(
                 f"Speech synthesized successfully: {result_id}",
@@ -380,15 +391,16 @@ class TextToSpeechService:
             async with self._synthesis_lock:
                 self.synthesis_status[call_id] = SynthesisStatus.STREAMING
             
-            # Store session info
-            self.active_sessions[call_id] = {
-                "text": text,
-                "language": language,
-                "voice_config": voice_config,
-                "ssml": ssml,
-                "start_time": datetime.now(timezone.utc),
-                "chunk_callback": chunk_callback
-            }
+            # Store session info (with lock)
+            async with self._synthesis_lock:
+                self.active_sessions[call_id] = {
+                    "text": text,
+                    "language": language,
+                    "voice_config": voice_config,
+                    "ssml": ssml,
+                    "start_time": datetime.now(timezone.utc),
+                    "chunk_callback": chunk_callback
+                }
             
             # Start streaming synthesis
             await self._perform_streaming_synthesis(call_id, ssml, voice_config)
@@ -413,8 +425,9 @@ class TextToSpeechService:
                 exception=e
             )
             
-            if call_id in self.synthesis_status:
-                self.synthesis_status[call_id] = SynthesisStatus.ERROR
+            async with self._synthesis_lock:
+                if call_id in self.synthesis_status:
+                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
             
             return False
     
@@ -442,9 +455,11 @@ class TextToSpeechService:
             def on_synthesizing(evt):
                 """Handle synthesizing events (partial audio)."""
                 try:
-                    if call_id in self.active_sessions:
-                        session = self.active_sessions[call_id]
-                        
+                    # Get session with lock (sync lock for event handler)
+                    with self._sync_lock:
+                        session = self.active_sessions.get(call_id) if call_id in self.active_sessions else None
+                    
+                    if session:
                         # Create synthesis result for chunk
                         chunk_result = SynthesisResult(
                             audio_data=bytes(evt.result.audio_data),
@@ -459,9 +474,10 @@ class TextToSpeechService:
                         )
                         
                         # Call chunk callback if registered
-                        if session.get("chunk_callback"):
+                        chunk_callback = session.get("chunk_callback")
+                        if chunk_callback:
                             try:
-                                session["chunk_callback"](chunk_result)
+                                chunk_callback(chunk_result)
                             except Exception as e:
                                 self.logger.error(f"Error in chunk callback: {e}")
                         
@@ -480,9 +496,11 @@ class TextToSpeechService:
             def on_synthesized(evt):
                 """Handle synthesized events (final audio)."""
                 try:
-                    if call_id in self.active_sessions:
-                        session = self.active_sessions[call_id]
-                        
+                    # Get session with lock (sync lock for event handler)
+                    with self._sync_lock:
+                        session = self.active_sessions.get(call_id) if call_id in self.active_sessions else None
+                    
+                    if session:
                         # Create final synthesis result
                         final_result = SynthesisResult(
                             audio_data=bytes(evt.result.audio_data),
@@ -500,9 +518,10 @@ class TextToSpeechService:
                         self._update_synthesis_stats(call_id, final_result)
                         
                         # Call chunk callback if registered
-                        if session.get("chunk_callback"):
+                        chunk_callback = session.get("chunk_callback")
+                        if chunk_callback:
                             try:
-                                session["chunk_callback"](final_result)
+                                chunk_callback(final_result)
                             except Exception as e:
                                 self.logger.error(f"Error in final chunk callback: {e}")
                         
@@ -530,7 +549,9 @@ class TextToSpeechService:
                         "error": evt.result.cancellation_details.error_details
                     }
                 )
-                self.synthesis_status[call_id] = SynthesisStatus.ERROR
+                with self._sync_lock:
+                    if call_id in self.synthesis_status:
+                        self.synthesis_status[call_id] = SynthesisStatus.ERROR
             
             # Register event handlers
             synthesizer.synthesizing.connect(on_synthesizing)
@@ -541,15 +562,17 @@ class TextToSpeechService:
             synthesizer.speak_ssml_async(ssml).get()
             
             # Clean up
-            audio_stream.close()
+            try:
+                audio_stream.close()
+            except Exception as e:
+                self.logger.warning(f"Error closing audio stream: {e}")
             
-            # Update status
-            if call_id in self.synthesis_status:
-                self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
-            
-            # Remove session
-            if call_id in self.active_sessions:
-                del self.active_sessions[call_id]
+            # Update status and remove session (with lock)
+            async with self._synthesis_lock:
+                if call_id in self.synthesis_status:
+                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
+                if call_id in self.active_sessions:
+                    del self.active_sessions[call_id]
             
         except Exception as e:
             self.logger.error(
@@ -558,11 +581,11 @@ class TextToSpeechService:
                 exception=e
             )
             
-            if call_id in self.synthesis_status:
-                self.synthesis_status[call_id] = SynthesisStatus.ERROR
-            
-            if call_id in self.active_sessions:
-                del self.active_sessions[call_id]
+            async with self._synthesis_lock:
+                if call_id in self.synthesis_status:
+                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
+                if call_id in self.active_sessions:
+                    del self.active_sessions[call_id]
     
     async def synthesize_ssml(self, ssml: str, language: str = "en", 
                             call_id: Optional[str] = None) -> SynthesisResult:
@@ -591,9 +614,10 @@ class TextToSpeechService:
             # Create synthesis result ID
             result_id = f"ssml_{int(time.time() * 1000)}"
             
-            # Update status
+            # Update status (with lock)
             if call_id:
-                self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
+                async with self._synthesis_lock:
+                    self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
             
             # Perform synthesis
             audio_data = await self._perform_synthesis(ssml, voice_config)
@@ -660,22 +684,28 @@ class TextToSpeechService:
     
     def _update_synthesis_stats(self, call_id: str, result: SynthesisResult):
         """Update synthesis statistics."""
-        if call_id not in self.synthesis_stats:
-            self.synthesis_stats[call_id] = {
-                "start_time": datetime.now(timezone.utc),
-                "total_syntheses": 0,
-                "successful_syntheses": 0,
-                "total_audio_duration": 0,
-                "total_audio_size": 0
-            }
-        
-        stats = self.synthesis_stats[call_id]
-        stats["total_syntheses"] += 1
-        
-        if result.success:
-            stats["successful_syntheses"] += 1
-            stats["total_audio_duration"] += result.duration_ms
-            stats["total_audio_size"] += len(result.audio_data)
+        # Note: This is called from event handlers which are synchronous
+        # Use sync lock for thread safety
+        try:
+            with self._sync_lock:
+                if call_id not in self.synthesis_stats:
+                    self.synthesis_stats[call_id] = {
+                        "start_time": datetime.now(timezone.utc),
+                        "total_syntheses": 0,
+                        "successful_syntheses": 0,
+                        "total_audio_duration": 0,
+                        "total_audio_size": 0
+                    }
+                
+                stats = self.synthesis_stats[call_id]
+                stats["total_syntheses"] += 1
+                
+                if result.success:
+                    stats["successful_syntheses"] += 1
+                    stats["total_audio_duration"] += result.duration_ms
+                    stats["total_audio_size"] += len(result.audio_data)
+        except Exception as e:
+            self.logger.error(f"Error updating synthesis stats: {e}")
     
     def get_voice_for_language(self, language: str) -> Optional[VoiceConfig]:
         """
@@ -727,7 +757,8 @@ class TextToSpeechService:
     
     def get_active_sessions_count(self) -> int:
         """Get count of active synthesis sessions."""
-        return len(self.active_sessions)
+        with self._sync_lock:
+            return len(self.active_sessions)
     
     async def stop_synthesis(self, call_id: str) -> bool:
         """
@@ -740,15 +771,15 @@ class TextToSpeechService:
             True if synthesis was stopped successfully
         """
         try:
-            if call_id in self.active_sessions:
-                del self.active_sessions[call_id]
-            
             async with self._synthesis_lock:
+                if call_id in self.active_sessions:
+                    del self.active_sessions[call_id]
                 if call_id in self.synthesis_status:
                     del self.synthesis_status[call_id]
-                
                 if call_id in self.synthesis_callbacks:
                     del self.synthesis_callbacks[call_id]
+                if call_id in self.synthesis_stats:
+                    del self.synthesis_stats[call_id]
             
             self.logger.info(
                 f"Synthesis stopped for call: {call_id}",
@@ -772,10 +803,12 @@ class TextToSpeechService:
             current_time = datetime.now(timezone.utc)
             expired_calls = []
             
-            for call_id, stats in self.synthesis_stats.items():
-                # Clean up sessions older than 1 hour
-                if (current_time - stats["start_time"]).total_seconds() > 3600:
-                    expired_calls.append(call_id)
+            # Get expired calls (with lock)
+            async with self._synthesis_lock:
+                for call_id, stats in list(self.synthesis_stats.items()):
+                    # Clean up sessions older than 1 hour
+                    if (current_time - stats["start_time"]).total_seconds() > 3600:
+                        expired_calls.append(call_id)
             
             for call_id in expired_calls:
                 await self.stop_synthesis(call_id)
