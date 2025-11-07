@@ -228,12 +228,24 @@ def get_db_with_retry(max_retries: int = 3) -> Generator[Session, None, None]:
     Yields:
         Database session with automatic retry on connection failures
     """
+    db = None
     for attempt in range(max_retries):
         try:
             db = SessionLocal()
             yield db
             return
         except Exception as e:
+            if db:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                try:
+                    db.close()
+                except Exception:
+                    pass
+                db = None
+            
             if attempt == max_retries - 1:
                 logger.error(f"Database connection failed after {max_retries} attempts: {e}")
                 raise

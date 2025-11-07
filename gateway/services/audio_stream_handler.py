@@ -92,6 +92,8 @@ class AudioStreamHandler:
         self.connection_timeout = 300  # 5 minutes
         self.cleanup_interval = 60  # 1 minute
         self._cleanup_task = None
+        # Initialize lock for thread safety
+        self._connections_lock = asyncio.Lock()
     
     async def start(self):
         """Start the audio stream handler."""
@@ -126,31 +128,32 @@ class AudioStreamHandler:
         try:
             # Validate call exists
             acs_service = get_azure_communication_service()
-            call_status = acs_service.get_call_status(call_id)
+            call_status = await acs_service.get_call_status(call_id)
             if not call_status:
                 raise CallNotFoundError(call_id)
             
-            # Check connection limit
-            if len(self.active_connections) >= self.max_connections:
-                raise ValidationError("connection_limit", len(self.active_connections), 
-                                    f"Maximum connections ({self.max_connections}) exceeded")
-            
-            # Accept WebSocket connection
-            await websocket.accept()
-            
-            # Create connection
-            connection_id = f"CONN_{call_id}_{uuid.uuid4().hex[:8].upper()}"
-            connection = AudioStreamConnection(
-                call_id=call_id,
-                websocket=websocket,
-                connection_id=connection_id,
-                connected_at=datetime.now(timezone.utc),
-                last_activity=datetime.now(timezone.utc)
-            )
-            
-            # Store connection
-            self.active_connections[connection_id] = connection
-            self.connection_pool.add(connection_id)
+            # Check connection limit and store connection with lock
+            async with self._connections_lock:
+                if len(self.active_connections) >= self.max_connections:
+                    raise ValidationError("connection_limit", len(self.active_connections), 
+                                        f"Maximum connections ({self.max_connections}) exceeded")
+                
+                # Accept WebSocket connection
+                await websocket.accept()
+                
+                # Create connection
+                connection_id = f"CONN_{call_id}_{uuid.uuid4().hex[:8].upper()}"
+                connection = AudioStreamConnection(
+                    call_id=call_id,
+                    websocket=websocket,
+                    connection_id=connection_id,
+                    connected_at=datetime.now(timezone.utc),
+                    last_activity=datetime.now(timezone.utc)
+                )
+                
+                # Store connection
+                self.active_connections[connection_id] = connection
+                self.connection_pool.add(connection_id)
             
             # Start audio streaming for the call
             await acs_service.start_audio_stream(call_id)
@@ -187,17 +190,40 @@ class AudioStreamHandler:
             connection_id: ID of the connection
         """
         try:
-            connection = self.active_connections.get(connection_id)
-            if not connection:
-                self.logger.warning(f"Connection not found: {connection_id}")
-                return
+            # Get connection with lock
+            async with self._connections_lock:
+                connection = self.active_connections.get(connection_id)
+                if not connection:
+                    self.logger.warning(f"Connection not found: {connection_id}")
+                    return
             
             websocket = connection.websocket
             
+            # Issue 161: Check connection status before entering loop
             while connection.is_active:
                 try:
+                    # Issue 161: Check connection status before receiving data
+                    async with self._connections_lock:
+                        if connection_id not in self.active_connections or not connection.is_active:
+                            self.logger.info(f"Connection {connection_id} is no longer active, stopping audio processing")
+                            break
+                    
                     # Receive audio data
                     data = await websocket.receive_bytes()
+                    
+                    # Issue 90: Validate audio format before processing
+                    if not data or len(data) == 0:
+                        self.logger.warning(f"Received empty audio data for connection {connection_id}")
+                        continue
+                    
+                    # Issue 90: Validate audio data size (reasonable limits)
+                    MAX_AUDIO_CHUNK_SIZE = 64 * 1024  # 64KB max chunk size
+                    if len(data) > MAX_AUDIO_CHUNK_SIZE:
+                        self.logger.warning(
+                            f"Audio chunk too large ({len(data)} bytes) for connection {connection_id}, skipping",
+                            LogCategory.AZURE_COMMUNICATION
+                        )
+                        continue
                     
                     # Create audio chunk
                     chunk = AudioChunk(
@@ -261,9 +287,29 @@ class AudioStreamHandler:
             True if audio was sent successfully
         """
         try:
-            connection = self.active_connections.get(connection_id)
-            if not connection or not connection.is_active:
-                return False
+            # Get connection with lock
+            async with self._connections_lock:
+                connection = self.active_connections.get(connection_id)
+                if not connection or not connection.is_active:
+                    return False
+            
+            # Issue 91: Check buffer size before sending
+            MAX_AUDIO_BUFFER_SIZE = 128 * 1024  # 128KB max buffer size
+            if len(audio_data) > MAX_AUDIO_BUFFER_SIZE:
+                # Issue 91: Split large buffers into smaller chunks
+                self.logger.debug(
+                    f"Audio buffer too large ({len(audio_data)} bytes), splitting into chunks",
+                    LogCategory.AZURE_COMMUNICATION
+                )
+                chunk_size = MAX_AUDIO_BUFFER_SIZE
+                for i in range(0, len(audio_data), chunk_size):
+                    chunk_data = audio_data[i:i + chunk_size]
+                    try:
+                        await connection.websocket.send_bytes(chunk_data)
+                    except Exception as chunk_error:
+                        self.logger.error(f"Failed to send audio chunk: {chunk_error}")
+                        return False
+                return True
             
             # Create audio chunk for outgoing data
             chunk = AudioChunk(
@@ -277,8 +323,10 @@ class AudioStreamHandler:
             # Send via WebSocket
             await connection.websocket.send_bytes(audio_data)
             
-            # Update activity
-            connection.last_activity = datetime.now(timezone.utc)
+            # Update activity (with lock)
+            async with self._connections_lock:
+                if connection_id in self.active_connections:
+                    connection.last_activity = datetime.now(timezone.utc)
             
             self.logger.debug(
                 f"Sent audio chunk: {chunk.chunk_id}",
@@ -315,18 +363,49 @@ class AudioStreamHandler:
             True if audio was sent successfully
         """
         try:
-            # Find connection for this call
+            # Find connection for this call (with lock)
             connection = None
-            for conn in self.active_connections.values():
-                if conn.call_id == call_id and conn.is_active:
-                    connection = conn
-                    break
+            async with self._connections_lock:
+                for conn in self.active_connections.values():
+                    if conn.call_id == call_id and conn.is_active:
+                        connection = conn
+                        break
             
             if not connection:
                 self.logger.warning(f"No active connection found for call: {call_id}")
                 return False
             
-            return await self.handle_outgoing_audio(connection.connection_id, audio_data, audio_format)
+            # Issue 37, 182: Verify connection is still active right before sending and during send
+            if not connection.is_active:
+                self.logger.warning(f"Connection {connection.connection_id} is no longer active")
+                return False
+            
+            # Issue 89, 182: Handle connection errors gracefully and check connection during send
+            try:
+                # Issue 182: Check connection status before sending
+                async with self._connections_lock:
+                    if connection.connection_id not in self.active_connections or not connection.is_active:
+                        self.logger.warning(f"Connection {connection.connection_id} became inactive before send")
+                        return False
+                
+                # Issue 182: Send audio and check connection status after send
+                result = await self.handle_outgoing_audio(connection.connection_id, audio_data, audio_format)
+                
+                # Issue 182: Verify connection is still active after send
+                async with self._connections_lock:
+                    if connection.connection_id in self.active_connections:
+                        if not self.active_connections[connection.connection_id].is_active:
+                            self.logger.warning(f"Connection {connection.connection_id} became inactive during send")
+                            return False
+                
+                return result
+            except Exception as conn_error:
+                self.logger.error(f"Connection error while sending audio: {conn_error}")
+                # Issue 182: Mark connection as inactive on error
+                async with self._connections_lock:
+                    if connection.connection_id in self.active_connections:
+                        self.active_connections[connection.connection_id].is_active = False
+                return False
             
         except Exception as e:
             self.logger.error(
@@ -347,29 +426,41 @@ class AudioStreamHandler:
             True if disconnected successfully
         """
         try:
-            connection = self.active_connections.get(connection_id)
-            if not connection:
-                return False
+            # Get connection with lock
+            async with self._connections_lock:
+                connection = self.active_connections.get(connection_id)
+                if not connection:
+                    return False
+                
+                # Mark as inactive
+                connection.is_active = False
             
-            # Mark as inactive
-            connection.is_active = False
-            
-            # Close WebSocket if still open
+            # Close WebSocket if still open (outside lock to avoid blocking)
             try:
                 await connection.websocket.close()
             except Exception:
                 pass  # WebSocket might already be closed
             
-            # Remove from active connections
-            if connection_id in self.active_connections:
-                del self.active_connections[connection_id]
-            
-            if connection_id in self.connection_pool:
-                self.connection_pool.remove(connection_id)
-            
-            # Remove audio processor if registered
+            # Issue 198: Clean up all resources (processors, buffers) on disconnect
+            # Remove audio processors for this connection
             if connection_id in self.audio_processors:
                 del self.audio_processors[connection_id]
+            
+            # Clear audio buffer for this connection
+            if hasattr(connection, 'audio_buffer') and connection.audio_buffer:
+                connection.audio_buffer.clear()
+            
+            # Remove from active connections (with lock)
+            async with self._connections_lock:
+                if connection_id in self.active_connections:
+                    del self.active_connections[connection_id]
+                
+                if connection_id in self.connection_pool:
+                    self.connection_pool.remove(connection_id)
+            
+            # Get total connections with lock
+            async with self._connections_lock:
+                total_connections = len(self.active_connections)
             
             self.logger.info(
                 f"Audio stream disconnected: {connection_id}",
@@ -377,7 +468,7 @@ class AudioStreamHandler:
                 extra_data={
                     "connection_id": connection_id,
                     "call_id": connection.call_id,
-                    "total_connections": len(self.active_connections)
+                    "total_connections": total_connections
                 }
             )
             
@@ -439,7 +530,7 @@ class AudioStreamHandler:
                 extra_data={"connection_id": connection_id}
             )
     
-    def get_connection_status(self, connection_id: str) -> Optional[Dict[str, Any]]:
+    async def get_connection_status(self, connection_id: str) -> Optional[Dict[str, Any]]:
         """
         Get status of an audio stream connection.
         
@@ -449,9 +540,10 @@ class AudioStreamHandler:
         Returns:
             Connection status information or None if not found
         """
-        connection = self.active_connections.get(connection_id)
-        if not connection:
-            return None
+        async with self._connections_lock:
+            connection = self.active_connections.get(connection_id)
+            if not connection:
+                return None
         
         return {
             "connection_id": connection.connection_id,
@@ -465,7 +557,7 @@ class AudioStreamHandler:
             "has_processor": connection_id in self.audio_processors
         }
     
-    def get_call_connection(self, call_id: str) -> Optional[AudioStreamConnection]:
+    async def get_call_connection(self, call_id: str) -> Optional[AudioStreamConnection]:
         """
         Get audio stream connection for a specific call.
         
@@ -475,27 +567,32 @@ class AudioStreamHandler:
         Returns:
             AudioStreamConnection or None if not found
         """
-        for connection in self.active_connections.values():
-            if connection.call_id == call_id and connection.is_active:
-                return connection
-        return None
+        async with self._connections_lock:
+            for connection in self.active_connections.values():
+                if connection.call_id == call_id and connection.is_active:
+                    return connection
+            return None
     
-    def get_active_connections_count(self) -> int:
+    async def get_active_connections_count(self) -> int:
         """Get count of active connections."""
-        return len(self.active_connections)
+        async with self._connections_lock:
+            return len(self.active_connections)
     
-    def get_connection_statistics(self) -> Dict[str, Any]:
+    async def get_connection_statistics(self) -> Dict[str, Any]:
         """Get connection statistics."""
-        total_connections = len(self.active_connections)
+        async with self._connections_lock:
+            total_connections = len(self.active_connections)
+            connections_copy = dict(self.active_connections)
+        
         active_processors = len(self.audio_processors)
         
-        # Calculate average buffer size
-        total_buffer_size = sum(len(conn.audio_buffer) for conn in self.active_connections.values())
+        # Calculate average buffer size (with division by zero check)
+        total_buffer_size = sum(len(conn.audio_buffer) for conn in connections_copy.values())
         avg_buffer_size = total_buffer_size / total_connections if total_connections > 0 else 0
         
         # Count connections by call
         call_connections = {}
-        for connection in self.active_connections.values():
+        for connection in connections_copy.values():
             call_id = connection.call_id
             call_connections[call_id] = call_connections.get(call_id, 0) + 1
         
@@ -517,7 +614,11 @@ class AudioStreamHandler:
                 current_time = datetime.now(timezone.utc)
                 inactive_connections = []
                 
-                for connection_id, connection in self.active_connections.items():
+                # Get connections with lock
+                async with self._connections_lock:
+                    connections_copy = dict(self.active_connections)
+                
+                for connection_id, connection in connections_copy.items():
                     # Check for timeout
                     if (current_time - connection.last_activity).total_seconds() > self.connection_timeout:
                         inactive_connections.append(connection_id)
@@ -531,12 +632,16 @@ class AudioStreamHandler:
                     self.logger.info(f"Cleaned up inactive connection: {connection_id}")
                 
                 if inactive_connections:
+                    # Get remaining connections count with lock
+                    async with self._connections_lock:
+                        remaining_connections = len(self.active_connections)
+                    
                     self.logger.info(
                         f"Cleaned up {len(inactive_connections)} inactive connections",
                         LogCategory.AZURE_COMMUNICATION,
                         extra_data={
                             "cleaned_connections": len(inactive_connections),
-                            "remaining_connections": len(self.active_connections)
+                            "remaining_connections": remaining_connections
                         }
                     )
                 

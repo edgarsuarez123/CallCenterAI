@@ -288,10 +288,24 @@ async def handle_incoming_call_event(acs_service, payload: Dict[str, Any], db: S
         Dict[str, Any]: Event handling result
     """
     try:
-        # Extract call information
+        # Extract call information (with validation)
         call_id = payload.get('callId')
+        if not call_id:
+            logger.error("Missing callId in incoming call event payload", LogCategory.API)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing callId in payload"
+            )
+        
         from_number = payload.get('from', {}).get('phoneNumber', {}).get('value')
         to_number = payload.get('to', {}).get('phoneNumber', {}).get('value')
+        
+        # Validate phone numbers
+        if not from_number:
+            logger.warning(f"Missing from_number in incoming call event for {call_id}", LogCategory.API)
+        
+        if not to_number:
+            logger.warning(f"Missing to_number in incoming call event for {call_id}", LogCategory.API)
         
         logger.info(
             f"Incoming call event: {call_id} from {from_number} to {to_number}",
@@ -304,18 +318,56 @@ async def handle_incoming_call_event(acs_service, payload: Dict[str, Any], db: S
             }
         )
         
-        # Answer the call automatically
-        await acs_service.answer_call(call_id)
+        # Get clinic_id from phone routing (with error handling)
+        clinic_id = 'default-clinic'  # Default fallback
+        try:
+            if to_number:
+                from services.phone_routing_service import get_phone_routing_service
+                phone_routing = get_phone_routing_service(db)
+                clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        except Exception as e:
+            logger.warning(f"Failed to get clinic_id for {to_number}, using default: {e}", LogCategory.API)
+            clinic_id = 'default-clinic'
         
-        # Initialize AI call handling
+        # Issue 101, 105: Check if call already exists before initializing
         from services.call_orchestrator import get_call_orchestrator
+        from models.enums import CallType
         orchestrator = get_call_orchestrator()
         
+        # Issue 101: Check if call already exists in orchestrator before starting
+        async with orchestrator._calls_lock:
+            if call_id in orchestrator.active_calls:
+                logger.info(f"Call {call_id} already exists, skipping initialization", LogCategory.API)
+                return {
+                    "status": "call_already_exists",
+                    "message": f"Call {call_id} already initialized",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+        
+        # Issue 113: Check if call is already answered before attempting to answer
+        try:
+            # Check call status first
+            call_status = await acs_service.get_call_status(call_id)
+            if call_status and call_status.get('status') in ['answered', 'connected', 'active']:
+                logger.info(f"Call {call_id} already answered, skipping answer", LogCategory.API)
+            else:
+                # Answer the call automatically (with error handling)
+                await acs_service.answer_call(call_id)
+        except Exception as e:
+            logger.error(f"Failed to answer call {call_id}: {e}", LogCategory.API, exception=e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to answer call: {e}"
+            )
+        
+        # Initialize AI call handling
         await orchestrator.start_call(
             call_id=call_id,
             caller_phone=from_number,
-            clinic_id='default-clinic',
-            call_type='inbound'
+            clinic_id=clinic_id,
+            call_type=CallType.INBOUND,  # Use enum instead of string
+            call_metadata={'acs_call_id': call_id}  # Issue 112: Store ACS call ID in metadata
         )
         
         return {
@@ -354,8 +406,44 @@ async def handle_call_starting_event(acs_service, payload: Dict[str, Any], db: S
             extra_data={"call_id": call_id, "payload": payload}
         )
         
-        # Answer the call
-        await acs_service.answer_call(call_id)
+        # Issue 133: Verify call state before performing operations
+        # Issue 142: Check if call is already ended
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        async with orchestrator._calls_lock:
+            if call_id not in orchestrator.active_calls:
+                logger.warning(f"Call {call_id} not found in orchestrator for starting event", LogCategory.API)
+                return {
+                    "status": "call_not_found",
+                    "message": f"Call {call_id} not found",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+            
+            call_context = orchestrator.active_calls[call_id]
+            # Issue 142: Check if call is already ended
+            from services.call_orchestrator import CallState
+            if call_context.state in [CallState.ENDING, CallState.ENDED, CallState.ERROR]:
+                logger.info(f"Call {call_id} already in state {call_context.state.value}, skipping start", LogCategory.API)
+                return {
+                    "status": "call_already_ended",
+                    "message": f"Call {call_id} already ended",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+        
+        # Issue 113: Check if call is already answered before attempting to answer
+        try:
+            call_status = await acs_service.get_call_status(call_id)
+            if call_status and call_status.get('status') in ['answered', 'connected', 'active']:
+                logger.info(f"Call {call_id} already answered, skipping answer", LogCategory.API)
+            else:
+                # Answer the call
+                await acs_service.answer_call(call_id)
+        except Exception as answer_error:
+            logger.error(f"Failed to answer call {call_id}: {answer_error}", LogCategory.API, exception=answer_error)
+            # Continue - answer failure shouldn't stop the event handling
         
         return {
             "status": "call_starting",
@@ -428,8 +516,22 @@ async def handle_incoming_call_received_event(acs_service, payload: Dict[str, An
     """
     try:
         call_connection_id = payload.get('callConnectionId')
+        if not call_connection_id:
+            logger.error("Missing callConnectionId in IncomingCallReceived event payload", LogCategory.API)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing callConnectionId in payload"
+            )
+        
         from_number = payload.get('from', {}).get('phoneNumber', {}).get('value')
         to_number = payload.get('to', {}).get('phoneNumber', {}).get('value')
+        
+        # Validate phone numbers
+        if not from_number:
+            logger.warning(f"Missing from_number in IncomingCallReceived event for {call_connection_id}", LogCategory.API)
+        
+        if not to_number:
+            logger.warning(f"Missing to_number in IncomingCallReceived event for {call_connection_id}", LogCategory.API)
         
         # Use call_connection_id consistently as call_id
         call_id = call_connection_id
@@ -445,35 +547,92 @@ async def handle_incoming_call_received_event(acs_service, payload: Dict[str, An
             }
         )
         
-        # Get clinic_id from phone routing
-        from services.phone_routing_service import get_phone_routing_service
-        phone_routing = get_phone_routing_service(db)
-        clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        # Get clinic_id from phone routing (with error handling)
+        clinic_id = 'default-clinic'  # Default fallback
+        try:
+            if to_number:
+                from services.phone_routing_service import get_phone_routing_service
+                phone_routing = get_phone_routing_service(db)
+                clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        except Exception as e:
+            logger.warning(f"Failed to get clinic_id for {to_number}, using default: {e}", LogCategory.API)
+            clinic_id = 'default-clinic'
         
-        # Register the incoming call in ACS service
-        await acs_service.register_incoming_call(
-            call_id=call_id,
-            caller_phone=from_number,
-            clinic_id=clinic_id,
-            acs_call_id=call_connection_id
-        )
-        
-        # Store mapping for CallConnected event
-        await acs_service.store_call_id_mapping(call_id, call_connection_id)
-        
-        # Answer the call
-        await acs_service.answer_call(call_id)
-        
-        # Initialize AI call handling
+        # Issue 101, 105: Check if call already exists before initializing
         from services.call_orchestrator import get_call_orchestrator
+        from models.enums import CallType
         orchestrator = get_call_orchestrator()
         
+        # Issue 101: Check if call already exists in orchestrator before starting
+        async with orchestrator._calls_lock:
+            if call_id in orchestrator.active_calls:
+                logger.info(f"Call {call_id} already exists, skipping initialization", LogCategory.API)
+                return {
+                    "status": "call_already_exists",
+                    "message": f"Call {call_id} already initialized",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+        
+        # Issue 104: Store call ID mapping BEFORE calling orchestrator.start_call
+        # Store mapping for CallConnected event (with error handling)
+        try:
+            await acs_service.store_call_id_mapping(call_id, call_connection_id)
+        except Exception as e:
+            logger.warning(f"Failed to store call ID mapping for {call_id}: {e}", LogCategory.API)
+            # Issue 147: Handle mapping storage failures - retry or fail call if required
+            # For now, log warning but continue - mapping might be stored later
+        
+        # Register the incoming call in ACS service (with error handling)
+        try:
+            await acs_service.register_incoming_call(
+                call_id=call_id,
+                caller_phone=from_number,
+                clinic_id=clinic_id,
+                acs_call_id=call_connection_id
+            )
+        except Exception as e:
+            # Issue 110: Check if call already registered (duplicate registration)
+            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                logger.info(f"Call {call_id} already registered, continuing", LogCategory.API)
+            else:
+                logger.error(f"Failed to register incoming call {call_id}: {e}", LogCategory.API, exception=e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to register incoming call: {e}"
+                )
+        
+        # Issue 113: Check if call is already answered before attempting to answer
+        try:
+            # Check call status first
+            call_status = await acs_service.get_call_status(call_id)
+            if call_status and call_status.get('status') in ['answered', 'connected', 'active']:
+                logger.info(f"Call {call_id} already answered, skipping answer", LogCategory.API)
+            else:
+                # Answer the call (with error handling)
+                await acs_service.answer_call(call_id)
+        except Exception as e:
+            logger.error(f"Failed to answer call {call_id}: {e}", LogCategory.API, exception=e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to answer call: {e}"
+            )
+        
+        # Initialize AI call handling
         await orchestrator.start_call(
             call_id=call_id,
             caller_phone=from_number,
             clinic_id=clinic_id,
-            call_type='inbound'
+            call_type=CallType.INBOUND,  # Use enum instead of string
+            call_metadata={'acs_call_id': call_connection_id}  # Issue 112: Store ACS call ID in metadata
         )
+        
+        # Play greeting after call starts (Issue 3: Missing Greeting in Some Call Paths)
+        try:
+            await orchestrator.play_greeting(call_id)
+        except Exception as e:
+            logger.error(f"Failed to play greeting for call {call_id}: {e}", LogCategory.API, exception=e)
+            # Continue - greeting failure shouldn't stop the call
         
         return {
             "status": "call_received",
@@ -504,6 +663,12 @@ async def handle_call_connected_event(acs_service, payload: Dict[str, Any], db: 
     """
     try:
         call_connection_id = payload.get('callConnectionId')
+        if not call_connection_id:
+            logger.error("Missing callConnectionId in CallConnected event payload", LogCategory.API)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing callConnectionId in payload"
+            )
         
         logger.info(
             f"CallConnected event: {call_connection_id}",
@@ -511,11 +676,48 @@ async def handle_call_connected_event(acs_service, payload: Dict[str, Any], db: 
             extra_data={"call_connection_id": call_connection_id, "payload": payload}
         )
         
-        # Play greeting
-        from services.call_orchestrator import get_call_orchestrator
+        # Get call_id from mapping (call_connection_id is the ACS ID, we need our call_id)
+        acs_service = get_azure_communication_service()
+        call_id = await acs_service.get_call_id_from_mapping(call_connection_id) or call_connection_id
+        
+        # Issue 125: Coordinate state updates between handlers
+        # Issue 133: Verify call state before performing operations
+        # Issue 142: Check if call is already ended
+        from services.call_orchestrator import get_call_orchestrator, CallState
         orchestrator = get_call_orchestrator()
         
-        await orchestrator.play_greeting(call_connection_id)
+        async with orchestrator._calls_lock:
+            if call_id not in orchestrator.active_calls:
+                logger.warning(f"Call {call_id} not found in orchestrator for connected event", LogCategory.API)
+                return {
+                    "status": "call_not_found",
+                    "message": f"Call {call_id} not found",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+            
+            call_context = orchestrator.active_calls[call_id]
+            # Issue 142: Check if call is already ended
+            if call_context.state in [CallState.ENDING, CallState.ENDED, CallState.ERROR]:
+                logger.info(f"Call {call_id} already in state {call_context.state.value}, skipping connected event", LogCategory.API)
+                return {
+                    "status": "call_already_ended",
+                    "message": f"Call {call_id} already ended",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+            
+            # Issue 125: Update call state to CONNECTED if not already
+            if call_context.state != CallState.CONNECTED:
+                call_context.state = CallState.CONNECTED
+                call_context.last_activity = datetime.now(AST)
+        
+        # Play greeting (with error handling)
+        try:
+            await orchestrator.play_greeting(call_id)
+        except Exception as e:
+            logger.error(f"Failed to play greeting for call {call_id}: {e}", LogCategory.API, exception=e)
+            # Continue - greeting failure shouldn't stop the call
         
         return {
             "status": "call_connected",
@@ -546,6 +748,12 @@ async def handle_call_disconnected_event(acs_service, payload: Dict[str, Any], d
     """
     try:
         call_connection_id = payload.get('callConnectionId')
+        if not call_connection_id:
+            logger.error("Missing callConnectionId in CallDisconnected event payload", LogCategory.API)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing callConnectionId in payload"
+            )
         
         logger.info(
             f"CallDisconnected event: {call_connection_id}",
@@ -553,11 +761,43 @@ async def handle_call_disconnected_event(acs_service, payload: Dict[str, Any], d
             extra_data={"call_connection_id": call_connection_id, "payload": payload}
         )
         
-        # End AI call handling
-        from services.call_orchestrator import get_call_orchestrator
+        # Get call_id from mapping (call_connection_id is the ACS ID, we need our call_id)
+        acs_service = get_azure_communication_service()
+        call_id = await acs_service.get_call_id_from_mapping(call_connection_id) or call_connection_id
+        
+        # Issue 125: Coordinate state updates between handlers
+        # Issue 133: Verify call state before performing operations
+        # Issue 142: Check if call is already ended
+        from services.call_orchestrator import get_call_orchestrator, CallState
         orchestrator = get_call_orchestrator()
         
-        await orchestrator.end_call(call_connection_id)
+        async with orchestrator._calls_lock:
+            if call_id not in orchestrator.active_calls:
+                logger.warning(f"Call {call_id} not found in orchestrator for disconnected event", LogCategory.API)
+                return {
+                    "status": "call_not_found",
+                    "message": f"Call {call_id} not found",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+            
+            call_context = orchestrator.active_calls[call_id]
+            # Issue 142: Check if call is already ended
+            if call_context.state in [CallState.ENDING, CallState.ENDED]:
+                logger.info(f"Call {call_id} already in state {call_context.state.value}, skipping disconnect", LogCategory.API)
+                return {
+                    "status": "call_already_ended",
+                    "message": f"Call {call_id} already ended",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+        
+        # End AI call handling (with error handling)
+        try:
+            await orchestrator.end_call(call_id)
+        except Exception as e:
+            logger.error(f"Failed to end call {call_id}: {e}", LogCategory.API, exception=e)
+            # Continue - end call failure shouldn't raise exception
         
         return {
             "status": "call_disconnected",
@@ -588,6 +828,9 @@ async def handle_event_grid_call_started(acs_service, payload: Dict[str, Any], d
     """
     try:
         call_id = payload.get('data', {}).get('callId')
+        if not call_id:
+            logger.warning("Missing callId in Event Grid CallStarted event payload", LogCategory.API)
+            call_id = payload.get('id', 'unknown')
         
         logger.info(
             f"Event Grid CallStarted event: {call_id}",
@@ -624,12 +867,39 @@ async def handle_event_grid_call_ended(acs_service, payload: Dict[str, Any], db:
     """
     try:
         call_id = payload.get('data', {}).get('callId')
+        if not call_id:
+            logger.warning("Missing callId in Event Grid CallEnded event payload", LogCategory.API)
+            call_id = payload.get('id', 'unknown')
+        
+        # Validate call_id
+        if not call_id or call_id == 'unknown':
+            logger.warning("Invalid call_id in Event Grid CallEnded event", LogCategory.API)
+            # Continue with processing even if call_id is invalid
         
         logger.info(
             f"Event Grid CallEnded event: {call_id}",
             LogCategory.API,
             extra_data={"call_id": call_id, "payload": payload}
         )
+        
+        # Get call_id from mapping if available (with error handling)
+        try:
+            acs_service = get_azure_communication_service()
+            mapped_call_id = await acs_service.get_call_id_from_mapping(call_id)
+            if mapped_call_id:
+                call_id = mapped_call_id
+        except Exception as e:
+            logger.warning(f"Failed to get call_id from mapping for {call_id}: {e}", LogCategory.API)
+            # Continue with original call_id
+        
+        # End AI call handling (with error handling)
+        try:
+            from services.call_orchestrator import get_call_orchestrator
+            orchestrator = get_call_orchestrator()
+            await orchestrator.end_call(call_id)
+        except Exception as e:
+            logger.error(f"Failed to end call {call_id}: {e}", LogCategory.API, exception=e)
+            # Continue - end call failure shouldn't raise exception
         
         return {
             "status": "call_ended",
@@ -679,14 +949,21 @@ async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], 
             try:
                 # Decode the base64 serverCallId to get a readable call ID
                 decoded_id = base64.b64decode(server_call_id).decode('utf-8')
-                # Extract a shorter ID from the decoded string
-                call_id = f"EVENT_GRID_{decoded_id.split('/')[-1].split('?')[0][:12]}"
-            except:
-                # Fallback to using the base64 string directly
-                call_id = f"EVENT_GRID_{server_call_id[:12]}"
+                # Extract a shorter ID from the decoded string (with bounds check)
+                parts = decoded_id.split('/')
+                if parts and len(parts) > 0:
+                    last_part = parts[-1].split('?')[0]
+                    call_id = f"EVENT_GRID_{last_part[:12] if len(last_part) > 12 else last_part}"
+                else:
+                    call_id = f"EVENT_GRID_{decoded_id[:12] if len(decoded_id) > 12 else decoded_id}"
+            except Exception as e:
+                logger.warning(f"Failed to decode serverCallId {server_call_id}: {e}", LogCategory.API)
+                # Fallback to using the base64 string directly (with bounds check)
+                call_id = f"EVENT_GRID_{server_call_id[:12] if len(server_call_id) > 12 else server_call_id}"
         else:
-            # Generate a fallback call ID
-            call_id = f"EVENT_GRID_{payload.get('id', 'unknown')[:12]}"
+            # Generate a fallback call ID (with bounds check)
+            payload_id = payload.get('id', 'unknown')
+            call_id = f"EVENT_GRID_{payload_id[:12] if len(payload_id) > 12 else payload_id}"
 
         logger.info(
             f"Event Grid IncomingCall event from {from_number} to {to_number}",
@@ -733,48 +1010,78 @@ async def handle_event_grid_incoming_call(acs_service, payload: Dict[str, Any], 
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to answer incoming call"
             )
-
+        
         call_connection_id = answer_result.get('call_connection_id')
+        if not call_connection_id:
+            logger.error(f"Missing call_connection_id in answer_result for {call_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Missing call_connection_id in answer result"
+            )
+        
         logger.info(f"Call answered with connection ID: {call_connection_id}")
         
-        # Determine clinic from phone number mapping
-        from services.phone_routing_service import get_phone_routing_service
-        from services.database import get_db_session
-
-        db = next(get_db_session())
+        # Determine clinic from phone number mapping (with proper database session management)
+        clinic_id = 'default-clinic'  # Default fallback
         try:
-            phone_routing = get_phone_routing_service(db)
-            clinic_id = phone_routing.get_clinic_by_phone(to_number)
-            
-            if not clinic_id:
-                # Fallback to default clinic
-                clinic_id = 'default-clinic'
-                logger.warning(
-                    f"No clinic mapping for {to_number}, using default",
-                    LogCategory.ROUTING,
-                    extra_data={"to_number": to_number}
-                )
-        finally:
-            db.close()
+            if to_number:
+                from services.phone_routing_service import get_phone_routing_service
+                phone_routing = get_phone_routing_service(db)
+                clinic_id = phone_routing.get_clinic_by_phone(to_number) or 'default-clinic'
+        except Exception as e:
+            logger.warning(f"Failed to get clinic_id for {to_number}, using default: {e}", LogCategory.API)
+            clinic_id = 'default-clinic'
 
+        # Issue 101, 105: Check if call already exists before initializing
+        from services.call_orchestrator import get_call_orchestrator
+        from models.enums import CallType
+        orchestrator = get_call_orchestrator()
+        
+        # Issue 101: Check if call already exists in orchestrator before starting
+        async with orchestrator._calls_lock:
+            if call_id in orchestrator.active_calls:
+                logger.info(f"Call {call_id} already exists, skipping initialization", LogCategory.API)
+                return {
+                    "status": "call_already_exists",
+                    "message": f"Call {call_id} already initialized",
+                    "call_id": call_id,
+                    "timestamp": datetime.now(AST).isoformat()
+                }
+        
+        # Issue 104: Store call ID mapping BEFORE calling orchestrator.start_call
+        try:
+            await acs_service.store_call_id_mapping(call_id, call_connection_id)
+        except Exception as e:
+            logger.warning(f"Failed to store call ID mapping for {call_id}: {e}", LogCategory.API)
+            # Issue 147: Handle mapping storage failures - retry or fail call if required
+        
         # Register the incoming call in ACS service
-        await acs_service.register_incoming_call(
-            call_id=call_id,
-            caller_phone=from_number,
-            clinic_id=clinic_id,
-            acs_call_id=call_connection_id  # Use the actual call connection ID
-        )
+        try:
+            await acs_service.register_incoming_call(
+                call_id=call_id,
+                caller_phone=from_number,
+                clinic_id=clinic_id,
+                acs_call_id=call_connection_id  # Use the actual call connection ID
+            )
+        except Exception as e:
+            # Issue 110: Check if call already registered (duplicate registration)
+            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                logger.info(f"Call {call_id} already registered, continuing", LogCategory.API)
+            else:
+                logger.error(f"Failed to register incoming call {call_id}: {e}", LogCategory.API, exception=e)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to register incoming call: {e}"
+                )
 
         # Initialize call orchestrator
-        from services.call_orchestrator import get_call_orchestrator
-        orchestrator = get_call_orchestrator()
-
         # Start AI conversation with the Event Grid call ID
         await orchestrator.start_call(
             call_id=call_id,
             caller_phone=from_number,
             clinic_id=clinic_id,
-            call_type='inbound'
+            call_type=CallType.INBOUND,  # Use enum instead of string
+            call_metadata={'acs_call_id': call_connection_id}  # Issue 112: Store ACS call ID in metadata
         )
 
         # Play initial greeting
@@ -1076,16 +1383,108 @@ async def websocket_audio_stream(
     connection_id = None
     
     try:
+        # Issue 111: Verify call exists in orchestrator before connecting audio stream
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        # Issue 111: Check if call exists before connecting
+        async with orchestrator._calls_lock:
+            if call_id not in orchestrator.active_calls:
+                logger.warning(f"Call {call_id} not found in orchestrator, closing WebSocket", LogCategory.API)
+                await websocket.close(code=1008, reason="Call not found")
+                return
+        
         audio_handler = get_audio_stream_handler()
         
-        # Connect audio stream
+        # Issue 137: Check if connection already exists for this call
+        # Check for existing connections before creating new ones
+        async with audio_handler._connections_lock:
+            existing_connections = [
+                conn_id for conn_id, conn in audio_handler.active_connections.items()
+                if conn.call_id == call_id and conn.is_active
+            ]
+            if existing_connections:
+                logger.warning(
+                    f"Existing audio connection(s) found for call {call_id}: {existing_connections}",
+                    LogCategory.API
+                )
+                # Issue 137: Close existing connections or handle multiple connections gracefully
+                # For now, close existing connections to prevent conflicts
+                for existing_conn_id in existing_connections:
+                    try:
+                        await audio_handler.disconnect_audio_stream(existing_conn_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to close existing connection {existing_conn_id}: {e}")
+        
+        # Issue 132: Verify connection succeeds before continuing
         connection_id = await audio_handler.connect_audio_stream(websocket, call_id)
+        if not connection_id:
+            logger.error(f"Failed to connect audio stream for call {call_id}", LogCategory.API)
+            await websocket.close(code=1011, reason="Failed to connect audio stream")
+            return
         
         logger.info(
             f"Audio stream connected for call {call_id}",
             LogCategory.API,
             extra_data={"call_id": call_id, "connection_id": connection_id}
         )
+        
+        # Issue 4: Audio Stream Handler Not Connected - Ensure audio stream handler is connected to call context
+        # Update call context with audio stream handler if not already set
+        async with orchestrator._calls_lock:
+            if call_id in orchestrator.active_calls:
+                call_context = orchestrator.active_calls[call_id]
+                if not call_context.audio_stream_handler:
+                    call_context.audio_stream_handler = audio_handler
+                    # Initialize audio stream for the call context
+                    await orchestrator._initialize_audio_stream(call_context)
+        
+        # Issue 124: Verify STT service availability before starting recognition
+        from services.azure_speech_stt import get_speech_to_text_service
+        stt_service = get_speech_to_text_service()
+        
+        # Issue 124: Check if STT service is available
+        if not stt_service:
+            logger.warning(f"STT service not available for call {call_id}, continuing without STT", LogCategory.API)
+        else:
+            # Issue 128: Check if STT recognition is already started before starting it again
+            try:
+                # Check if recognition is already active for this call
+                # Note: This assumes STT service has a method to check active recognitions
+                # If not available, we'll catch the error when starting
+                recognition_active = False
+                if hasattr(stt_service, 'is_recognition_active'):
+                    recognition_active = await stt_service.is_recognition_active(call_id)
+                
+                if not recognition_active:
+                    # Register audio processor to feed STT
+                    async def audio_processor(chunk, connection):
+                        # Push audio to STT recognizer
+                        await stt_service.process_audio_chunk(call_id, chunk.data)
+                    
+                    # Issue 141: Verify audio processor registration succeeds
+                    try:
+                        audio_handler.register_audio_processor(connection_id, audio_processor)
+                    except Exception as reg_error:
+                        logger.error(f"Failed to register audio processor for call {call_id}: {reg_error}", LogCategory.API)
+                        # Continue without audio processor - STT won't work but call can continue
+                    
+                    # Start STT continuous recognition
+                    try:
+                        await stt_service.start_continuous_recognition(call_id, primary_language="en-US", secondary_language="es-ES")
+                        logger.info(f"Started STT recognition for call {call_id}", LogCategory.API)
+                    except Exception as e:
+                        # Issue 128: Handle case where recognition is already started
+                        if "already" in str(e).lower() or "active" in str(e).lower():
+                            logger.info(f"STT recognition already active for call {call_id}", LogCategory.API)
+                        else:
+                            logger.error(f"Failed to start STT recognition for call {call_id}: {e}", LogCategory.API, exception=e)
+                            # Continue - STT failure shouldn't stop the call
+                else:
+                    logger.info(f"STT recognition already active for call {call_id}, skipping start", LogCategory.API)
+            except Exception as e:
+                logger.error(f"Error checking STT recognition status for call {call_id}: {e}", LogCategory.API)
+                # Continue - STT failure shouldn't stop the call
         
         # Keep connection alive
         while True:
@@ -1158,7 +1557,7 @@ async def get_cache_statistics():
         from services.response_cache import get_response_cache_service
         cache_service = get_response_cache_service()
         
-        stats = cache_service.get_statistics()
+        stats = await cache_service.get_cache_statistics()
         
         return {
             "cache_statistics": stats,
@@ -1188,7 +1587,7 @@ async def clear_cache(pattern: Optional[str] = None):
         from services.response_cache import get_response_cache_service
         cache_service = get_response_cache_service()
         
-        cleared_count = cache_service.clear_cache(pattern)
+        cleared_count = await cache_service.clear_cache(pattern)
         
         return {
             "status": "success",
@@ -1217,7 +1616,7 @@ async def get_cache_health():
         from services.response_cache import get_response_cache_service
         cache_service = get_response_cache_service()
         
-        health_status = cache_service.get_health_status()
+        health_status = await cache_service.health_check()
         
         return {
             "cache_health": health_status,
@@ -1238,37 +1637,130 @@ async def websocket_audio_stream(
     call_connection_id: str
 ):
     """WebSocket endpoint for ACS media streaming."""
+    connection_id = None
+    
     try:
+        # Issue 146: Verify WebSocket acceptance succeeds before continuing
         await websocket.accept()
         
         audio_handler = get_audio_stream_handler()
         acs_service = get_azure_communication_service()
         
-        # Find call by ACS connection ID
+        # Issue 103: Find call by ACS connection ID with reliable mapping lookup
+        # Issue 104: Use mapping stored before call starts
         call_id = None
-        for cid, call_state in acs_service.active_calls.items():
-            if call_state.acs_call_id == call_connection_id:
-                call_id = cid
-                break
+        try:
+            # Try to get call_id from mapping first
+            if hasattr(acs_service, 'get_call_id_from_connection_id'):
+                call_id = await acs_service.get_call_id_from_connection_id(call_connection_id)
+            
+            # Issue 103: Fallback: search in orchestrator by acs_call_id in metadata
+            if not call_id:
+                from services.call_orchestrator import get_call_orchestrator
+                orchestrator = get_call_orchestrator()
+                async with orchestrator._calls_lock:
+                    for cid, call_context in orchestrator.active_calls.items():
+                        metadata = call_context.metadata or {}
+                        if metadata.get('acs_call_id') == call_connection_id:
+                            call_id = cid
+                            break
+            
+            # Issue 103: Additional fallback: search in ACS service active calls
+            if not call_id:
+                active_calls = await acs_service.get_active_calls()
+                for cid, call_state in active_calls.items():
+                    if hasattr(call_state, 'acs_call_id') and call_state.acs_call_id == call_connection_id:
+                        call_id = cid
+                        break
+        except Exception as e:
+            logger.warning(f"Failed to find call for connection {call_connection_id}: {e}", LogCategory.API)
         
+        # Issue 103: Handle missing mapping gracefully
         if not call_id:
             logger.warning(f"No call found for connection {call_connection_id}")
             await websocket.close(code=1008, reason="Call not found")
             return
         
-        # Connect audio stream
+        # Issue 111: Verify call exists in orchestrator before connecting audio stream
+        from services.call_orchestrator import get_call_orchestrator
+        orchestrator = get_call_orchestrator()
+        
+        async with orchestrator._calls_lock:
+            if call_id not in orchestrator.active_calls:
+                logger.warning(f"Call {call_id} not found in orchestrator, closing WebSocket", LogCategory.API)
+                await websocket.close(code=1008, reason="Call not found")
+                return
+        
+        # Issue 137: Check if connection already exists for this call
+        async with audio_handler._connections_lock:
+            existing_connections = [
+                conn_id for conn_id, conn in audio_handler.active_connections.items()
+                if conn.call_id == call_id and conn.is_active
+            ]
+            if existing_connections:
+                logger.warning(
+                    f"Existing audio connection(s) found for call {call_id}: {existing_connections}",
+                    LogCategory.API
+                )
+                # Close existing connections to prevent conflicts
+                for existing_conn_id in existing_connections:
+                    try:
+                        await audio_handler.disconnect_audio_stream(existing_conn_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to close existing connection {existing_conn_id}: {e}")
+        
+        # Issue 132: Verify connection succeeds before continuing
         connection_id = await audio_handler.connect_audio_stream(websocket, call_id)
+        if not connection_id:
+            logger.error(f"Failed to connect audio stream for call {call_id}", LogCategory.API)
+            await websocket.close(code=1011, reason="Failed to connect audio stream")
+            return
         
-        # Start STT recognition for this call
-        from services.azure_speech_stt import get_stt_service
-        stt_service = get_stt_service()
+        # Update call context with audio stream handler if not already set
+        async with orchestrator._calls_lock:
+            if call_id in orchestrator.active_calls:
+                call_context = orchestrator.active_calls[call_id]
+                if not call_context.audio_stream_handler:
+                    call_context.audio_stream_handler = audio_handler
+                    # Initialize audio stream for the call context
+                    await orchestrator._initialize_audio_stream(call_context)
         
-        # Register audio processor to feed STT
-        async def audio_processor(chunk, connection):
-            # Push audio to STT recognizer
-            await stt_service.process_audio_chunk(call_id, chunk.data)
+        # Issue 124: Verify STT service availability before starting recognition
+        from services.azure_speech_stt import get_speech_to_text_service
+        stt_service = get_speech_to_text_service()
         
-        audio_handler.register_audio_processor(connection_id, audio_processor)
+        if not stt_service:
+            logger.warning(f"STT service not available for call {call_id}, continuing without STT", LogCategory.API)
+        else:
+            # Issue 128: Check if STT recognition is already started
+            recognition_active = False
+            if hasattr(stt_service, 'is_recognition_active'):
+                recognition_active = await stt_service.is_recognition_active(call_id)
+            
+            if not recognition_active:
+                # Register audio processor to feed STT
+                async def audio_processor(chunk, connection):
+                    # Push audio to STT recognizer
+                    await stt_service.process_audio_chunk(call_id, chunk.data)
+                
+                # Issue 141: Verify audio processor registration succeeds
+                try:
+                    audio_handler.register_audio_processor(connection_id, audio_processor)
+                except Exception as reg_error:
+                    logger.error(f"Failed to register audio processor for call {call_id}: {reg_error}", LogCategory.API)
+                
+                # Start STT continuous recognition
+                try:
+                    await stt_service.start_continuous_recognition(call_id, primary_language="en-US", secondary_language="es-ES")
+                    logger.info(f"Started STT recognition for call {call_id}", LogCategory.API)
+                except Exception as e:
+                    # Issue 128: Handle case where recognition is already started
+                    if "already" in str(e).lower() or "active" in str(e).lower():
+                        logger.info(f"STT recognition already active for call {call_id}", LogCategory.API)
+                    else:
+                        logger.error(f"Failed to start STT recognition for call {call_id}: {e}", LogCategory.API, exception=e)
+            else:
+                logger.info(f"STT recognition already active for call {call_id}, skipping start", LogCategory.API)
         
         # Handle incoming audio from ACS
         await audio_handler.handle_incoming_audio(connection_id)
@@ -1279,3 +1771,11 @@ async def websocket_audio_stream(
             await websocket.close(code=1011, reason="Internal error")
         except:
             pass
+    finally:
+        # Issue 118: Ensure all resources are properly cleaned up on connection failure
+        if connection_id:
+            try:
+                audio_handler = get_audio_stream_handler()
+                await audio_handler.disconnect_audio_stream(connection_id)
+            except Exception as e:
+                logger.error(f"Error cleaning up audio stream for call_connection_id {call_connection_id}: {e}")

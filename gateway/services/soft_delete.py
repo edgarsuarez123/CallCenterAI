@@ -13,7 +13,7 @@ Key Features:
 - Data minimization while maintaining compliance
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Type
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -77,9 +77,17 @@ class SoftDeleteService:
             bool: True if successful, False otherwise
         """
         try:
+            # Get primary key column
+            primary_key_columns = model_class.__table__.primary_key.columns.keys()
+            if not primary_key_columns:
+                logger.error(f"Model {model_class.__tablename__} has no primary key")
+                return False
+            
+            primary_key_column = primary_key_columns[0]
+            
             # Get the record
             record = self.db.query(model_class).filter(
-                getattr(model_class, model_class.__table__.primary_key.columns.keys()[0]) == record_id
+                getattr(model_class, primary_key_column) == record_id
             ).first()
             
             if not record:
@@ -98,7 +106,12 @@ class SoftDeleteService:
             record.deletion_reason = deletion_reason
             
             # Commit the change
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit soft delete for {model_class.__tablename__} record {record_id}: {commit_error}")
+                return False
             
             # Log the deletion in audit trail
             self._log_deletion_audit(
@@ -138,7 +151,14 @@ class SoftDeleteService:
             Dict mapping record_id to success status
         """
         results = {}
-        primary_key_column = model_class.__table__.primary_key.columns.keys()[0]
+        
+        # Get primary key column
+        primary_key_columns = model_class.__table__.primary_key.columns.keys()
+        if not primary_key_columns:
+            logger.error(f"Model {model_class.__tablename__} has no primary key")
+            return {record_id: False for record_id in record_ids}
+        
+        primary_key_column = primary_key_columns[0]
         
         try:
             # Get all records
@@ -165,7 +185,12 @@ class SoftDeleteService:
                 results[record_id] = True
             
             # Commit all changes
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit soft delete multiple records from {model_class.__tablename__}: {commit_error}")
+                return {record_id: False for record_id in record_ids}
             
             # Log deletions in audit trail
             for record_id, success in results.items():
@@ -205,10 +230,18 @@ class SoftDeleteService:
             bool: True if successful, False otherwise
         """
         try:
+            # Get primary key column
+            primary_key_columns = model_class.__table__.primary_key.columns.keys()
+            if not primary_key_columns:
+                logger.error(f"Model {model_class.__tablename__} has no primary key")
+                return False
+            
+            primary_key_column = primary_key_columns[0]
+            
             # Get the soft deleted record
             record = self.db.query(model_class).filter(
                 and_(
-                    getattr(model_class, model_class.__table__.primary_key.columns.keys()[0]) == record_id,
+                    getattr(model_class, primary_key_column) == record_id,
                     getattr(model_class, 'is_deleted') == 'yes'
                 )
             ).first()
@@ -224,7 +257,12 @@ class SoftDeleteService:
             record.deletion_reason = None
             
             # Commit the change
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit recovery for {model_class.__tablename__} record {record_id}: {commit_error}")
+                return False
             
             # Log the recovery in audit trail
             self._log_recovery_audit(
@@ -348,7 +386,13 @@ class SoftDeleteService:
                     for record in eligible_records:
                         self.db.delete(record)
                     
-                    self.db.commit()
+                    try:
+                        self.db.commit()
+                    except Exception as commit_error:
+                        self.db.rollback()
+                        logger.error(f"Failed to commit retention policy enforcement for {table_name}: {commit_error}")
+                        results[table_name] = {'error': str(commit_error)}
+                        continue
                     
                     # Log the permanent deletion
                     self._log_retention_audit(table_name, record_count, cutoff_date)
@@ -384,7 +428,11 @@ class SoftDeleteService:
                 success='yes'
             )
             self.db.add(audit_log)
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit deletion audit log: {commit_error}")
         except Exception as e:
             logger.error(f"Failed to log deletion audit: {e}")
     
@@ -407,7 +455,11 @@ class SoftDeleteService:
                 success='yes'
             )
             self.db.add(audit_log)
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit recovery audit log: {commit_error}")
         except Exception as e:
             logger.error(f"Failed to log recovery audit: {e}")
     
@@ -429,7 +481,11 @@ class SoftDeleteService:
                 success='yes'
             )
             self.db.add(audit_log)
-            self.db.commit()
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                logger.error(f"Failed to commit retention audit log: {commit_error}")
         except Exception as e:
             logger.error(f"Failed to log retention audit: {e}")
 
@@ -468,7 +524,12 @@ class SoftDeleteQueryMixin:
             self.deleted_at = datetime.now(timezone.utc)
             self.deleted_by = deleted_by
             self.deletion_reason = deletion_reason
-            db_session.commit()
+            try:
+                db_session.commit()
+            except Exception as commit_error:
+                db_session.rollback()
+                logger.error(f"Failed to commit soft delete: {commit_error}")
+                return False
             return True
         return False
     
@@ -479,7 +540,12 @@ class SoftDeleteQueryMixin:
             self.deleted_at = None
             self.deleted_by = None
             self.deletion_reason = None
-            db_session.commit()
+            try:
+                db_session.commit()
+            except Exception as commit_error:
+                db_session.rollback()
+                logger.error(f"Failed to commit recovery: {commit_error}")
+                return False
             return True
         return False
 

@@ -92,6 +92,10 @@ class ReminderService:
         Returns:
             Created Reminder instance
         """
+        # Validate inputs
+        if not appointment_id:
+            raise ValidationError("appointment_id cannot be empty")
+        
         try:
             # Get appointment and related data
             appointment = db.query(Appointment).filter(
@@ -103,6 +107,27 @@ class ReminderService:
                 raise CallCenterAIException(
                     f"Appointment {appointment_id} not found",
                     error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
+            
+            # Issue 26: Check if appointment is cancelled before scheduling reminder
+            if appointment.status == 'cancelled':
+                self.logger.info(f"Appointment {appointment_id} is cancelled, skipping reminder scheduling", LogCategory.REMINDER)
+                raise CallCenterAIException(
+                    "Cannot schedule reminder for cancelled appointment",
+                    error_code=ErrorCode.VALIDATION_ERROR
+                )
+            
+            # Issue 74: Check if reminder already exists for this appointment
+            existing_reminder = db.query(Reminder).filter(
+                Reminder.appointment_id == appointment_id,
+                Reminder.is_deleted == 'no',
+                Reminder.status.in_(['scheduled', 'pending'])
+            ).first()
+            if existing_reminder:
+                self.logger.info(f"Reminder already exists for appointment {appointment_id}, skipping duplicate", LogCategory.REMINDER)
+                raise CallCenterAIException(
+                    "A reminder already exists for this appointment",
+                    error_code=ErrorCode.VALIDATION_ERROR
                 )
             
             # Get clinic settings
@@ -153,8 +178,13 @@ class ReminderService:
             )
             
             db.add(reminder)
-            db.commit()
-            db.refresh(reminder)
+            try:
+                db.commit()
+                db.refresh(reminder)
+            except Exception as commit_error:
+                db.rollback()
+                self.logger.error(f"Failed to commit reminder: {commit_error}", LogCategory.REMINDER, exception=commit_error)
+                raise
             
             self.logger.info(f"Reminder {reminder_id} scheduled for appointment {appointment_id} at {scheduled_time}", LogCategory.REMINDER,
                             extra_data={
@@ -188,6 +218,10 @@ class ReminderService:
         Returns:
             Dictionary with call outcome details
         """
+        # Validate inputs
+        if not reminder_id:
+            raise ValidationError("reminder_id cannot be empty")
+        
         try:
             # Get reminder and related data
             reminder = db.query(Reminder).filter(
@@ -219,24 +253,100 @@ class ReminderService:
                     error_code=ErrorCode.RESOURCE_NOT_FOUND
                 )
             
+            # Issue 27: Check if appointment is cancelled before executing reminder
+            if appointment.status == 'cancelled':
+                self.logger.info(f"Appointment {reminder.appointment_id} is cancelled, skipping reminder execution", LogCategory.REMINDER)
+                # Update reminder status to cancelled
+                reminder.status = 'cancelled'
+                reminder.completed_at = datetime.now(AST)
+                reminder.deletion_reason = 'appointment_cancelled'
+                try:
+                    db.commit()
+                except Exception as commit_error:
+                    db.rollback()
+                    self.logger.error(f"Failed to update reminder status: {commit_error}", LogCategory.REMINDER)
+                raise CallCenterAIException(
+                    "Cannot execute reminder for cancelled appointment",
+                    error_code=ErrorCode.VALIDATION_ERROR
+                )
+            
+            # Issue 73: Check and update reminder status atomically to prevent duplicate execution
+            # Use SELECT FOR UPDATE to lock the reminder row
+            from sqlalchemy import select
+            locked_reminder = db.execute(
+                select(Reminder).where(
+                    Reminder.reminder_id == reminder_id,
+                    Reminder.status.in_(['scheduled', 'failed'])
+                ).with_for_update()
+            ).scalar_one_or_none()
+            
+            if not locked_reminder or locked_reminder.status not in ['scheduled', 'failed']:
+                raise CallCenterAIException(
+                    f"Reminder {reminder_id} is not in a valid state for execution (current: {locked_reminder.status if locked_reminder else 'not found'})",
+                    error_code=ErrorCode.VALIDATION_ERROR
+                )
+            
+            # Issue 156: Update status to 'executing' to prevent duplicate execution
+            # Keep lock held during execution to prevent concurrent execution attempts
+            locked_reminder.status = 'executing'
+            locked_reminder.started_at = datetime.now(AST)
+            db.commit()
+            db.refresh(locked_reminder)
+            reminder = locked_reminder  # Use the locked reminder for the rest of the method
+            
+            # Issue 156: Note: Lock is released after commit, but status is 'executing' which prevents other workers
+            # from picking up the same reminder. If execution takes a long time, periodic status checks
+            # would be needed to prevent duplicate execution.
+            
             # Get patient's phone number
+            if not appointment.patient or not appointment.patient.caller_phone_token:
+                raise CallCenterAIException(
+                    f"Patient phone token not found for appointment {appointment.appointment_id}",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
+            
+            # Issue 194: Re-query patient phone number when executing reminder to handle phone number changes
             phone_mapping = db.query(Mapping).filter(
                 Mapping.token == appointment.patient.caller_phone_token,
                 Mapping.is_deleted == 'no'
             ).first()
             
             if not phone_mapping:
+                # Issue 194: Try to get phone number from patient record if mapping not found
+                # This handles cases where phone number was updated but mapping wasn't refreshed
+                self.logger.warning(f"Phone mapping not found for patient {appointment.patient_id}, attempting to re-query")
+                # Re-query patient to get latest phone token
+                db.refresh(appointment.patient)
+                if appointment.patient.caller_phone_token:
+                    phone_mapping = db.query(Mapping).filter(
+                        Mapping.token == appointment.patient.caller_phone_token,
+                        Mapping.is_deleted == 'no'
+                    ).first()
+                
+                if not phone_mapping:
+                    raise CallCenterAIException(
+                        f"Phone number not found for patient {appointment.patient_id}",
+                        error_code=ErrorCode.RESOURCE_NOT_FOUND
+                    )
+            
+            if not phone_mapping.actual_value:
                 raise CallCenterAIException(
-                    f"Phone number not found for patient {appointment.patient_id}",
+                    f"Phone number value is empty for patient {appointment.patient_id}",
                     error_code=ErrorCode.RESOURCE_NOT_FOUND
                 )
             
+            # Issue 194: Use the most recent phone number from mapping
             patient_phone = phone_mapping.actual_value
             
             # Update reminder status
             reminder.status = 'calling'
             reminder.retry_count += 1
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                db.rollback()
+                self.logger.error(f"Failed to commit reminder status update: {commit_error}", LogCategory.REMINDER, exception=commit_error)
+                raise
             
             # Create reminder log entry
             log_id = make_ulid_token('REMINDER_LOG')
@@ -248,7 +358,12 @@ class ReminderService:
                 call_status='initiated'
             )
             db.add(reminder_log)
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                db.rollback()
+                self.logger.error(f"Failed to commit reminder log: {commit_error}", LogCategory.REMINDER, exception=commit_error)
+                raise
             
             # Generate reminder message
             message = await self._generate_reminder_message(appointment, reminder.reminder_type)
@@ -287,7 +402,12 @@ class ReminderService:
                     reminder.completed_at = datetime.now(AST)
                     reminder.call_outcome = call_result.get('outcome', 'max_retries_exceeded')
             
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                db.rollback()
+                self.logger.error(f"Failed to commit reminder final status: {commit_error}", LogCategory.REMINDER, exception=commit_error)
+                raise
             
             # Update clinic usage metrics
             await self._update_usage_metrics(db, appointment, call_result)
@@ -351,12 +471,23 @@ class ReminderService:
         """
         try:
             # Check rate limit for reminder calls
+            if not hasattr(appointment, 'clinic_id') or not appointment.clinic_id:
+                # Try to get clinic_id from patient
+                if not appointment.patient or not appointment.patient.clinic_id:
+                    raise CallCenterAIException(
+                        f"Clinic ID not found for appointment {appointment.appointment_id}",
+                        error_code=ErrorCode.RESOURCE_NOT_FOUND
+                    )
+                clinic_id = appointment.patient.clinic_id
+            else:
+                clinic_id = appointment.clinic_id
+            
             from services.rate_limiter import get_rate_limiter
             rate_limiter = get_rate_limiter()
-            if not await rate_limiter.check_reminder_limit(appointment.clinic_id):
-                self.logger.warning(f"Reminder rate limit exceeded for clinic {appointment.clinic_id}")
+            if not await rate_limiter.check_reminder_limit(clinic_id):
+                self.logger.warning(f"Reminder rate limit exceeded for clinic {clinic_id}")
                 # Reschedule for later
-                await self._reschedule_reminder(appointment.clinic_id, reminder_id, delay_minutes=10)
+                await self._reschedule_reminder(clinic_id, reminder_id, delay_minutes=10)
                 return {
                     'status': 'rescheduled',
                     'reason': 'rate_limit_exceeded',
@@ -372,25 +503,62 @@ class ReminderService:
                 if not audio_bytes:
                     raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
                 
-                # Make outbound call using ACS
-                call_result = await self.acs_service.make_outbound_call(
-                    to_phone=patient_phone,
-                    from_phone=self.settings.azure.communication.phone_number,
-                    audio_content=audio_bytes,
-                    call_context={
-                        'reminder_id': reminder_id,
-                        'appointment_id': appointment.appointment_id,
-                        'call_type': 'reminder'
+                # Issue 44: Make the outbound call using ACS with proper error handling
+                try:
+                    call_result = await self.acs_service.make_outbound_call(
+                        to_phone=patient_phone,
+                        from_phone=self.settings.azure.communication.phone_number,
+                        audio_content=audio_bytes,
+                        call_context={
+                            'reminder_id': reminder_id,
+                            'appointment_id': appointment.appointment_id,
+                            'call_type': 'reminder'
+                        }
+                    )
+                    
+                    # Issue 44: Validate call result and handle failures gracefully
+                    if not call_result:
+                        raise ExternalServiceUnavailableError("Call result is None")
+                    
+                    call_success = call_result.get('success', False)
+                    if not call_success:
+                        # Issue 44: Extract error information from call result
+                        error_code = call_result.get('error_code', 'unknown_error')
+                        error_message = call_result.get('error_message', 'Call failed')
+                        self.logger.warning(f"Reminder call failed: {error_code} - {error_message}", LogCategory.REMINDER)
+                        return {
+                            'status': 'failed',
+                            'call_id': call_result.get('call_id'),
+                            'duration_seconds': call_result.get('duration_seconds', 0),
+                            'outcome': 'failed',
+                            'error_code': error_code,
+                            'error_message': error_message,
+                            'caller_id': self.settings.azure.communication.phone_number
+                        }
+                    
+                    return {
+                        'status': 'completed',
+                        'call_id': call_result.get('call_id'),
+                        'duration_seconds': call_result.get('duration_seconds'),
+                        'outcome': 'answered',
+                        'caller_id': self.settings.azure.communication.phone_number
                     }
-                )
-                
-                return {
-                    'status': 'completed' if call_result.get('success') else 'failed',
-                    'call_id': call_result.get('call_id'),
-                    'duration_seconds': call_result.get('duration_seconds'),
-                    'outcome': 'answered' if call_result.get('success') else 'failed',
-                    'caller_id': self.settings.azure.communication.phone_number
-                }
+                # Issue 172: Handle call failure after status update - reminder status remains 'calling'
+                # This is already handled by the outer try-except which updates status on failure
+                except Exception as call_error:
+                    # Issue 44: Handle call failures gracefully with specific error codes
+                    error_type = type(call_error).__name__
+                    if 'phone' in str(call_error).lower() or 'invalid' in str(call_error).lower():
+                        error_code = 'invalid_phone_number'
+                    elif 'network' in str(call_error).lower() or 'connection' in str(call_error).lower():
+                        error_code = 'network_error'
+                    elif 'rate' in str(call_error).lower() or 'limit' in str(call_error).lower():
+                        error_code = 'rate_limit_exceeded'
+                    else:
+                        error_code = 'call_failed'
+                    
+                    self.logger.error(f"Reminder call error ({error_code}): {call_error}", LogCategory.REMINDER, exception=call_error)
+                    raise  # Re-raise to be caught by outer exception handler
             
         except AzureCommunicationError as e:
             self.logger.error(f"ACS error making reminder call: {e.message}", LogCategory.REMINDER, exception=e)
@@ -423,6 +591,10 @@ class ReminderService:
         """
         try:
             # Get clinic usage record for current period
+            if not appointment.patient or not appointment.patient.clinic_id:
+                self.logger.warning(f"Patient or clinic_id not found for appointment {appointment.appointment_id}", LogCategory.REMINDER)
+                return
+            
             clinic_usage = db.query(ClinicUsage).filter(
                 ClinicUsage.clinic_id == appointment.patient.clinic_id,
                 ClinicUsage.is_deleted == 'no'
@@ -440,7 +612,12 @@ class ReminderService:
                 clinic_usage.reminder_calls_cost_usd += estimated_cost
                 clinic_usage.total_cost_usd += estimated_cost
                 
-                db.commit()
+                try:
+                    db.commit()
+                except Exception as commit_error:
+                    db.rollback()
+                    self.logger.error(f"Failed to commit usage metrics update: {commit_error}", LogCategory.REMINDER, exception=commit_error)
+                    # Don't raise - this is not critical for reminder execution
                 
         except Exception as e:
             self.logger.error(f"Failed to update usage metrics: {e}", LogCategory.REMINDER, exception=e)

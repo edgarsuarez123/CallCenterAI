@@ -79,6 +79,7 @@ class ProcessingStats:
     local_success_rate: float = 0.0
     average_processing_time: float = 0.0
     total_processing_time: float = 0.0
+    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class HybridNLPService:
@@ -113,6 +114,10 @@ class HybridNLPService:
         
         # Caching for performance
         self.intent_cache: Dict[str, HybridIntentResult] = {}
+        
+        # Thread safety
+        self._cache_lock = asyncio.Lock()
+        self._stats_lock = asyncio.Lock()
         
         # Tiered TTL strategy for different intent types
         self.cache_ttl_mapping = {
@@ -184,18 +189,20 @@ class HybridNLPService:
             if not call_id:
                 raise ValidationError("call_id", call_id, "Call ID cannot be empty")
             
-            # Check cache first
+            # Check cache first (with lock)
             cache_key = f"{call_id}:{hash(user_input)}:{language.value}"
-            if cache_key in self.intent_cache:
-                cached_result = self.intent_cache[cache_key]
-                # Use tiered TTL based on intent
-                intent_ttl = self._get_ttl_for_intent(cached_result.intent.value if cached_result.intent else "default")
-                if (datetime.now(timezone.utc) - cached_result.timestamp).total_seconds() < intent_ttl:
-                    self.logger.debug(f"Using cached intent result for call {call_id}")
-                    return cached_result
-                else:
-                    # Remove expired cache entry
-                    del self.intent_cache[cache_key]
+            async with self._cache_lock:
+                if cache_key in self.intent_cache:
+                    cached_result = self.intent_cache[cache_key]
+                    if cached_result:
+                        # Use tiered TTL based on intent
+                        intent_ttl = self._get_ttl_for_intent(cached_result.intent.value if cached_result.intent else "default")
+                        if (datetime.now(timezone.utc) - cached_result.timestamp).total_seconds() < intent_ttl:
+                            self.logger.debug(f"Using cached intent result for call {call_id}")
+                            return cached_result
+                        else:
+                            # Remove expired cache entry
+                            del self.intent_cache[cache_key]
             
             # Determine processing strategy
             if strategy is None:
@@ -203,6 +210,15 @@ class HybridNLPService:
             
             # Check service health
             await self._check_service_health()
+            
+            # Issue 40: Handle service unavailability with fallback
+            azure_available = await self._check_azure_availability()
+            local_available = await self._check_local_availability()
+            
+            if not azure_available and not local_available:
+                # Issue 40: Both services unavailable - return default intent
+                self.logger.warning(f"Both Azure and local NLP services unavailable for call {call_id}, using fallback")
+                return self._create_fallback_result(user_input, call_id, language)
             
             start_time = time.time()
             
@@ -225,10 +241,11 @@ class HybridNLPService:
             result.language = language
             
             # Update statistics
-            self._update_processing_stats(call_id, result)
+            await self._update_processing_stats(call_id, result)
             
-            # Cache result
-            self.intent_cache[cache_key] = result
+            # Cache result (with lock)
+            async with self._cache_lock:
+                self.intent_cache[cache_key] = result
             
             # Clean up old cache entries
             await self._cleanup_cache()
@@ -424,10 +441,20 @@ class HybridNLPService:
         try:
             results = []
             
+            # Issue 95: Check service availability before and during processing
+            # Re-check availability right before processing
+            azure_available = await self._check_azure_availability()
+            local_available = await self._check_local_availability()
+            
+            if not azure_available and not local_available:
+                # Both services unavailable - return fallback
+                self.logger.warning(f"Both services unavailable for hybrid processing, using fallback")
+                return self._create_fallback_result(user_input, call_id, language)
+            
             # Process with both services in parallel
             tasks = []
             
-            if self.azure_health:
+            if azure_available:  # Issue 95: Use current availability status
                 tasks.append(
                     asyncio.wait_for(
                         self.azure_openai.classify_intent(user_input, call_id, language),
@@ -435,7 +462,7 @@ class HybridNLPService:
                     )
                 )
             
-            if self.local_health:
+            if local_available:  # Issue 95: Use current availability status
                 tasks.append(
                     asyncio.wait_for(
                         asyncio.to_thread(self.local_nlp.process_input, user_input, context),
@@ -452,18 +479,52 @@ class HybridNLPService:
             azure_result = None
             local_result = None
             
+            # Issue 94: Handle timeouts specifically
             for i, task_result in enumerate(completed_tasks):
                 if isinstance(task_result, Exception):
-                    self.logger.warning(f"Task {i} failed: {task_result}")
-                    continue
+                    # Issue 94: Check if it's a timeout
+                    if isinstance(task_result, asyncio.TimeoutError):
+                        self.logger.warning(f"Task {i} timed out: {task_result}")
+                        # Issue 94: Continue with other results, don't fail completely
+                        continue
+                    else:
+                        self.logger.warning(f"Task {i} failed: {task_result}")
+                        continue
                 
-                if i == 0 and self.azure_health:
+                # Issue 95: Use current availability status for result assignment
+                if i == 0 and azure_available:
                     azure_result = task_result
-                elif i == 1 and self.local_health:
+                elif (i == 1 and local_available) or (i == 0 and not azure_available and local_available):
                     local_result = task_result
             
-            # Combine results
-            return self._combine_results(azure_result, local_result, user_input, call_id, language)
+            # Issue 164: Properly handle partial results and ensure the best result is used
+            # Combine results - handle case where one service fails but the other succeeds
+            if azure_result and local_result:
+                # Both succeeded - combine them
+                return self._combine_results(azure_result, local_result, user_input, call_id, language)
+            elif azure_result:
+                # Only Azure succeeded
+                return HybridIntentResult(
+                    intent=azure_result.intent,
+                    confidence=azure_result.confidence,
+                    entities=azure_result.entities,
+                    processing_strategy=ProcessingStrategy.HYBRID,
+                    azure_result=azure_result,
+                    language=language
+                )
+            elif local_result:
+                # Only local succeeded
+                return HybridIntentResult(
+                    intent=local_result.intent,
+                    confidence=local_result.confidence,
+                    entities=self._convert_local_entities(local_result.entities),
+                    processing_strategy=ProcessingStrategy.HYBRID,
+                    local_result=local_result,
+                    language=language
+                )
+            else:
+                # Both failed - return fallback
+                return self._create_fallback_result(user_input, call_id, language)
             
         except Exception as e:
             self.logger.error(f"Hybrid processing failed for call {call_id}: {e}")
@@ -533,9 +594,15 @@ class HybridNLPService:
                     primary_result = local_result
                     secondary_result = azure_result
                 
-                # Combine entities
-                combined_entities = azure_result.entities.copy() if azure_result else []
-                if local_result:
+                # Combine entities (with null checks)
+                combined_entities = []
+                if azure_result and azure_result.entities:
+                    try:
+                        combined_entities = azure_result.entities.copy() if hasattr(azure_result.entities, 'copy') else list(azure_result.entities)
+                    except (AttributeError, TypeError):
+                        combined_entities = list(azure_result.entities) if azure_result.entities else []
+                
+                if local_result and local_result.entities:
                     combined_entities.extend(self._convert_local_entities(local_result.entities))
                 
                 return HybridIntentResult(
@@ -641,10 +708,47 @@ class HybridNLPService:
         else:
             intent = IntentType.GENERAL_INQUIRY
         
+        # Issue 62: Extract entities from user input in fallback result
+        entities = []
+        try:
+            # Simple entity extraction for fallback
+            # Extract names (simple pattern matching)
+            import re
+            name_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b'
+            names = re.findall(name_pattern, user_input)
+            for name in names[:3]:  # Limit to 3 names
+                entities.append({
+                    "type": "name",
+                    "value": name,
+                    "confidence": 0.5
+                })
+            
+            # Extract dates (simple pattern matching)
+            date_pattern = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b'
+            dates = re.findall(date_pattern, user_input)
+            for date in dates[:2]:  # Limit to 2 dates
+                entities.append({
+                    "type": "date",
+                    "value": date,
+                    "confidence": 0.5
+                })
+            
+            # Extract times (simple pattern matching)
+            time_pattern = r'\b(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)\b'
+            times = re.findall(time_pattern, user_input)
+            for time in times[:2]:  # Limit to 2 times
+                entities.append({
+                    "type": "time",
+                    "value": time,
+                    "confidence": 0.5
+                })
+        except Exception as entity_error:
+            self.logger.warning(f"Failed to extract entities in fallback: {entity_error}")
+        
         return HybridIntentResult(
             intent=intent,
             confidence=0.3,  # Low confidence for fallback
-            entities=[],
+            entities=entities,  # Issue 62: Include extracted entities
             processing_strategy=ProcessingStrategy.LOCAL_ONLY,
             language=language,
             fallback_used=True
@@ -671,9 +775,12 @@ class HybridNLPService:
                 self.azure_health = False
                 self.logger.warning(f"Azure OpenAI health check failed: {e}")
             finally:
-                # Clean up health check conversation immediately
-                if health_check_id in self.azure_openai.conversations:
-                    del self.azure_openai.conversations[health_check_id]
+                # Clean up health check conversation immediately (with error handling)
+                try:
+                    if hasattr(self.azure_openai, 'conversations') and health_check_id in self.azure_openai.conversations:
+                        del self.azure_openai.conversations[health_check_id]
+                except Exception as cleanup_error:
+                    self.logger.warning(f"Failed to cleanup health check conversation: {cleanup_error}")
             
             # Check local NLP health
             try:
@@ -687,38 +794,73 @@ class HybridNLPService:
                 self.logger.warning(f"Local NLP health check failed: {e}")
             
             self.last_health_check = current_time
-            
         except Exception as e:
+            # Issue 183: Handle health check failures and update service status accordingly
             self.logger.error(f"Health check failed: {e}")
+            # Issue 183: Mark services as unavailable if health check fails completely
+            self.azure_health = False
+            self.local_health = False
+            # Issue 183: Log the failure for monitoring
+            self.logger.warning(f"Both services marked as unavailable due to health check failure: {e}")
     
-    def _update_processing_stats(self, call_id: str, result: HybridIntentResult):
+    async def _check_azure_availability(self) -> bool:
+        """Check if Azure OpenAI service is available."""
+        try:
+            return self.azure_health
+        except Exception:
+            return False
+    
+    async def _check_local_availability(self) -> bool:
+        """Check if local NLP service is available."""
+        try:
+            return self.local_health
+        except Exception:
+            return False
+    
+    async def _update_processing_stats(self, call_id: str, result: HybridIntentResult):
         """Update processing statistics."""
-        if call_id not in self.call_stats:
-            self.call_stats[call_id] = ProcessingStats()
+        # Validate inputs
+        if not call_id:
+            return
         
-        stats = self.call_stats[call_id]
-        stats.total_requests += 1
-        stats.total_processing_time += result.processing_time_ms
-        
-        if result.processing_strategy == ProcessingStrategy.AZURE_FIRST:
-            stats.azure_requests += 1
-        elif result.processing_strategy == ProcessingStrategy.LOCAL_FIRST:
-            stats.local_requests += 1
-        elif result.processing_strategy == ProcessingStrategy.HYBRID:
-            stats.hybrid_requests += 1
-        
-        if result.fallback_used:
-            stats.fallback_requests += 1
-        
-        # Update success rates
-        if stats.azure_requests > 0:
-            stats.azure_success_rate = (stats.azure_requests - stats.fallback_requests) / stats.azure_requests
-        
-        if stats.local_requests > 0:
-            stats.local_success_rate = (stats.local_requests - stats.fallback_requests) / stats.local_requests
-        
-        # Update average processing time
-        stats.average_processing_time = stats.total_processing_time / stats.total_requests
+        # Access with lock
+        async with self._stats_lock:
+            if call_id not in self.call_stats:
+                self.call_stats[call_id] = ProcessingStats()
+            
+            stats = self.call_stats[call_id]
+            if not stats:
+                return
+            
+            stats.total_requests += 1
+            stats.total_processing_time += result.processing_time_ms
+            
+            if result.processing_strategy == ProcessingStrategy.AZURE_FIRST:
+                stats.azure_requests += 1
+            elif result.processing_strategy == ProcessingStrategy.LOCAL_FIRST:
+                stats.local_requests += 1
+            elif result.processing_strategy == ProcessingStrategy.HYBRID:
+                stats.hybrid_requests += 1
+            
+            if result.fallback_used:
+                stats.fallback_requests += 1
+            
+            # Update success rates (with division by zero checks)
+            if stats.azure_requests > 0:
+                stats.azure_success_rate = (stats.azure_requests - stats.fallback_requests) / stats.azure_requests
+            else:
+                stats.azure_success_rate = 0.0
+            
+            if stats.local_requests > 0:
+                stats.local_success_rate = (stats.local_requests - stats.fallback_requests) / stats.local_requests
+            else:
+                stats.local_success_rate = 0.0
+            
+            # Update average processing time (with division by zero check)
+            if stats.total_requests > 0:
+                stats.average_processing_time = stats.total_processing_time / stats.total_requests
+            else:
+                stats.average_processing_time = 0.0
     
     async def _cleanup_cache(self):
         """Clean up expired cache entries."""
@@ -726,14 +868,21 @@ class HybridNLPService:
             current_time = datetime.now(timezone.utc)
             expired_keys = []
             
-            for key, result in self.intent_cache.items():
-                # Use tiered TTL based on intent
-                intent_ttl = self._get_ttl_for_intent(result.intent.value if result.intent else "default")
-                if (current_time - result.timestamp).total_seconds() > intent_ttl:
-                    expired_keys.append(key)
+            # Get expired keys with lock
+            async with self._cache_lock:
+                for key, result in list(self.intent_cache.items()):  # Create copy to avoid modification during iteration
+                    if result:
+                        # Use tiered TTL based on intent
+                        intent_ttl = self._get_ttl_for_intent(result.intent.value if result.intent else "default")
+                        if (current_time - result.timestamp).total_seconds() > intent_ttl:
+                            expired_keys.append(key)
             
-            for key in expired_keys:
-                del self.intent_cache[key]
+            # Remove expired keys with lock
+            if expired_keys:
+                async with self._cache_lock:
+                    for key in expired_keys:
+                        if key in self.intent_cache:
+                            del self.intent_cache[key]
             
             if expired_keys:
                 self.logger.debug(f"Cleaned up {len(expired_keys)} expired cache entries")
@@ -741,7 +890,7 @@ class HybridNLPService:
         except Exception as e:
             self.logger.error(f"Failed to cleanup cache: {e}")
     
-    def get_processing_statistics(self, call_id: Optional[str] = None) -> Dict[str, Any]:
+    async def get_processing_statistics(self, call_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get processing statistics.
         
@@ -751,8 +900,14 @@ class HybridNLPService:
         Returns:
             Processing statistics
         """
-        if call_id and call_id in self.call_stats:
-            stats = self.call_stats[call_id]
+        # Access with lock
+        async with self._stats_lock:
+            call_stats_copy = dict(self.call_stats)
+        
+        if call_id and call_id in call_stats_copy:
+            stats = call_stats_copy[call_id]
+            if not stats:
+                return {"error": "Statistics not found"}
             return {
                 "call_id": call_id,
                 "total_requests": stats.total_requests,
@@ -783,7 +938,7 @@ class HybridNLPService:
                     "last_health_check": self.last_health_check.isoformat()
                 },
                 "cache_stats": {
-                    "cache_size": len(self.intent_cache),
+                    "cache_size": len(self.intent_cache),  # Access without lock for read-only
                     "cache_ttl_mapping": self.cache_ttl_mapping,
                     "default_ttl": self.default_ttl
                 }
@@ -796,15 +951,32 @@ class HybridNLPService:
             current_time = datetime.now(timezone.utc)
             expired_calls = []
             
-            for call_id, stats in self.call_stats.items():
-                # Fix: Compare with stats.start_time, not datetime.now()
-                time_since_start = (current_time - stats.start_time).total_seconds()
-                # Remove stats for calls older than 1 hour or with no requests
-                if stats.total_requests == 0 or time_since_start > 3600:
-                    expired_calls.append(call_id)
+            # Get expired calls with lock (create copy to avoid modification during iteration)
+            async with self._stats_lock:
+                call_stats_copy = dict(self.call_stats)
             
-            for call_id in expired_calls:
-                del self.call_stats[call_id]
+            for call_id, stats in call_stats_copy.items():
+                if not stats:
+                    expired_calls.append(call_id)
+                    continue
+                
+                # Fix: Compare with stats.start_time (now exists in ProcessingStats)
+                if hasattr(stats, 'start_time') and stats.start_time:
+                    time_since_start = (current_time - stats.start_time).total_seconds()
+                    # Remove stats for calls older than 1 hour or with no requests
+                    if stats.total_requests == 0 or time_since_start > 3600:
+                        expired_calls.append(call_id)
+                else:
+                    # No start_time, remove if no requests
+                    if stats.total_requests == 0:
+                        expired_calls.append(call_id)
+            
+            # Remove expired calls with lock
+            if expired_calls:
+                async with self._stats_lock:
+                    for call_id in expired_calls:
+                        if call_id in self.call_stats:
+                            del self.call_stats[call_id]
             
             # Clean up cache
             await self._cleanup_cache()

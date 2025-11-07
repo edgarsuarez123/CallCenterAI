@@ -104,6 +104,7 @@ class PatientIdentificationResult(BaseModel):
     patient_name: Optional[str] = None
     confidence: float = 0.0
     match_reason: Optional[str] = None
+    multiple_matches: bool = False  # Issue 43: Indicate if multiple matches were found
 
 
 class ProviderOption(BaseModel):

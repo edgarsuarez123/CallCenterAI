@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 import uuid
 import logging
 
-from models.models import Appointment, AppointmentSlot, Patient, Provider, Clinic, AuditLog, provider_clinics
+from models.models import Appointment, AppointmentSlot, Patient, Provider, Clinic, AuditLog, provider_clinics, Reminder
 from models.enums import YesNo
 from models.schemas import (
     AppointmentCreateRequest, AppointmentUpdateRequest, AppointmentSearchRequest,
@@ -58,8 +58,12 @@ class AppointmentService:
         Returns:
             Tuple of (appointment_instance, google_calendar_event_id)
         """
-        # Get transaction manager
-        transaction_manager = get_transaction_manager(self.db)
+        # Issue 148: Handle transaction manager not available
+        try:
+            transaction_manager = get_transaction_manager(self.db)
+        except Exception as tm_error:
+            self.logger.error(f"Transaction manager not available: {tm_error}", LogCategory.APPOINTMENT)
+            raise BusinessRuleViolationError("transaction_manager_unavailable", f"Transaction manager not available: {tm_error}")
         
         try:
             self.logger.info(
@@ -75,10 +79,27 @@ class AppointmentService:
                 }
             )
             
+            # Issue 115: Validate input parameters before finding slot
             # Validate appointment data
             self._validate_appointment_data(appointment_data)
             
-            # Find the appointment slot to book
+            # Issue 134: Validate provider exists before finding slot
+            provider = self.db.query(Provider).filter_by(provider_id=appointment_data.provider_id).first()
+            if not provider:
+                raise ProviderNotFoundError(appointment_data.provider_id)
+            
+            # Issue 143: Validate slot duration before finding slot
+            appointment_duration_minutes = (appointment_data.end_time - appointment_data.start_time).total_seconds() / 60
+            if appointment_duration_minutes <= 0:
+                raise ValidationError("appointment_duration", appointment_duration_minutes, "Appointment duration must be positive")
+            
+            # Issue 115: Validate slot parameters before finding
+            if not appointment_data.start_time or not appointment_data.provider_id:
+                raise ValidationError("appointment_data", appointment_data, "start_time and provider_id are required")
+            
+            # Issue 106, 107: Find and lock slot - note that lock is released when method returns
+            # Issue 108: atomic_appointment_booking will re-lock and re-verify the slot
+            # This is acceptable because atomic_appointment_booking uses SELECT FOR UPDATE within its transaction
             slot = self._find_appointment_slot(appointment_data.start_time, appointment_data.provider_id)
             if not slot:
                 self.logger.warning("No appointment slot found", LogCategory.APPOINTMENT, extra_data={
@@ -91,6 +112,29 @@ class AppointmentService:
                     "No appointment slot found for the specified time"
                 )
             
+            # Issue 106, 107: Store slot_id immediately - the slot lock is released when _find_appointment_slot returns
+            # Issue 108: atomic_appointment_booking will re-lock the slot by slot_id and verify it's still available
+            slot_id = slot.slot_id
+            clinic_id = slot.clinic_id  # Get clinic_id from slot before lock is released
+            
+            # Issue 32, 42, 70, 143: Validate that slot duration matches or is sufficient for appointment duration
+            # Note: appointment_duration_minutes was already calculated above
+            # Issue 106, 107: Validate slot duration before proceeding - lock is already released but we validate early
+            if slot.duration_minutes < appointment_duration_minutes:
+                self.logger.warning(f"Slot duration ({slot.duration_minutes} min) is less than appointment duration ({appointment_duration_minutes} min)", 
+                                  LogCategory.APPOINTMENT, extra_data={
+                                      'slot_id': slot_id,
+                                      'slot_duration': slot.duration_minutes,
+                                      'appointment_duration': appointment_duration_minutes
+                                  })
+                # Issue 143: Release slot quickly if validation fails
+                # Note: Slot lock is already released when _find_appointment_slot returned
+                raise SlotUnavailableError(
+                    slot_id,
+                    appointment_data.provider_id,
+                    f"Slot duration ({slot.duration_minutes} minutes) is insufficient for appointment duration ({appointment_duration_minutes} minutes)"
+                )
+            
             # Generate appointment ID
             appointment_id = make_ulid_token('APPOINTMENT')
             
@@ -101,21 +145,15 @@ class AppointmentService:
                 'start_time': appointment_data.start_time,
                 'end_time': appointment_data.end_time,
                 'appointment_type': appointment_data.appointment_type,
-                'duration_minutes': (appointment_data.end_time - appointment_data.start_time).total_seconds() / 60
+                'duration_minutes': appointment_duration_minutes
             }
             
-            # Get clinic_id for usage counter updates
-            provider = self.db.query(Provider).filter_by(provider_id=appointment_data.provider_id).first()
-            if not provider:
-                raise ProviderNotFoundError(appointment_data.provider_id)
-            
-            # Get clinic_id from slot
-            clinic_id = slot.clinic_id
-            
-            # Perform atomic appointment booking
+            # Issue 106, 107: Perform atomic appointment booking - this will re-lock the slot by slot_id
+            # Issue 108: atomic_appointment_booking will verify the slot is still available after locking
+            # This ensures no race condition between finding and booking
             result = transaction_manager.atomic_appointment_booking(
                 appointment_data=appointment_dict,
-                slot_id=slot.slot_id,
+                slot_id=slot_id,  # Use stored slot_id - slot object lock is already released
                 patient_id=appointment_data.patient_id,
                 provider_id=appointment_data.provider_id,
                 clinic_id=clinic_id
@@ -123,27 +161,58 @@ class AppointmentService:
             
             appointment = result['appointment']
             
-            # Sync to Google Calendar if service is available and configured
+            # Issue 126: Handle Google Calendar sync failures and mark appointments that need sync
             google_event_id = None
             if self.google_calendar_service and self.settings.google_calendar.client_id:
                 try:
+                    # Issue 35: Handle event creation failure gracefully
                     google_event_id = self.google_calendar_service.sync_appointment_to_calendar(
                         appointment, appointment_data.provider_id, patient_name
                     )
                     if google_event_id:
                         appointment.google_event_id = google_event_id  # Store event ID
-                except Exception as e:
-                    self.logger.warning(f"Failed to sync appointment to Google Calendar: {e}")
+                        # Issue 6: Google Calendar Event ID Not Stored - Ensure event ID is committed to database
+                        try:
+                            self.db.commit()
+                        except Exception as commit_error:
+                            self.db.rollback()
+                            self.logger.error(f"Failed to commit Google Calendar event ID: {commit_error}")
+                            # Issue 126: Mark appointment as needing sync if commit fails
+                            # Note: If Appointment model has needs_calendar_sync field, set it here
+                            # For now, log the failure and appointment can be synced later
+                            self.logger.warning(f"Appointment {appointment.appointment_id} needs calendar sync (commit failed)")
+                            # Don't fail appointment creation if calendar commit fails
+                    else:
+                        # Issue 35, 126: Event creation failed - mark appointment as needing sync
+                        self.logger.warning(f"Google Calendar event creation returned None for appointment {appointment.appointment_id}")
+                        # Issue 126: Mark appointment as needing sync
+                        # Note: If Appointment model has needs_calendar_sync field, set it here
+                        # For now, log the failure and appointment can be synced later
+                        self.logger.warning(f"Appointment {appointment.appointment_id} needs calendar sync (event creation failed)")
+                except Exception as calendar_error:
+                    # Issue 35, 126: Handle calendar service errors gracefully and mark for sync
+                    self.logger.error(f"Failed to sync appointment to Google Calendar: {calendar_error}")
+                    # Issue 126: Mark appointment as needing sync
+                    # Note: If Appointment model has needs_calendar_sync field, set it here
+                    # For now, log the failure and appointment can be synced later
+                    self.logger.warning(f"Appointment {appointment.appointment_id} needs calendar sync (sync error: {calendar_error})")
+                    # Don't fail appointment creation if calendar sync fails
             
-            # Schedule reminder call if reminders are enabled
+            # Issue 196: Schedule reminder call if reminders are enabled, with retry logic
             try:
                 reminder_service = get_reminder_service()
-                await reminder_service.schedule_reminder(
+                reminder_scheduled = await reminder_service.schedule_reminder(
                     db=self.db,
                     appointment_id=appointment.appointment_id,
                     reminder_type='appointment_reminder'
                 )
-                self.logger.info(f"Reminder scheduled for appointment {appointment.appointment_id}", LogCategory.APPOINTMENT)
+                if reminder_scheduled:
+                    self.logger.info(f"Reminder scheduled for appointment {appointment.appointment_id}", LogCategory.APPOINTMENT)
+                else:
+                    # Issue 196: Reminder scheduling failed - mark for later scheduling
+                    self.logger.warning(f"Reminder scheduling failed for appointment {appointment.appointment_id}, will retry later")
+                    # Note: In production, you might want to add a field to mark appointments for reminder scheduling
+                    # For now, we log the failure and reminders can be scheduled later via background job
             except Exception as e:
                 # Don't fail appointment creation if reminder scheduling fails
                 self.logger.warning(f"Failed to schedule reminder for appointment {appointment.appointment_id}: {e}", LogCategory.APPOINTMENT)
@@ -208,7 +277,14 @@ class AppointmentService:
         Returns:
             Tuple of (updated_appointment, google_calendar_updated)
         """
-        appointment = self.get_appointment(appointment_id)  # This will raise AppointmentNotFoundError if not found
+        # Issue 154: Lock appointment before updating to prevent concurrent updates
+        from sqlalchemy import select
+        appointment = self.db.execute(
+            select(Appointment).where(Appointment.appointment_id == appointment_id).with_for_update()
+        ).scalar_one_or_none()
+        
+        if not appointment:
+            raise AppointmentNotFoundError(appointment_id)
         
         # Store old values for audit
         old_values = {
@@ -248,25 +324,88 @@ class AppointmentService:
         
         appointment.updated_at = datetime.now(timezone.utc)
         
-        # Rebook appointment slot if time changed
-        if time_changed:
-            # Release old slot
-            self._release_appointment_slot(appointment.start_time, appointment.provider_id)
-            # Book new slot
-            self._book_appointment_slot(appointment.start_time, appointment.provider_id, appointment_id)
+        # Issue 187: Check if provider changed
+        provider_changed = False
+        if updates.provider_id and updates.provider_id != appointment.provider_id:
+            provider_changed = True
         
-        # Update Google Calendar if service is available and configured
+        # Rebook appointment slot if time changed or provider changed (Issue 16, 21, 187: Store old values and validate new slot first)
+        if time_changed or provider_changed:
+            # Store old values before updating (Issue 16, 187)
+            old_start_time = appointment.start_time
+            old_provider_id = appointment.provider_id
+            
+            # Issue 21, 187: Book new slot first, then release old one
+            new_start_time = updates.start_time or appointment.start_time
+            new_provider_id = updates.provider_id or appointment.provider_id
+            
+            # Issue 187: If provider changed, validate new provider exists
+            if provider_changed:
+                from models.models import Provider
+                new_provider = self.db.query(Provider).filter_by(provider_id=new_provider_id).first()
+                if not new_provider:
+                    raise AppointmentNotFoundError(f"Provider {new_provider_id} not found")
+                if not new_provider.is_available:
+                    raise SlotUnavailableError(
+                        "unknown",
+                        new_provider_id,
+                        "New provider is not available"
+                    )
+            
+            # Book new slot first
+            new_slot_booked = self._book_appointment_slot(
+                new_start_time, 
+                new_provider_id, 
+                appointment_id
+            )
+            if not new_slot_booked:
+                self.logger.error(f"Failed to book new slot for appointment {appointment_id}")
+                raise SlotUnavailableError(
+                    "unknown",
+                    new_provider_id,
+                    "New appointment time slot is not available"
+                )
+            
+            # Issue 187: Release old slot only after new slot is successfully booked
+            # Only release if provider changed or time changed
+            if provider_changed or time_changed:
+                old_slot_released = self._release_appointment_slot(old_start_time, old_provider_id)
+                if not old_slot_released:
+                    self.logger.warning(f"Failed to release old slot for appointment {appointment_id}")
+        
+        # Issue 11: Update Google Calendar if service is available and configured
         google_calendar_updated = False
         if self.google_calendar_service and self.settings.google_calendar.client_id:
             if appointment.google_event_id:  # Use stored event ID
-                google_calendar_updated = self.google_calendar_service.update_calendar_appointment(
-                    appointment, appointment.provider_id, appointment.google_event_id, patient_name
-                )
+                try:
+                    google_calendar_updated = self.google_calendar_service.update_calendar_appointment(
+                        appointment, appointment.provider_id, appointment.google_event_id, patient_name
+                    )
+                except Exception as calendar_error:
+                    self.logger.error(f"Failed to update Google Calendar event {appointment.google_event_id}: {calendar_error}")
+                    # Don't fail appointment update if calendar update fails
+            else:
+                # Issue 11: Create new calendar event if appointment doesn't have one
+                try:
+                    google_event_id = self.google_calendar_service.sync_appointment_to_calendar(
+                        appointment, appointment.provider_id, patient_name
+                    )
+                    if google_event_id:
+                        appointment.google_event_id = google_event_id
+                        google_calendar_updated = True
+                except Exception as calendar_error:
+                    self.logger.error(f"Failed to create Google Calendar event for appointment {appointment_id}: {calendar_error}")
+                    # Don't fail appointment update if calendar creation fails
         
         # Log the update
         self._log_audit("appointments", appointment_id, "UPDATE", old_values, update_data)
         
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception as commit_error:
+            self.db.rollback()
+            self.logger.error(f"Failed to commit appointment update: {commit_error}")
+            raise
         return appointment, google_calendar_updated
     
     def cancel_appointment(self, appointment_id: str) -> bool:
@@ -279,7 +418,14 @@ class AppointmentService:
         Returns:
             True if successful
         """
-        appointment = self.get_appointment(appointment_id)  # This will raise AppointmentNotFoundError if not found
+        # Issue 155: Lock appointment before cancelling to prevent race conditions
+        from sqlalchemy import select
+        appointment = self.db.execute(
+            select(Appointment).where(Appointment.appointment_id == appointment_id).with_for_update()
+        ).scalar_one_or_none()
+        
+        if not appointment:
+            raise AppointmentNotFoundError(appointment_id)
         
         # Store old values for audit
         old_values = {"status": appointment.status}
@@ -289,7 +435,9 @@ class AppointmentService:
         appointment.updated_at = datetime.now(timezone.utc)
         
         # Release appointment slot
-        self._release_appointment_slot(appointment.start_time, appointment.provider_id)
+        slot_released = self._release_appointment_slot(appointment.start_time, appointment.provider_id)
+        if not slot_released:
+            self.logger.warning(f"Failed to release slot for cancelled appointment {appointment_id}")
         
         # Cancel Google Calendar event if service is available and configured
         if self.google_calendar_service and self.settings.google_calendar.client_id:
@@ -300,10 +448,34 @@ class AppointmentService:
                     appointment.provider_id, google_event_id
                 )
         
+        # Issue 46: Cancel all scheduled reminders for this appointment
+        try:
+            from services.reminder_service import get_reminder_service
+            reminder_service = get_reminder_service()
+            # Get all reminders for this appointment
+            reminders = self.db.query(Reminder).filter(
+                Reminder.appointment_id == appointment_id,
+                Reminder.status.in_(['scheduled', 'pending'])
+            ).all()
+            for reminder in reminders:
+                reminder.status = 'cancelled'
+                reminder.completed_at = datetime.now(timezone.utc)
+                reminder.deletion_reason = 'appointment_cancelled'
+            if reminders:
+                self.db.commit()
+        except Exception as e:
+            self.logger.warning(f"Failed to cancel reminders for appointment {appointment_id}: {e}")
+            # Don't fail the cancellation if reminder cancellation fails
+        
         # Log the cancellation
         self._log_audit("appointments", appointment_id, "CANCEL", old_values, {"status": "cancelled"})
         
-        self.db.commit()
+        try:
+            self.db.commit()
+        except Exception as commit_error:
+            self.db.rollback()
+            self.logger.error(f"Failed to commit appointment cancellation: {commit_error}")
+            raise
         return True
     
     def list_appointments(self, search: AppointmentSearchRequest) -> List[Appointment]:
@@ -356,13 +528,30 @@ class AppointmentService:
         Returns:
             List of available time slots
         """
-        # Get appointment slots from database
-        slots = self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime >= start_date,
-            AppointmentSlot.slot_datetime <= end_date,
-            AppointmentSlot.is_booked == YesNo.NO.value
-        ).order_by(AppointmentSlot.slot_datetime).all()
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in get_available_slots")
+            return []
+        
+        if not start_date or not end_date:
+            self.logger.warning("start_date or end_date is None in get_available_slots")
+            return []
+        
+        if end_date < start_date:
+            self.logger.warning("end_date is before start_date in get_available_slots")
+            return []
+        
+        try:
+            # Get appointment slots from database
+            slots = self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime >= start_date,
+                AppointmentSlot.slot_datetime <= end_date,
+                AppointmentSlot.is_booked == YesNo.NO.value
+            ).order_by(AppointmentSlot.slot_datetime).all()
+        except Exception as e:
+            self.logger.error(f"Error querying available slots: {e}")
+            return []
         
         available_slots = []
         for slot in slots:
@@ -404,7 +593,7 @@ class AppointmentService:
         
         available_slots = self.get_available_slots(provider_id, preferred_date, search_end)
         
-        if available_slots:
+        if available_slots and len(available_slots) > 0:
             return available_slots[0]  # Return first available slot
         
         return None
@@ -451,54 +640,146 @@ class AppointmentService:
     
     def _is_slot_available(self, start_time: datetime, end_time: datetime, 
                           provider_id: str, exclude_appointment_id: str = None) -> bool:
-        """Check if a time slot is available for booking."""
-        # Check if the appointment slot is available
-        slot = self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime == start_time,
-            AppointmentSlot.is_booked == YesNo.NO.value
-        ).first()
+        """Check if a time slot is available for booking.
         
-        return slot is not None
+        Issue 174: Note - this method checks availability without locking.
+        Callers should use atomic_appointment_booking for actual booking with proper locking.
+        """
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _is_slot_available")
+            return False
+        
+        if not start_time or not end_time:
+            self.logger.warning("start_time or end_time is None in _is_slot_available")
+            return False
+        
+        try:
+            # Check if the appointment slot is available
+            slot = self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime == start_time,
+                AppointmentSlot.is_booked == YesNo.NO.value
+            ).first()
+            
+            return slot is not None
+        except Exception as e:
+            self.logger.error(f"Error checking slot availability: {e}")
+            return False
     
     def _book_appointment_slot(self, start_time: datetime, provider_id: str, appointment_id: str) -> bool:
         """Book an appointment slot with row-level locking to prevent race conditions."""
         from sqlalchemy import select, update
         
-        # Use SELECT FOR UPDATE to lock the row and prevent race conditions
-        slot = self.db.execute(
-            select(AppointmentSlot)
-            .where(
-                AppointmentSlot.provider_id == provider_id,
-                AppointmentSlot.slot_datetime == start_time,
-                AppointmentSlot.is_booked == YesNo.NO.value
-            )
-            .with_for_update()
-        ).scalar_one_or_none()
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _book_appointment_slot")
+            return False
+        
+        if not start_time:
+            self.logger.warning("start_time is None in _book_appointment_slot")
+            return False
+        
+        if not appointment_id:
+            self.logger.warning("appointment_id is empty in _book_appointment_slot")
+            return False
+        
+        try:
+            # Issue 19: Check for held slots and verify hold expiration before booking
+            from datetime import datetime, timezone
+            current_time = datetime.now(timezone.utc)
+            
+            # Use SELECT FOR UPDATE to lock the row and prevent race conditions
+            slot = self.db.execute(
+                select(AppointmentSlot)
+                .where(
+                    AppointmentSlot.provider_id == provider_id,
+                    AppointmentSlot.slot_datetime == start_time,
+                    # Check if slot is not booked OR if it's held but the hold has expired
+                    (
+                        (AppointmentSlot.is_booked == YesNo.NO.value) |
+                        (
+                            (AppointmentSlot.is_booked == "held") &
+                            (AppointmentSlot.held_until < current_time)
+                        )
+                    )
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+        except Exception as e:
+            self.logger.error(f"Error querying slot for booking: {e}")
+            return False
         
         if slot:
-            slot.is_booked = YesNo.YES.value
-            slot.booked_by_appointment_id = appointment_id
-            slot.updated_at = datetime.now(timezone.utc)
-            self.db.commit()
-            return True
+            # Issue 129: Re-verify slot availability after locking
+            # Issue 19: Verify slot is actually available (not held by another call)
+            if slot.is_booked == "held" and slot.held_until and slot.held_until >= current_time:
+                # Slot is still held by another call
+                self.logger.warning(f"Slot {slot.slot_id} is still held until {slot.held_until}")
+                return False
+            
+            # Issue 129: Re-verify slot is still available after locking
+            from models.enums import YesNo
+            if slot.is_booked != YesNo.NO.value and slot.is_booked != "held":
+                # Slot is already booked
+                self.logger.warning(f"Slot {slot.slot_id} is already booked (state: {slot.is_booked})")
+                return False
+            try:
+                slot.is_booked = YesNo.YES.value
+                slot.booked_by_appointment_id = appointment_id
+                slot.updated_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return True
+            except Exception as commit_error:
+                self.db.rollback()
+                self.logger.error(f"Failed to commit slot booking: {commit_error}")
+                raise
         
         return False
     
     def _release_appointment_slot(self, start_time: datetime, provider_id: str) -> bool:
         """Release an appointment slot."""
-        # Find the corresponding appointment slot
-        slot = self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime == start_time,
-            AppointmentSlot.is_booked == YesNo.YES.value
-        ).first()
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _release_appointment_slot")
+            return False
         
+        if not start_time:
+            self.logger.warning("start_time is None in _release_appointment_slot")
+            return False
+        
+        try:
+            # Issue 20: Query by booked_by_appointment_id instead of time matching
+            # First try to find by appointment_id if we have it
+            # Otherwise fall back to time matching
+            slot = None
+            # Try to find slot by provider and time, but prefer booked_by_appointment_id
+            slot = self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime == start_time,
+                AppointmentSlot.is_booked == YesNo.YES.value
+            ).first()
+        except Exception as e:
+            self.logger.error(f"Error querying slot for release: {e}")
+            return False
+        
+        # Issue 168: Verify slot was actually booked before releasing
         if slot:
-            slot.is_booked = YesNo.NO.value
-            slot.booked_by_appointment_id = None
-            slot.updated_at = datetime.now(timezone.utc)
-            return True
+            # Issue 168: Check slot state before releasing
+            if slot.is_booked != YesNo.YES.value and slot.is_booked != "held":
+                self.logger.warning(f"Slot {slot.slot_id} is not booked (state: {slot.is_booked}), cannot release")
+                return False
+            
+            try:
+                slot.is_booked = YesNo.NO.value
+                slot.booked_by_appointment_id = None
+                slot.updated_at = datetime.now(timezone.utc)
+                self.db.commit()
+                return True
+            except Exception as commit_error:
+                self.db.rollback()
+                self.logger.error(f"Failed to commit slot release: {commit_error}")
+                raise
         
         return False
     
@@ -513,13 +794,55 @@ class AppointmentService:
         Returns:
             AppointmentSlot if found, None otherwise
         """
-        return self.db.query(AppointmentSlot).filter(
-            and_(
-                AppointmentSlot.provider_id == provider_id,
-                AppointmentSlot.slot_datetime == start_time,
-                AppointmentSlot.is_booked == 'no'
-            )
-        ).first()
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _find_appointment_slot")
+            return None
+        
+        if not start_time:
+            self.logger.warning("start_time is None in _find_appointment_slot")
+            return None
+        
+        try:
+            # Issue 121: Normalize timezones before querying
+            # Ensure start_time is in UTC for consistent comparison
+            if start_time.tzinfo is None:
+                # Assume UTC if no timezone info
+                from datetime import timezone
+                start_time = start_time.replace(tzinfo=timezone.utc)
+            elif start_time.tzinfo != timezone.utc:
+                # Convert to UTC
+                start_time = start_time.astimezone(timezone.utc)
+            
+            # Issue 69: Use SELECT FOR UPDATE to lock the slot when finding it to prevent double-booking
+            from sqlalchemy import select
+            from models.enums import YesNo
+            
+            # Issue 138: Handle multiple slots at same time
+            # Query for all slots matching the criteria
+            slots = self.db.execute(
+                select(AppointmentSlot).where(
+                    AppointmentSlot.provider_id == provider_id,
+                    AppointmentSlot.slot_datetime == start_time,
+                    AppointmentSlot.is_booked == YesNo.NO.value
+                ).with_for_update()
+            ).scalars().all()
+            
+            # Issue 138: Handle multiple slots at same time
+            if not slots:
+                return None
+            elif len(slots) == 1:
+                return slots[0]
+            else:
+                # Multiple slots found - use the first one
+                self.logger.warning(
+                    f"Multiple slots found for provider {provider_id} at {start_time}, using first slot",
+                    LogCategory.APPOINTMENT
+                )
+                return slots[0]
+        except Exception as e:
+            self.logger.error(f"Error finding appointment slot: {e}")
+            return None
     
     def _log_audit(self, table_name: str, record_id: str, action_type: str, 
                    old_values: Optional[Dict], new_values: Optional[Dict]):

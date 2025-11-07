@@ -89,7 +89,8 @@ class GoogleCalendarService:
         """
         try:
             if auth_code:
-                self.logger.info(f"Starting OAuth flow for provider {provider_id} with auth code: {auth_code[:20]}...")
+                auth_code_preview = auth_code[:20] if len(auth_code) > 20 else auth_code
+                self.logger.info(f"Starting OAuth flow for provider {provider_id} with auth code: {auth_code_preview}...")
                 
                 # Complete OAuth flow with authorization code
                 flow = Flow.from_client_config(
@@ -471,8 +472,16 @@ class GoogleCalendarService:
     
     def _get_provider_email(self, provider_id: str) -> str:
         """Get provider's email address from database."""
+        if not provider_id:
+            self.logger.warning("Provider ID is empty, using fallback email")
+            return "provider-unknown@clinic.com"
+        
         try:
             from models.models import Provider
+            if not self.db:
+                self.logger.warning("No database session available, using fallback email")
+                return f"provider-{provider_id}@clinic.com"
+            
             provider = self.db.query(Provider).filter(Provider.provider_id == provider_id).first()
             if provider and provider.email:
                 return provider.email
@@ -485,8 +494,24 @@ class GoogleCalendarService:
     
     def _get_clinic_info(self, provider_id: str) -> dict:
         """Get clinic information for a provider."""
+        if not provider_id:
+            self.logger.warning("Provider ID is empty, using default clinic info")
+            return {
+                "clinic_name": "Medical Center",
+                "timezone": "America/New_York",
+                "phone_number": "+14071234567"
+            }
+        
         try:
             from models.models import Provider, Clinic
+            if not self.db:
+                self.logger.warning("No database session available, using default clinic info")
+                return {
+                    "clinic_name": "Medical Center",
+                    "timezone": "America/New_York",
+                    "phone_number": "+14071234567"
+                }
+            
             # Get provider's clinic through appointment slots or direct relationship
             provider = self.db.query(Provider).filter(Provider.provider_id == provider_id).first()
             if provider:
@@ -497,11 +522,11 @@ class GoogleCalendarService:
                 ).first()
                 if slot and slot.clinic_id:
                     clinic = self.db.query(Clinic).filter(Clinic.clinic_id == slot.clinic_id).first()
-                    if clinic:
+                    if clinic and clinic.clinic_id:
                         return {
-                            "clinic_name": clinic.clinic_name,
-                            "timezone": clinic.timezone,
-                            "phone_number": clinic.phone_number
+                            "clinic_name": clinic.clinic_name or "Medical Center",
+                            "timezone": clinic.timezone or "America/New_York",
+                            "phone_number": clinic.phone_number or "+14071234567"
                         }
             
             # Fallback to default values

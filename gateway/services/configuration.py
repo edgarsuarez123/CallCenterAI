@@ -76,7 +76,15 @@ class SecurityConfig(BaseSettings):
     @classmethod
     def parse_json_strings(cls, v):
         """Parse JSON strings or comma-separated values for CORS configuration."""
+        # Handle None or empty values
+        if v is None:
+            return ["*"]
+        
         if isinstance(v, str):
+            # Handle empty string
+            if len(v.strip()) == 0:
+                return ["*"]
+            
             # Handle special case where Azure CLI strips quotes: [*] -> ["*"]
             if v == "[*]":
                 return ["*"]
@@ -92,7 +100,12 @@ class SecurityConfig(BaseSettings):
             except (json.JSONDecodeError, TypeError):
                 # Fall back to comma-separated values
                 return [item.strip() for item in v.split(',') if item.strip()]
-        return v
+        
+        # If it's already a list, return it
+        if isinstance(v, list):
+            return v
+        
+        return ["*"]
     
     # Rate limiting
     rate_limit_per_minute: int = Field(default=100, ge=1, le=1000, description="Rate limit per minute")
@@ -110,14 +123,22 @@ class SecurityConfig(BaseSettings):
         if not v:
             raise ValueError("Encryption key is required")
         
+        # Handle None or empty SecretStr
+        try:
+            secret_value = v.get_secret_value()
+            if not secret_value or len(secret_value.strip()) == 0:
+                raise ValueError("Encryption key cannot be empty")
+        except Exception as e:
+            raise ValueError(f"Encryption key is invalid: {e}")
+        
         # Try to decode as base64
         try:
-            decoded = base64.b64decode(v.get_secret_value())
+            decoded = base64.b64decode(secret_value)
             if len(decoded) != 32:
                 raise ValueError("Encryption key must be 32 bytes when base64 decoded")
         except Exception:
             # If not base64, check if it's 32 characters (assuming hex)
-            if len(v.get_secret_value()) != 64:  # 32 bytes = 64 hex characters
+            if len(secret_value) != 64:  # 32 bytes = 64 hex characters
                 raise ValueError("Encryption key must be 32 bytes (64 hex characters) or base64 encoded")
         
         return v

@@ -43,6 +43,13 @@ class ProviderManagementService:
             ValueError: If clinic doesn't exist or data is invalid
             IntegrityError: If provider already exists
         """
+        # Validate inputs
+        if not clinic_id or not isinstance(clinic_id, str) or not clinic_id.strip():
+            raise ValueError("clinic_id cannot be empty")
+        
+        if not provider_data:
+            raise ValueError("provider_data cannot be None")
+        
         try:
             # Verify clinic exists
             clinic = self.db.query(Clinic).filter_by(clinic_id=clinic_id).first()
@@ -72,12 +79,21 @@ class ProviderManagementService:
             # Log the creation
             self._log_audit("providers", provider_id, "CREATE", None, provider_data.dict())
             
-            self.db.commit()
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit provider: {str(commit_error)}")
+            
             return provider
             
         except IntegrityError as e:
             self.db.rollback()
-            raise ValueError(f"Provider already exists")
+            raise ValueError(f"Provider already exists: {str(e)}")
+        except ValueError:
+            # Re-raise ValueError as-is
+            raise
         except Exception as e:
             self.db.rollback()
             raise ValueError(f"Failed to add provider: {str(e)}")
@@ -97,32 +113,49 @@ class ProviderManagementService:
         Returns:
             Updated provider instance or None if not found
         """
+        # Validate inputs
+        if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
+            return None
+        
+        if not updates:
+            return None
+        
         provider = self.get_provider(provider_id)
         if not provider:
             return None
         
-        # Store old values for audit
-        old_values = {
-            "name_token": provider.name_token,
-            "title": provider.title,
-            "specialty": provider.specialty,
-            "email": provider.email,
-            "is_available": provider.is_available
-        }
-        
-        # Update fields
-        update_data = updates.dict(exclude_unset=True)
-        for field, value in update_data.items():
-            if hasattr(provider, field):
-                setattr(provider, field, value)
-        
-        provider.updated_at = datetime.now(AST)
-        
-        # Log the update
-        self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
-        
-        self.db.commit()
-        return provider
+        try:
+            # Store old values for audit
+            old_values = {
+                "name_token": provider.name_token,
+                "title": provider.title,
+                "specialty": provider.specialty,
+                "email": provider.email,
+                "is_available": provider.is_available
+            }
+            
+            # Update fields
+            update_data = updates.dict(exclude_unset=True)
+            for field, value in update_data.items():
+                if hasattr(provider, field):
+                    setattr(provider, field, value)
+            
+            provider.updated_at = datetime.now(AST)
+            
+            # Log the update
+            self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit provider update: {str(commit_error)}")
+            
+            return provider
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to update provider: {str(e)}")
     
     def list_providers(self, search: ProviderSearchRequest) -> List[Provider]:
         """
@@ -167,20 +200,34 @@ class ProviderManagementService:
         Returns:
             True if successful, False if provider not found
         """
+        # Validate inputs
+        if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
+            return False
+        
         provider = self.get_provider(provider_id)
         if not provider:
             return False
         
-        old_status = provider.is_available
-        provider.is_available = "yes" if is_available else "no"
-        provider.updated_at = datetime.now(AST)
-        
-        # Log the change
-        self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
-                       {"is_available": old_status}, {"is_available": provider.is_available})
-        
-        self.db.commit()
-        return True
+        try:
+            old_status = provider.is_available
+            provider.is_available = "yes" if is_available else "no"
+            provider.updated_at = datetime.now(AST)
+            
+            # Log the change
+            self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
+                           {"is_available": old_status}, {"is_available": provider.is_available})
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit availability update: {str(commit_error)}")
+            
+            return True
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to set provider availability: {str(e)}")
     
     def create_appointment_slots(self, provider_id: str, clinic_id: str, 
                                 start_date: datetime, end_date: datetime, 
@@ -200,6 +247,30 @@ class ProviderManagementService:
         Returns:
             List of created appointment slots
         """
+        # Validate inputs
+        if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
+            raise ValueError("provider_id cannot be empty")
+        
+        if not clinic_id or not isinstance(clinic_id, str) or not clinic_id.strip():
+            raise ValueError("clinic_id cannot be empty")
+        
+        if not start_date or not isinstance(start_date, datetime):
+            raise ValueError("start_date must be a valid datetime")
+        
+        if not end_date or not isinstance(end_date, datetime):
+            raise ValueError("end_date must be a valid datetime")
+        
+        if end_date < start_date:
+            raise ValueError("end_date must be after start_date")
+        
+        if duration_minutes <= 0:
+            raise ValueError("duration_minutes must be positive")
+        
+        # Verify provider exists
+        provider = self.get_provider(provider_id)
+        if not provider:
+            raise ValueError(f"Provider {provider_id} not found")
+        
         if not business_hours:
             business_hours = {
                 "monday": "08:00-17:00",
@@ -212,38 +283,50 @@ class ProviderManagementService:
             }
         
         created_slots = []
-        # Use AST timezone for DST-aware slot creation
-        tz = ZoneInfo("America/Puerto_Rico")  # AST timezone
-        current_date = start_date.replace(tzinfo=tz)
-        
-        while current_date <= end_date:
-            day_name = current_date.strftime("%A").lower()
+        try:
+            # Use AST timezone for DST-aware slot creation
+            tz = ZoneInfo("America/Puerto_Rico")  # AST timezone
+            current_date = start_date.replace(tzinfo=tz)
             
-            if day_name in business_hours and business_hours[day_name] != "CLOSED":
-                # Parse business hours (e.g., "08:00-17:00")
-                hours_str = business_hours[day_name]
-                start_hour, end_hour = self._parse_business_hours(hours_str)
+            while current_date <= end_date:
+                day_name = current_date.strftime("%A").lower()
                 
-                try:
-                    # Create slots for this day - will skip non-existent DST times
-                    day_slots = self._create_day_slots(
-                        provider_id, clinic_id, current_date, 
-                        start_hour, end_hour, duration_minutes
-                    )
-                    created_slots.extend(day_slots)
-                except Exception as e:
-                    # Skip DST transition hour
-                    self.logger.warning(f"Skipping DST transition for {current_date.date()}: {e}")
-                    continue
+                if day_name in business_hours and business_hours[day_name] != "CLOSED":
+                    # Parse business hours (e.g., "08:00-17:00")
+                    hours_str = business_hours[day_name]
+                    try:
+                        start_hour, end_hour, is_overnight = self._parse_business_hours(hours_str)
+                        
+                        # Create slots for this day - will skip non-existent DST times
+                        day_slots = self._create_day_slots(
+                            provider_id, clinic_id, current_date, 
+                            start_hour, end_hour, duration_minutes, is_overnight
+                        )
+                        created_slots.extend(day_slots)
+                    except Exception as e:
+                        # Skip DST transition hour or invalid hours
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"Skipping DST transition for {current_date.date()}: {e}")
+                        continue
+                
+                current_date += timedelta(days=1)
             
-            current_date += timedelta(days=1)
-        
-        # Log the creation
-        self._log_audit("appointment_slots", f"BULK_{provider_id}", "CREATE_BULK", 
-                       None, {"count": len(created_slots), "provider_id": provider_id})
-        
-        self.db.commit()
-        return created_slots
+            # Log the creation
+            self._log_audit("appointment_slots", f"BULK_{provider_id}", "CREATE_BULK", 
+                           None, {"count": len(created_slots), "provider_id": provider_id})
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit appointment slots: {str(commit_error)}")
+            
+            return created_slots
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to create appointment slots: {str(e)}")
     
     def create_appointment_slot(self, slot_data: AppointmentSlotCreateRequest) -> AppointmentSlot:
         """
@@ -258,42 +341,71 @@ class ProviderManagementService:
         Raises:
             ValueError: If provider or clinic not found
         """
-        # Verify provider exists
-        provider = self.get_provider(slot_data.provider_id)
-        if not provider:
-            raise ValueError(f"Provider {slot_data.provider_id} not found")
+        # Validate inputs
+        if not slot_data:
+            raise ValueError("slot_data cannot be None")
         
-        # Verify clinic exists
-        clinic = self.db.query(Clinic).filter_by(clinic_id=slot_data.clinic_id).first()
-        if not clinic:
-            raise ValueError(f"Clinic {slot_data.clinic_id} not found")
+        if not slot_data.provider_id or not isinstance(slot_data.provider_id, str) or not slot_data.provider_id.strip():
+            raise ValueError("provider_id cannot be empty")
         
-        # Generate slot ID
-        slot_id = make_ulid_token('SLOT')
+        if not slot_data.clinic_id or not isinstance(slot_data.clinic_id, str) or not slot_data.clinic_id.strip():
+            raise ValueError("clinic_id cannot be empty")
         
-        # Create slot
-        slot = AppointmentSlot(
-            slot_id=slot_id,
-            provider_id=slot_data.provider_id,
-            clinic_id=slot_data.clinic_id,
-            slot_datetime=slot_data.slot_datetime,
-            duration_minutes=slot_data.duration_minutes,
-            is_booked="no"
-        )
+        if not slot_data.slot_datetime or not isinstance(slot_data.slot_datetime, datetime):
+            raise ValueError("slot_datetime must be a valid datetime")
         
-        self.db.add(slot)
-        self.db.commit()
-        self.db.refresh(slot)
+        if slot_data.duration_minutes <= 0:
+            raise ValueError("duration_minutes must be positive")
         
-        # Log the creation
-        self._log_audit("appointment_slots", slot_id, "CREATE", None, {
-            "provider_id": slot_data.provider_id,
-            "clinic_id": slot_data.clinic_id,
-            "slot_datetime": slot_data.slot_datetime.isoformat(),
-            "duration_minutes": slot_data.duration_minutes
-        })
-        
-        return slot
+        try:
+            # Verify provider exists
+            provider = self.get_provider(slot_data.provider_id)
+            if not provider:
+                raise ValueError(f"Provider {slot_data.provider_id} not found")
+            
+            # Verify clinic exists
+            clinic = self.db.query(Clinic).filter_by(clinic_id=slot_data.clinic_id).first()
+            if not clinic:
+                raise ValueError(f"Clinic {slot_data.clinic_id} not found")
+            
+            # Generate slot ID
+            slot_id = make_ulid_token('SLOT')
+            
+            # Create slot
+            slot = AppointmentSlot(
+                slot_id=slot_id,
+                provider_id=slot_data.provider_id,
+                clinic_id=slot_data.clinic_id,
+                slot_datetime=slot_data.slot_datetime,
+                duration_minutes=slot_data.duration_minutes,
+                is_booked="no"
+            )
+            
+            self.db.add(slot)
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+                self.db.refresh(slot)
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit appointment slot: {str(commit_error)}")
+            
+            # Log the creation
+            self._log_audit("appointment_slots", slot_id, "CREATE", None, {
+                "provider_id": slot_data.provider_id,
+                "clinic_id": slot_data.clinic_id,
+                "slot_datetime": slot_data.slot_datetime.isoformat(),
+                "duration_minutes": slot_data.duration_minutes
+            })
+            
+            return slot
+        except ValueError:
+            # Re-raise ValueError as-is
+            raise
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to create appointment slot: {str(e)}")
     
     def get_available_slots(self, provider_id: str, start_date: datetime, 
                            end_date: datetime) -> List[AppointmentSlot]:
@@ -308,12 +420,31 @@ class ProviderManagementService:
         Returns:
             List of available appointment slots
         """
-        return self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime >= start_date,
-            AppointmentSlot.slot_datetime <= end_date,
-            AppointmentSlot.is_booked == YesNo.NO.value
-        ).order_by(AppointmentSlot.slot_datetime).all()
+        # Validate inputs
+        if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
+            return []
+        
+        if not start_date or not isinstance(start_date, datetime):
+            return []
+        
+        if not end_date or not isinstance(end_date, datetime):
+            return []
+        
+        if end_date < start_date:
+            return []
+        
+        try:
+            return self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime >= start_date,
+                AppointmentSlot.slot_datetime <= end_date,
+                AppointmentSlot.is_booked == YesNo.NO.value
+            ).order_by(AppointmentSlot.slot_datetime).all()
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error querying available slots: {e}")
+            return []
     
     def book_appointment_slot(self, slot_id: str, appointment_id: str) -> bool:
         """
@@ -326,25 +457,42 @@ class ProviderManagementService:
         Returns:
             True if successful, False if slot not available
         """
-        slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
-        if not slot or slot.is_booked == YesNo.YES.value:
+        # Validate inputs
+        if not slot_id or not isinstance(slot_id, str) or not slot_id.strip():
             return False
         
-        old_values = {
-            "is_booked": slot.is_booked,
-            "booked_by_appointment_id": slot.booked_by_appointment_id
-        }
+        if not appointment_id or not isinstance(appointment_id, str) or not appointment_id.strip():
+            return False
         
-        slot.is_booked = "yes"
-        slot.booked_by_appointment_id = appointment_id
-        slot.updated_at = datetime.now(AST)
-        
-        # Log the booking
-        self._log_audit("appointment_slots", slot_id, "BOOK", 
-                       old_values, {"is_booked": "yes", "appointment_id": appointment_id})
-        
-        self.db.commit()
-        return True
+        try:
+            slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
+            if not slot or slot.is_booked == YesNo.YES.value:
+                return False
+            
+            old_values = {
+                "is_booked": slot.is_booked,
+                "booked_by_appointment_id": slot.booked_by_appointment_id
+            }
+            
+            slot.is_booked = "yes"
+            slot.booked_by_appointment_id = appointment_id
+            slot.updated_at = datetime.now(AST)
+            
+            # Log the booking
+            self._log_audit("appointment_slots", slot_id, "BOOK", 
+                           old_values, {"is_booked": "yes", "appointment_id": appointment_id})
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit slot booking: {str(commit_error)}")
+            
+            return True
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to book appointment slot: {str(e)}")
     
     def release_appointment_slot(self, slot_id: str) -> bool:
         """
@@ -356,25 +504,41 @@ class ProviderManagementService:
         Returns:
             True if successful, False if slot not found
         """
-        slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
-        if not slot:
+        # Validate inputs
+        if not slot_id or not isinstance(slot_id, str) or not slot_id.strip():
             return False
         
-        old_values = {
-            "is_booked": slot.is_booked,
-            "booked_by_appointment_id": slot.booked_by_appointment_id
-        }
-        
-        slot.is_booked = "no"
-        slot.booked_by_appointment_id = None
-        slot.updated_at = datetime.now(AST)
-        
-        # Log the release
-        self._log_audit("appointment_slots", slot_id, "RELEASE", 
-                       old_values, {"is_booked": "no", "appointment_id": None})
-        
-        self.db.commit()
-        return True
+        try:
+            slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
+            if not slot:
+                return False
+            
+            old_values = {
+                "is_booked": slot.is_booked,
+                "booked_by_appointment_id": slot.booked_by_appointment_id
+            }
+            
+            # Issue 18: Use enum instead of string literal
+            from models.enums import YesNo
+            slot.is_booked = YesNo.NO.value
+            slot.booked_by_appointment_id = None
+            slot.updated_at = datetime.now(AST)
+            
+            # Log the release
+            self._log_audit("appointment_slots", slot_id, "RELEASE", 
+                           old_values, {"is_booked": "no", "appointment_id": None})
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                raise ValueError(f"Failed to commit slot release: {str(commit_error)}")
+            
+            return True
+        except Exception as e:
+            self.db.rollback()
+            raise ValueError(f"Failed to release appointment slot: {str(e)}")
     
     def get_provider_schedule(self, provider_id: str, date: datetime) -> List[AppointmentSlot]:
         """
@@ -387,38 +551,90 @@ class ProviderManagementService:
         Returns:
             List of appointment slots for the date
         """
-        start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_of_day = start_of_day + timedelta(days=1)
+        # Validate inputs
+        if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
+            return []
         
-        return self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime >= start_of_day,
-            AppointmentSlot.slot_datetime < end_of_day
-        ).order_by(AppointmentSlot.slot_datetime).all()
+        if not date or not isinstance(date, datetime):
+            return []
+        
+        try:
+            start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_of_day = start_of_day + timedelta(days=1)
+            
+            return self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime >= start_of_day,
+                AppointmentSlot.slot_datetime < end_of_day
+            ).order_by(AppointmentSlot.slot_datetime).all()
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error querying provider schedule: {e}")
+            return []
     
     def _check_provider_limit(self, clinic_id: str) -> bool:
         """Check if clinic has reached provider limit."""
-        # Get clinic license to check provider limit
-        from models.models import ClinicLicense
-        license = self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
+        # Validate input
+        if not clinic_id or not isinstance(clinic_id, str) or not clinic_id.strip():
+            return False
         
-        if not license or not license.max_providers:
-            return True  # No limit or unlimited
-        
-        # Count current providers
-        # Note: This assumes we'll add clinic_id to Provider model
-        # For now, we'll return True
-        # provider_count = self.db.query(Provider).filter_by(clinic_id=clinic_id).count()
-        # return provider_count < license.max_providers
-        
-        return True  # TODO: Implement when clinic_id is added to Provider model
+        try:
+            # Get clinic license to check provider limit
+            from models.models import ClinicLicense
+            license = self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
+            
+            if not license or not license.max_providers:
+                return True  # No limit or unlimited
+            
+            # Count current providers
+            # Note: This assumes we'll add clinic_id to Provider model
+            # For now, we'll return True
+            # provider_count = self.db.query(Provider).filter_by(clinic_id=clinic_id).count()
+            # return provider_count < license.max_providers
+            
+            return True  # TODO: Implement when clinic_id is added to Provider model
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error checking provider limit: {e}")
+            return False
     
     def _parse_business_hours(self, hours_str: str) -> tuple:
         """Parse business hours string supporting overnight shifts (e.g., '08:00-17:00' or '22:00-06:00')."""
+        # Validate input
+        if not hours_str or not isinstance(hours_str, str) or not hours_str.strip():
+            from services.exceptions import ValidationError
+            raise ValidationError(
+                "business_hours",
+                hours_str,
+                "Hours string cannot be empty"
+            )
+        
         try:
-            start_str, end_str = hours_str.split('-')
-            start_hour = int(start_str.split(':')[0])
-            end_hour = int(end_str.split(':')[0])
+            parts = hours_str.split('-')
+            if len(parts) != 2:
+                raise ValueError("Hours string must contain exactly one '-' separator")
+            
+            start_str, end_str = parts
+            if not start_str or not end_str:
+                raise ValueError("Start and end times cannot be empty")
+            
+            start_parts = start_str.split(':')
+            end_parts = end_str.split(':')
+            
+            if len(start_parts) < 1 or len(end_parts) < 1:
+                raise ValueError("Time format must include hour")
+            
+            start_hour = int(start_parts[0])
+            end_hour = int(end_parts[0])
+            
+            # Validate hour ranges
+            if start_hour < 0 or start_hour > 23:
+                raise ValueError(f"Start hour must be between 0 and 23, got {start_hour}")
+            
+            if end_hour < 0 or end_hour > 23:
+                raise ValueError(f"End hour must be between 0 and 23, got {end_hour}")
             
             # Return tuple with overnight flag
             is_overnight = end_hour <= start_hour
@@ -428,7 +644,7 @@ class ProviderManagementService:
             raise ValidationError(
                 "business_hours",
                 hours_str,
-                "Invalid hours format. Expected format: 'HH:MM-HH:MM'"
+                f"Invalid hours format. Expected format: 'HH:MM-HH:MM'. Error: {str(e)}"
             )
     
     def _create_day_slots(self, provider_id: str, clinic_id: str, date: datetime,

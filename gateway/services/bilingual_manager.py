@@ -152,15 +152,41 @@ class BilingualManager:
             Language detection result
         """
         try:
-            # Validate inputs
+            # Issue 92: Handle empty or whitespace-only input
             if not text or not text.strip():
-                raise ValidationError("text", text, "Text cannot be empty")
+                # Issue 92: Return default language for empty input
+                self.logger.warning(f"Empty input for language detection in call {call_id}, using default language")
+                return LanguageDetection(
+                    detected_language=LanguageCode.ENGLISH,  # Default to English
+                    confidence=0.0,
+                    confidence_level=LanguageConfidence.LOW,
+                    detection_method=detection_method,
+                    timestamp=datetime.now(timezone.utc),
+                    context=context
+                )
             
             if not call_id:
                 raise ValidationError("call_id", call_id, "Call ID cannot be empty")
             
-            # Perform language detection
-            detected_language, confidence = await self._analyze_text_language(text)
+            # Issue 38: Handle mixed language input
+            # Check if input contains mixed languages
+            text_lower = text.lower()
+            english_words = sum(1 for word in text_lower.split() if any(c.isalpha() and ord(c) < 128 for c in word))
+            spanish_words = sum(1 for word in text_lower.split() if any(c in 'áéíóúñü' for c in word))
+            
+            if english_words > 0 and spanish_words > 0:
+                # Issue 38: Mixed language detected - use dominant language or lock to one
+                self.logger.info(f"Mixed language input detected for call {call_id}, using dominant language")
+                # Use the language with more words, or default to English if equal
+                if english_words >= spanish_words:
+                    detected_language = LanguageCode.ENGLISH
+                else:
+                    detected_language = LanguageCode.SPANISH
+                # Lower confidence for mixed language
+                confidence = 0.5
+            else:
+                # Perform language detection
+                detected_language, confidence = await self._analyze_text_language(text)
             
             # Determine confidence level
             if confidence >= self.detection_threshold_high:
@@ -194,10 +220,14 @@ class BilingualManager:
             # Update statistics
             self._update_detection_stats(call_id, detection)
             
-            # Call detection callbacks
-            for callback in self.detection_callbacks:
+            # Call detection callbacks (with lock for thread safety)
+            with self._lock:
+                callbacks_copy = list(self.detection_callbacks)
+            
+            for callback in callbacks_copy:
                 try:
-                    await callback(call_id, detection)
+                    if callback and callable(callback):
+                        await callback(call_id, detection)
                 except Exception as e:
                     self.logger.error(f"Error in language detection callback: {e}")
             
@@ -224,7 +254,7 @@ class BilingualManager:
             )
             raise
     
-    async def _analyze_text_language(self, text: str) -> tuple[LanguageCode, float]:
+    async def _analyze_text_language(self, text: str) -> Tuple[LanguageCode, float]:
         """
         Analyze text to determine language and confidence.
         
@@ -314,10 +344,10 @@ class BilingualManager:
                     if len(context.language_history) > 50:
                         context.language_history = context.language_history[-25:]
                     
-                    # Check for language switches
-                    if len(context.language_history) >= 2:
+                    # Check for language switches (with bounds check)
+                    if context.language_history and len(context.language_history) >= 2:
                         last_detection = context.language_history[-2]
-                        if (last_detection.detected_language != detection.detected_language and
+                        if last_detection and (last_detection.detected_language != detection.detected_language and
                             detection.confidence >= self.detection_threshold_medium):
                             context.total_switches += 1
                             context.last_switch_time = datetime.now(timezone.utc)
@@ -366,20 +396,29 @@ class BilingualManager:
         """
         try:
             with self._lock:
-                # Check if already locked
+                # Issue 93: Check if language is already locked
                 if call_id in self.language_locks:
                     existing_lock = self.language_locks[call_id]
-                    if existing_lock.locked_language == language:
-                        # Extend existing lock
-                        existing_lock.lock_duration = duration
-                        existing_lock.lock_timestamp = datetime.now(timezone.utc)
-                        self.logger.info(f"Extended language lock for call {call_id}")
-                        return True
+                    # Issue 93: Check if lock is still valid (not expired)
+                    lock_age = (datetime.now(timezone.utc) - existing_lock.lock_timestamp).total_seconds()
+                    if lock_age < existing_lock.lock_duration:
+                        # Lock is still valid
+                        if existing_lock.locked_language == language:
+                            # Issue 93: Extend existing lock for same language
+                            existing_lock.lock_duration = duration
+                            existing_lock.lock_timestamp = datetime.now(timezone.utc)
+                            self.logger.info(f"Extended language lock for call {call_id}")
+                            return True
+                        else:
+                            # Issue 93: Language already locked to different language
+                            raise ConcurrencyError(
+                                "language_already_locked",
+                                f"Call {call_id} already has language locked to {existing_lock.locked_language.value}"
+                            )
                     else:
-                        raise ConcurrencyError(
-                            "language_already_locked",
-                            f"Call {call_id} already has language locked to {existing_lock.locked_language.value}"
-                        )
+                        # Issue 93: Lock expired, remove it and create new lock
+                        self.logger.debug(f"Language lock expired for call {call_id}, creating new lock")
+                        del self.language_locks[call_id]
                 
                 # Create new lock
                 language_lock = LanguageLock(
@@ -501,9 +540,10 @@ class BilingualManager:
                 # Check conversation context
                 if call_id in self.conversations:
                     context = self.conversations[call_id]
-                    if context.detected_language:
+                    if context and context.detected_language:
                         return context.detected_language
-                    return context.primary_language
+                    if context:
+                        return context.primary_language
                 
                 return None
                 
@@ -525,7 +565,8 @@ class BilingualManager:
             with self._lock:
                 if call_id in self.conversations:
                     context = self.conversations[call_id]
-                    return context.user_preference or context.system_preference
+                    if context:
+                        return context.user_preference or context.system_preference
                 return None
                 
         except Exception as e:
@@ -631,35 +672,39 @@ class BilingualManager:
     
     def register_detection_callback(self, callback: Callable):
         """Register a callback for language detection events."""
-        self.detection_callbacks.append(callback)
+        with self._lock:
+            if callback and callable(callback):
+                self.detection_callbacks.append(callback)
     
     def unregister_detection_callback(self, callback: Callable):
         """Unregister a language detection callback."""
-        if callback in self.detection_callbacks:
-            self.detection_callbacks.remove(callback)
+        with self._lock:
+            if callback in self.detection_callbacks:
+                self.detection_callbacks.remove(callback)
     
     def _update_detection_stats(self, call_id: str, detection: LanguageDetection):
         """Update language detection statistics."""
-        if call_id not in self.detection_stats:
-            self.detection_stats[call_id] = {
-                "start_time": datetime.now(timezone.utc),
-                "total_detections": 0,
-                "high_confidence_detections": 0,
-                "medium_confidence_detections": 0,
-                "low_confidence_detections": 0,
-                "language_counts": defaultdict(int)
-            }
-        
-        stats = self.detection_stats[call_id]
-        stats["total_detections"] += 1
-        stats["language_counts"][detection.detected_language.value] += 1
-        
-        if detection.confidence_level == LanguageConfidence.HIGH:
-            stats["high_confidence_detections"] += 1
-        elif detection.confidence_level == LanguageConfidence.MEDIUM:
-            stats["medium_confidence_detections"] += 1
-        else:
-            stats["low_confidence_detections"] += 1
+        with self._lock:
+            if call_id not in self.detection_stats:
+                self.detection_stats[call_id] = {
+                    "start_time": datetime.now(timezone.utc),
+                    "total_detections": 0,
+                    "high_confidence_detections": 0,
+                    "medium_confidence_detections": 0,
+                    "low_confidence_detections": 0,
+                    "language_counts": defaultdict(int)
+                }
+            
+            stats = self.detection_stats[call_id]
+            stats["total_detections"] += 1
+            stats["language_counts"][detection.detected_language.value] += 1
+            
+            if detection.confidence_level == LanguageConfidence.HIGH:
+                stats["high_confidence_detections"] += 1
+            elif detection.confidence_level == LanguageConfidence.MEDIUM:
+                stats["medium_confidence_detections"] += 1
+            else:
+                stats["low_confidence_detections"] += 1
     
     def get_detection_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -671,12 +716,15 @@ class BilingualManager:
         Returns:
             Detection statistics or None
         """
-        if call_id not in self.detection_stats:
-            return None
+        with self._lock:
+            if call_id not in self.detection_stats:
+                return None
+            
+            stats = self.detection_stats[call_id].copy()
         
-        stats = self.detection_stats[call_id].copy()
         stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
         
+        # Division by zero check already handled
         if stats["total_detections"] > 0:
             stats["high_confidence_rate"] = stats["high_confidence_detections"] / stats["total_detections"]
             stats["medium_confidence_rate"] = stats["medium_confidence_detections"] / stats["total_detections"]

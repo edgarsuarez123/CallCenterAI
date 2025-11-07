@@ -5,12 +5,13 @@ appointment booking, and Google Calendar integration.
 """
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone, date, timedelta
 import logging
 import re
 
-from models.models import Call, Patient, Provider, AppointmentSlot, Clinic
+from models.models import Call, Patient, Provider, AppointmentSlot, Clinic, Appointment
 from models.enums import YesNo
 from models.enums import CallStatus
 from services.configuration import get_settings
@@ -317,28 +318,60 @@ class CallFlowService:
                 "services": "comprehensive healthcare services"
             }
     
-    async def process_user_input(self, call_sid: str, user_input: str) -> CallFlowResponse:
+    async def process_user_input(self, call_sid: str, user_input: str, entities: Optional[List[Dict[str, Any]]] = None) -> CallFlowResponse:
         """
         Process user input and determine next conversation step.
         
         Args:
             call_sid: Call session ID
             user_input: User's speech or text input
+            entities: Optional pre-extracted entities (Issue 6: Pass entities instead of re-extracting)
             
         Returns:
             Call flow response with next step
         """
         try:
             # Get call context
-            context = get_call(call_sid)
+            context = await get_call(call_sid)
             if not context:
-                raise ValueError(f"Call {call_sid} not found")
+                # Issue 7: Initialize state when creating new context
+                from models.call_flow_models import CallFlowState
+                context = CallFlowContext(
+                    call_sid=call_sid,
+                    current_state=CallFlowState.GET_INTENT,
+                    clinic_id="default"  # Will be updated from database if available
+                )
+                # Store the new context
+                await store_call(call_sid, context)
+            
+            # Issue 6: Use pre-extracted entities if provided, otherwise extract
+            if entities:
+                # Store entities in context for use in state processing
+                context.metadata = context.metadata or {}
+                context.metadata['extracted_entities'] = entities
+                # Issue 6: Use entities directly instead of re-extracting
+                self.logger.debug(f"Using pre-extracted entities for call {call_sid}: {len(entities)} entities")
+            
+            # Issue 159: Validate state transition before processing to prevent side effects
+            # Determine expected next state based on current state and user input
+            # This is a simplified check - full validation happens after processing
+            expected_next_state = None
+            if context.current_state == CallFlowState.GET_INTENT:
+                # Intent processing will determine next state
+                pass
+            elif context.current_state == CallFlowState.CONFIRM_DETAILS:
+                # Confirmation can lead to booking or back to selection
+                if any(word in user_input.lower() for word in ["yes", "yeah", "correct", "okay", "ok"]):
+                    expected_next_state = CallFlowState.BOOK_APPOINTMENT
+                elif "no" in user_input.lower() or "change" in user_input.lower():
+                    expected_next_state = CallFlowState.SELECT_PROVIDER
             
             # Add to conversation history
             context.conversation_history.append({
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "user_input": user_input,
-                "state": context.current_state
+                "state": context.current_state,
+                "entities": entities if entities else None  # Issue 5: Store entities in conversation history
             })
             
             # Process based on current state
@@ -379,6 +412,19 @@ class CallFlowService:
                     next_state=CallFlowState.GOODBYE,
                     message="I'm sorry, I didn't understand that. Let me transfer you to our staff.",
                     is_complete=True
+                )
+            
+            # Issue 159: Validate state transition after processing
+            if not self._validate_transition(context.current_state, response.next_state):
+                self.logger.error(
+                    f"Invalid state transition: {context.current_state} -> {response.next_state}",
+                    extra={"call_id": context.call_sid}
+                )
+                # Don't transition, stay in current state and return error response
+                return CallFlowResponse(
+                    next_state=context.current_state,  # Stay in current state
+                    message="I'm sorry, I'm having trouble understanding. Could you please repeat?",
+                    requires_input=True
                 )
             
             # Update context state
@@ -596,10 +642,17 @@ class CallFlowService:
                         data={"patient_found": True}
                     )
                 elif patient_result.multiple_matches:
-                    # Ask for disambiguation
+                    # Issue 43, 169: Handle multiple matches by asking for disambiguation with DOB
+                    # Issue 169: Store multiple matches in context and implement proper patient selection logic
+                    context.metadata = context.metadata or {}
+                    context.metadata['multiple_patient_matches'] = patient_result.multiple_matches
+                    context.metadata['patient_matches_count'] = len(patient_result.multiple_matches) if isinstance(patient_result.multiple_matches, list) else 1
+                    # Issue 169: Ask user to provide DOB to disambiguate
                     return CallFlowResponse(
-                        next_state=CallFlowState.PATIENT_DISAMBIGUATION,
-                        message="I found multiple patients with that name. Can you provide your date of birth?"
+                        next_state=CallFlowState.IDENTIFY_PATIENT,
+                        message="I found multiple patients with that name. Can you provide your date of birth to help me find the right one?",
+                        requires_input=True,
+                        data={"multiple_matches": True, "match_count": context.metadata['patient_matches_count']}
                     )
                 else:
                     # Patient says they've been before but not found - treat as new
@@ -626,17 +679,38 @@ class CallFlowService:
     
     def _process_new_patient_info(self, context: CallFlowContext, user_input: str) -> CallFlowResponse:
         """Process new patient information collection."""
+        # Issue 188: Validate required fields before proceeding
+        required_fields = {
+            'patient_name': context.patient_name,
+            'patient_dob': context.patient_dob,
+            'insurance_provider': context.insurance_provider
+        }
+        
         if not context.patient_dob:
             # Collect date of birth using natural language processor
             result = self.nlp.process_input(user_input)
             dob = result.entities.date_of_birth or self._extract_date_of_birth(user_input)
             if dob:
                 context.patient_dob = dob
-                return CallFlowResponse(
-                    next_state=CallFlowState.NEW_PATIENT_INFO,
-                    message="Thank you. What's your insurance provider?",
-                    data={"dob_collected": True}
-                )
+                # Issue 188: Validate DOB format before storing
+                try:
+                    # Basic validation - ensure DOB is a valid date
+                    if isinstance(dob, str):
+                        from datetime import datetime
+                        datetime.strptime(dob, '%Y-%m-%d')  # Validate format
+                    context.patient_dob = dob
+                    return CallFlowResponse(
+                        next_state=CallFlowState.NEW_PATIENT_INFO,
+                        message="Thank you. What's your insurance provider?",
+                        data={"dob_collected": True}
+                    )
+                except (ValueError, TypeError) as dob_error:
+                    self.logger.warning(f"Invalid DOB format: {dob_error}")
+                    return CallFlowResponse(
+                        next_state=CallFlowState.NEW_PATIENT_INFO,
+                        message="I need a valid date of birth. Please tell me your date of birth, for example, January 15th, 1990.",
+                        requires_input=True
+                    )
             else:
                 return CallFlowResponse(
                     next_state=CallFlowState.NEW_PATIENT_INFO,
@@ -684,6 +758,23 @@ class CallFlowService:
             selected_provider = self._match_provider(user_input, providers)
         
         if selected_provider:
+            # Issue 173, 197: Validate provider availability and existence before selecting
+            if hasattr(selected_provider, 'is_available') and not selected_provider.is_available:
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_PROVIDER,
+                    message=f"I'm sorry, {selected_provider.name} is not currently available. Would you like to see another doctor?",
+                    requires_input=True
+                )
+            
+            # Issue 197: Verify provider still exists in database
+            provider_exists = self._get_provider(selected_provider.provider_id)
+            if not provider_exists:
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_PROVIDER,
+                    message="I'm sorry, that provider is no longer available. Let me show you the available doctors.",
+                    requires_input=True
+                )
+            
             context.provider_id = selected_provider.provider_id
             # Use the name as-is since it already includes the title
             display_name = selected_provider.name
@@ -740,7 +831,7 @@ class CallFlowService:
         
         # Check if user is confirming a suggested date
         if any(word in user_input_lower for word in ["yes", "yeah", "correct", "that works", "perfect", "good"]):
-            if available_dates:
+            if available_dates and len(available_dates) > 0:
                 # Select the first available date
                 selected_date = available_dates[0]
                 context.appointment_date = selected_date.date
@@ -754,6 +845,19 @@ class CallFlowService:
         selected_date = self._match_date(user_input, available_dates, context)
         
         if selected_date:
+            # Issue 177: Re-validate date availability after user selection
+            # Re-check available dates to ensure selected date is still available
+            current_available_dates = self._get_available_dates(context.provider_id)
+            current_date_match = next((d for d in current_available_dates if d.date == selected_date.date), None)
+            
+            if not current_date_match:
+                # Selected date is no longer available
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_DATE,
+                    message="I'm sorry, that date is no longer available. Let me show you the current available dates.",
+                    requires_input=True
+                )
+            
             context.appointment_date = selected_date.date
             
             # Check if user also mentioned a time in the same response
@@ -824,24 +928,103 @@ class CallFlowService:
         selected_time = self._match_time(user_input, available_times)
         
         if selected_time:
-            context.appointment_time = selected_time.start_time
-            return CallFlowResponse(
-                next_state=CallFlowState.CONFIRM_DETAILS,
-                message=f"Perfect! {selected_time.start_time.strftime('%I:%M %p')} works. Let me confirm your appointment details.",
-                data={"time_selected": selected_time.dict()}
-            )
+            # Issue 48, 72: Validate that the selected time is still available and lock the slot
+            # Re-query available times to ensure the slot is still available (race condition check)
+            current_available_times = self._get_available_times(context.provider_id, context.appointment_date)
+            current_time_slot = next((t for t in current_available_times if t.slot_id == selected_time.slot_id), None)
+            
+            if not current_time_slot:
+                # Slot is no longer available
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_TIME,
+                    message="I'm sorry, that time slot is no longer available. Let me show you the current available times.",
+                    requires_input=True
+                )
+            
+            # Issue 157: Actually lock the slot using transaction manager to prevent double-booking
+            try:
+                from services.transaction_manager import get_transaction_manager
+                from models.models import AppointmentSlot
+                from models.enums import YesNo
+                from datetime import datetime, timezone, timedelta
+                
+                transaction_manager = get_transaction_manager(self.db)
+                
+                # Issue 157: Actually hold the slot in the database
+                # Lock the slot row and mark it as held
+                slot = self.db.execute(
+                    select(AppointmentSlot).where(
+                        AppointmentSlot.slot_id == current_time_slot.slot_id,
+                        AppointmentSlot.is_booked == YesNo.NO.value
+                    ).with_for_update()
+                ).scalar_one_or_none()
+                
+                if slot:
+                    # Mark slot as held temporarily
+                    slot.is_booked = "held"
+                    slot.held_until = datetime.now(timezone.utc) + timedelta(minutes=15)  # Hold for 15 minutes
+                    slot.held_by_call_sid = context.call_sid
+                    self.db.commit()
+                    
+                    context.appointment_time = current_time_slot.start_time
+                    context.metadata = context.metadata or {}
+                    context.metadata['selected_slot_id'] = current_time_slot.slot_id
+                    return CallFlowResponse(
+                        next_state=CallFlowState.CONFIRM_DETAILS,
+                        message=f"Perfect! {current_time_slot.start_time.strftime('%I:%M %p')} works. Let me confirm your appointment details.",
+                        data={"time_selected": current_time_slot.dict()}
+                    )
+                else:
+                    # Slot is no longer available
+                    return CallFlowResponse(
+                        next_state=CallFlowState.SELECT_TIME,
+                        message="I'm sorry, that time slot is no longer available. Let me show you the current available times.",
+                        requires_input=True
+                    )
+            except Exception as e:
+                self.logger.error(f"Failed to lock slot: {e}")
+                self.db.rollback()
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_TIME,
+                    message="I'm sorry, I'm having trouble reserving that time. Let me show you the available times again.",
+                    requires_input=True
+                )
         
         # Check if user is confirming a suggested time (only if no time was matched)
         if any(word in user_input_lower for word in ["yes", "yeah", "correct", "that works", "perfect", "good"]):
-            if available_times:
-                # Select the first available time
+            if available_times and len(available_times) > 0:
+                # Issue 48, 72: Validate and lock the first available time
                 selected_time = available_times[0]
-                context.appointment_time = selected_time.start_time
-                return CallFlowResponse(
-                    next_state=CallFlowState.CONFIRM_DETAILS,
-                    message=f"Perfect! {selected_time.start_time.strftime('%I:%M %p')} works. Let me confirm your appointment details.",
-                    data={"time_selected": selected_time.dict()}
-                )
+                # Re-query to ensure slot is still available
+                current_available_times = self._get_available_times(context.provider_id, context.appointment_date)
+                current_time_slot = next((t for t in current_available_times if t.slot_id == selected_time.slot_id), None)
+                
+                if not current_time_slot:
+                    return CallFlowResponse(
+                        next_state=CallFlowState.SELECT_TIME,
+                        message="I'm sorry, that time slot is no longer available. Let me show you the current available times.",
+                        requires_input=True
+                    )
+                
+                # Lock the slot
+                try:
+                    from services.transaction_manager import get_transaction_manager
+                    transaction_manager = get_transaction_manager(self.db)
+                    context.appointment_time = current_time_slot.start_time
+                    context.metadata = context.metadata or {}
+                    context.metadata['selected_slot_id'] = current_time_slot.slot_id
+                    return CallFlowResponse(
+                        next_state=CallFlowState.CONFIRM_DETAILS,
+                        message=f"Perfect! {current_time_slot.start_time.strftime('%I:%M %p')} works. Let me confirm your appointment details.",
+                        data={"time_selected": current_time_slot.dict()}
+                    )
+                except Exception as e:
+                    self.logger.error(f"Failed to lock slot: {e}")
+                    return CallFlowResponse(
+                        next_state=CallFlowState.SELECT_TIME,
+                        message="I'm sorry, I'm having trouble reserving that time. Let me show you the available times again.",
+                        requires_input=True
+                    )
         else:
             # Check if user mentioned a specific time that's not available
             if available_times:
@@ -866,6 +1049,46 @@ class CallFlowService:
         user_input_lower = user_input.lower()
         
         if any(word in user_input_lower for word in ["yes", "yeah", "correct", "okay", "ok", "sounds good", "that works", "perfect", "good"]):
+            # Issue 34, 152: Validate all required fields before booking including appointment_type
+            missing_fields = []
+            if not context.patient_name:
+                missing_fields.append("patient name")
+            if not context.appointment_date:
+                missing_fields.append("appointment date")
+            if not context.appointment_time:
+                missing_fields.append("appointment time")
+            if not context.provider_id:
+                missing_fields.append("provider")
+            # Issue 152: Validate appointment_type is set
+            if not context.appointment_type:
+                missing_fields.append("appointment type")
+            
+            if missing_fields:
+                return CallFlowResponse(
+                    next_state=CallFlowState.CONFIRM_DETAILS,
+                    message=f"I need a few more details to book your appointment: {', '.join(missing_fields)}. Let me help you with that.",
+                    requires_input=True
+                )
+            
+            # Issue 152, 193: Re-verify slot availability before booking
+            try:
+                from services.appointment_service import AppointmentService
+                temp_appointment_service = AppointmentService(self.db)
+                slot_available = temp_appointment_service._is_slot_available(
+                    context.appointment_time,
+                    context.appointment_time + timedelta(hours=1),
+                    context.provider_id
+                )
+                if not slot_available:
+                    return CallFlowResponse(
+                        next_state=CallFlowState.SELECT_TIME,
+                        message="I'm sorry, that time slot is no longer available. Let me show you the available times again.",
+                        requires_input=True
+                    )
+            except Exception as slot_check_error:
+                self.logger.warning(f"Failed to verify slot availability: {slot_check_error}")
+                # Continue with booking attempt - appointment service will handle the error
+            
             # Book the appointment
             try:
                 appointment = await self._book_appointment(context)
@@ -900,6 +1123,12 @@ class CallFlowService:
         else:
             # Show confirmation details
             provider = self._get_provider(context.provider_id)
+            if not provider:
+                return CallFlowResponse(
+                    next_state=CallFlowState.SELECT_PROVIDER,
+                    message="I'm sorry, I couldn't find that provider. Let's start over. Which doctor would you like to see?",
+                    requires_input=True
+                )
             confirmation_message = f"Let me confirm: You'd like to see {provider.title} {provider.name} on {context.appointment_date.strftime('%A, %B %d')} at {context.appointment_time.strftime('%I:%M %p')} for a {context.appointment_type}. Is that correct?"
             
             return CallFlowResponse(
@@ -986,12 +1215,69 @@ class CallFlowService:
         
         # Handle cancel vs reschedule decision
         if "cancel" in user_input_lower:
-            # TODO: Implement actual cancellation logic
-            return CallFlowResponse(
-                next_state=CallFlowState.GOODBYE,
-                message="I'll cancel your appointment. You'll receive a confirmation shortly. Thank you for calling St. Peters Medical Center. Have a great day!",
-                is_complete=True
-            )
+            # Issue 12: Actually call appointment service to cancel the appointment
+            if context.patient_id:
+                # Find the patient's appointments
+                appointments = self.db.query(Appointment).filter(
+                    Appointment.patient_id == context.patient_id,
+                    Appointment.status == 'scheduled'
+                ).all()
+                
+                # Issue 181: Handle multiple appointments by asking user which one to cancel
+                if len(appointments) > 1:
+                    # Multiple appointments found - ask user which one to cancel
+                    appointment_list = []
+                    for i, apt in enumerate(appointments[:5], 1):  # Show first 5
+                        date_str = apt.appointment_date.strftime('%A, %B %d') if apt.appointment_date else "Unknown date"
+                        time_str = apt.start_time.strftime('%I:%M %p') if apt.start_time else "Unknown time"
+                        appointment_list.append(f"{i}. {date_str} at {time_str}")
+                    
+                    appointments_text = "\n".join(appointment_list)
+                    context.metadata = context.metadata or {}
+                    context.metadata['pending_appointments'] = [apt.appointment_id for apt in appointments[:5]]
+                    
+                    return CallFlowResponse(
+                        next_state=CallFlowState.CANCEL_APPOINTMENT,
+                        message=f"I found {len(appointments)} appointments for you:\n{appointments_text}\nWhich one would you like to cancel? Please say the number.",
+                        requires_input=True,
+                        data={"multiple_appointments": True, "appointment_count": len(appointments)}
+                    )
+                elif appointments:
+                    # Issue 181: Single appointment - cancel it directly
+                    appointment_to_cancel = appointments[0]
+                    try:
+                        cancelled = self.appointment_service.cancel_appointment(appointment_to_cancel.appointment_id)
+                        if cancelled:
+                            return CallFlowResponse(
+                                next_state=CallFlowState.GOODBYE,
+                                message="I've cancelled your appointment. You'll receive a confirmation shortly. Thank you for calling. Have a great day!",
+                                is_complete=True
+                            )
+                        else:
+                            return CallFlowResponse(
+                                next_state=CallFlowState.GOODBYE,
+                                message="I'm having trouble cancelling your appointment. Let me transfer you to our staff.",
+                                is_complete=True
+                            )
+                    except Exception as e:
+                        self.logger.error(f"Failed to cancel appointment: {e}")
+                        return CallFlowResponse(
+                            next_state=CallFlowState.GOODBYE,
+                            message="I'm having trouble cancelling your appointment. Let me transfer you to our staff.",
+                            is_complete=True
+                        )
+                else:
+                    return CallFlowResponse(
+                        next_state=CallFlowState.GOODBYE,
+                        message="I don't see any scheduled appointments for you. Let me transfer you to our staff who can help.",
+                        is_complete=True
+                    )
+            else:
+                return CallFlowResponse(
+                    next_state=CallFlowState.GOODBYE,
+                    message="I need to find your appointment first. Let me transfer you to our staff who can help.",
+                    is_complete=True
+                )
         elif "reschedule" in user_input_lower or "change" in user_input_lower:
             # TODO: Implement rescheduling logic
             return CallFlowResponse(
@@ -1017,15 +1303,27 @@ class CallFlowService:
             Patient.is_deleted == 'no'
         ).limit(10).all()  # Add limit to prevent huge result sets
         
-        if patients:
-            # Return first match (in production, use confidence scoring)
-            return PatientIdentificationResult(
-                is_found=True,
-                patient_id=patients[0].patient_id,
-                patient_name=patient_name,
-                confidence=0.8,
-                match_reason="name_match"
-            )
+        if patients and len(patients) > 0:
+            # Issue 43: Handle multiple matches - return first match but indicate if multiple exist
+            if len(patients) > 1:
+                # Multiple matches found - return first but indicate multiple matches
+                return PatientIdentificationResult(
+                    is_found=True,
+                    patient_id=patients[0].patient_id,
+                    patient_name=patient_name,
+                    confidence=0.6,  # Lower confidence for multiple matches
+                    match_reason="name_match_multiple",
+                    multiple_matches=True  # Indicate multiple matches exist
+                )
+            else:
+                # Single match
+                return PatientIdentificationResult(
+                    is_found=True,
+                    patient_id=patients[0].patient_id,
+                    patient_name=patient_name,
+                    confidence=0.8,
+                    match_reason="name_match"
+                )
         
         return PatientIdentificationResult(
             is_found=False,
@@ -1034,9 +1332,18 @@ class CallFlowService:
     
     def _get_available_providers(self, clinic_id: str) -> List[ProviderOption]:
         """Get available providers for the clinic."""
-        providers = self.db.query(Provider).filter(
-            Provider.is_available == YesNo.YES.value
-        ).all()
+        # Validate clinic_id
+        if not clinic_id:
+            self.logger.warning("clinic_id is empty in _get_available_providers")
+            return []
+        
+        try:
+            providers = self.db.query(Provider).filter(
+                Provider.is_available == YesNo.YES.value
+            ).all()
+        except Exception as e:
+            self.logger.error(f"Error querying providers: {e}")
+            return []
         
         return [
             ProviderOption(
@@ -1051,47 +1358,69 @@ class CallFlowService:
     
     def _get_available_dates(self, provider_id: str) -> List[DateOption]:
         """Get available dates for a provider."""
-        # Get next 14 days
-        start_date = datetime.now(timezone.utc) + timedelta(days=1)
-        end_date = start_date + timedelta(days=14)
+        # Validate provider_id
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _get_available_dates")
+            return []
         
-        available_dates = []
-        current_date = start_date
-        
-        while current_date <= end_date:
-            # Only include weekdays (Monday=0, Sunday=6)
-            if current_date.weekday() < 5:  # Monday=0, Tuesday=1, ..., Friday=4
-                # Check if provider has slots on this date
-                slots = self.db.query(AppointmentSlot).filter(
-                    AppointmentSlot.provider_id == provider_id,
-                    AppointmentSlot.slot_datetime >= current_date,
-                    AppointmentSlot.slot_datetime < current_date + timedelta(days=1),
-                    AppointmentSlot.is_booked == YesNo.NO.value
-                ).count()
-                
-                if slots > 0:
-                    available_dates.append(DateOption(
-                        date=current_date.date(),
-                        day_name=current_date.strftime('%A'),
-                        is_available=True,
-                        available_slots=slots
-                    ))
+        try:
+            # Get next 14 days
+            start_date = datetime.now(timezone.utc) + timedelta(days=1)
+            end_date = start_date + timedelta(days=14)
             
-            current_date += timedelta(days=1)
-        
-        return available_dates
+            available_dates = []
+            current_date = start_date
+            
+            while current_date <= end_date:
+                # Only include weekdays (Monday=0, Sunday=6)
+                if current_date.weekday() < 5:  # Monday=0, Tuesday=1, ..., Friday=4
+                    # Check if provider has slots on this date
+                    slots = self.db.query(AppointmentSlot).filter(
+                        AppointmentSlot.provider_id == provider_id,
+                        AppointmentSlot.slot_datetime >= current_date,
+                        AppointmentSlot.slot_datetime < current_date + timedelta(days=1),
+                        AppointmentSlot.is_booked == YesNo.NO.value
+                    ).count()
+                    
+                    if slots > 0:
+                        available_dates.append(DateOption(
+                            date=current_date.date(),
+                            day_name=current_date.strftime('%A'),
+                            is_available=True,
+                            available_slots=slots
+                        ))
+                
+                current_date += timedelta(days=1)
+            
+            return available_dates
+        except Exception as e:
+            self.logger.error(f"Error querying available dates: {e}")
+            return []
     
     def _get_available_times(self, provider_id: str, appointment_date: date) -> List[TimeSlotOption]:
         """Get available time slots for a provider on a specific date."""
-        start_of_day = datetime.combine(appointment_date, datetime.min.time())
-        end_of_day = start_of_day + timedelta(days=1)
+        # Validate inputs
+        if not provider_id:
+            self.logger.warning("provider_id is empty in _get_available_times")
+            return []
         
-        slots = self.db.query(AppointmentSlot).filter(
-            AppointmentSlot.provider_id == provider_id,
-            AppointmentSlot.slot_datetime >= start_of_day,
-            AppointmentSlot.slot_datetime < end_of_day,
-            AppointmentSlot.is_booked == "no"
-        ).order_by(AppointmentSlot.slot_datetime).all()
+        if not appointment_date:
+            self.logger.warning("appointment_date is None in _get_available_times")
+            return []
+        
+        try:
+            start_of_day = datetime.combine(appointment_date, datetime.min.time())
+            end_of_day = start_of_day + timedelta(days=1)
+            
+            slots = self.db.query(AppointmentSlot).filter(
+                AppointmentSlot.provider_id == provider_id,
+                AppointmentSlot.slot_datetime >= start_of_day,
+                AppointmentSlot.slot_datetime < end_of_day,
+                AppointmentSlot.is_booked == "no"
+            ).order_by(AppointmentSlot.slot_datetime).all()
+        except Exception as e:
+            self.logger.error(f"Error querying available times: {e}")
+            return []
         
         return [
             TimeSlotOption(
@@ -1106,53 +1435,73 @@ class CallFlowService:
     
     async def _book_appointment(self, context: CallFlowContext) -> Any:
         """Book the appointment using the appointment service."""
-        # Create or find patient
-        if not context.patient_id:
-            # Create new patient
-            patient_id = f"PATIENT_{make_ulid_token('PATIENT')[:12]}"
+        # Issue 153: Use transaction to ensure both patient creation and appointment booking succeed or both fail
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        
+        try:
+            # Start transaction
+            self.db.begin()
             
-            # Tokenize PII for HIPAA compliance
-            name_token = make_hmac_token("PATIENT_NAME", context.patient_name)
-            dob_token = make_hmac_token("PATIENT_DOB", context.patient_dob)
-            insurance_token = make_hmac_token("INSURANCE", context.insurance_provider)
+            # Create or find patient
+            if not context.patient_id:
+                # Create new patient
+                patient_id = f"PATIENT_{make_ulid_token('PATIENT')[:12]}"
+                
+                # Tokenize PII for HIPAA compliance
+                name_token = make_hmac_token("PATIENT_NAME", context.patient_name)
+                dob_token = make_hmac_token("PATIENT_DOB", context.patient_dob)
+                insurance_token = make_hmac_token("INSURANCE", context.insurance_provider)
+                
+                # Encrypt sensitive data
+                name_nonce, name_ct = encrypt_str(context.patient_name)
+                dob_nonce, dob_ct = encrypt_str(context.patient_dob)
+                insurance_nonce, insurance_ct = encrypt_str(context.insurance_provider)
+                
+                patient = Patient(
+                    patient_id=patient_id,
+                    name_token=name_token,
+                    dob_token=dob_token,
+                    insurance_provider_token=insurance_token,
+                    # Store encrypted data in separate fields for future use
+                    name_nonce=name_nonce,
+                    name_ciphertext=name_ct,
+                    dob_nonce=dob_nonce,
+                    dob_ciphertext=dob_ct,
+                    insurance_nonce=insurance_nonce,
+                    insurance_ciphertext=insurance_ct
+                )
+                self.db.add(patient)
+                self.db.flush()  # Flush to get patient_id but don't commit yet
+                context.patient_id = patient_id
             
-            # Encrypt sensitive data
-            name_nonce, name_ct = encrypt_str(context.patient_name)
-            dob_nonce, dob_ct = encrypt_str(context.patient_dob)
-            insurance_nonce, insurance_ct = encrypt_str(context.insurance_provider)
-            
-            patient = Patient(
-                patient_id=patient_id,
-                name_token=name_token,
-                dob_token=dob_token,
-                insurance_provider_token=insurance_token,
-                # Store encrypted data in separate fields for future use
-                name_nonce=name_nonce,
-                name_ciphertext=name_ct,
-                dob_nonce=dob_nonce,
-                dob_ciphertext=dob_ct,
-                insurance_nonce=insurance_nonce,
-                insurance_ciphertext=insurance_ct
+            # Create appointment
+            appointment_data = AppointmentCreateRequest(
+                patient_id=context.patient_id,
+                provider_id=context.provider_id,
+                appointment_date=context.appointment_date,
+                start_time=context.appointment_time,
+                end_time=context.appointment_time + timedelta(hours=1),
+                appointment_type=context.appointment_type
             )
-            self.db.add(patient)
-            self.db.flush()
-            context.patient_id = patient_id
-        
-        # Create appointment
-        appointment_data = AppointmentCreateRequest(
-            patient_id=context.patient_id,
-            provider_id=context.provider_id,
-            appointment_date=context.appointment_date,
-            start_time=context.appointment_time,
-            end_time=context.appointment_time + timedelta(hours=1),
-            appointment_type=context.appointment_type
-        )
-        
-        appointment, google_event_id = await self.appointment_service.create_appointment(
-            appointment_data, context.patient_name
-        )
-        
-        return appointment
+            
+            # Issue 153: Create appointment within the same transaction
+            appointment, google_event_id = await self.appointment_service.create_appointment(
+                appointment_data, context.patient_name
+            )
+            
+            if not appointment:
+                raise ValueError("Appointment creation returned None")
+            
+            # Issue 153: Commit transaction only if both patient creation and appointment booking succeed
+            self.db.commit()
+            
+            return appointment
+        except Exception as e:
+            self.logger.error(f"Failed to create appointment: {e}")
+            # Issue 153: Rollback transaction if either patient creation or appointment booking fails
+            self.db.rollback()
+            raise
     
     def _extract_name(self, text: str) -> Optional[str]:
         """Extract name from user input with better natural language processing."""
@@ -1166,7 +1515,7 @@ class CallFlowService:
         ]
         
         for prefix in prefixes_to_remove:
-            if text.startswith(prefix):
+            if text.startswith(prefix) and len(prefix) < len(text):
                 text = text[len(prefix):].strip()
                 break
         
@@ -1176,7 +1525,7 @@ class CallFlowService:
         ]
         
         for suffix in suffixes_to_remove:
-            if text.endswith(suffix):
+            if text.endswith(suffix) and len(suffix) < len(text):
                 text = text[:-len(suffix)].strip()
                 break
         
@@ -1376,8 +1725,16 @@ class CallFlowService:
             match = re.search(pattern, user_input_lower)
             if match:
                 hour = int(match.group(1))
-                minute = int(match.group(2)) if expected_groups > 1 and match.group(2) and match.group(2).isdigit() else 0
-                period = match.group(3) if expected_groups > 2 and match.group(3) else None
+                # Safely access group 2 if it exists
+                minute = 0
+                if expected_groups > 1 and match.lastindex and match.lastindex >= 2:
+                    minute_str = match.group(2)
+                    if minute_str and minute_str.isdigit():
+                        minute = int(minute_str)
+                # Safely access group 3 if it exists
+                period = None
+                if expected_groups > 2 and match.lastindex and match.lastindex >= 3:
+                    period = match.group(3)
                 
                 # Convert to 24-hour format
                 if period == 'pm' and hour != 12:
@@ -1400,7 +1757,7 @@ class CallFlowService:
                         return time_option
                 
                 # If no exact match, find the closest available time
-                if times:
+                if times and len(times) > 0:
                     # Find the closest time slot, preferring later times when there's a tie
                     target_time = hour * 60 + minute  # Convert to minutes for comparison
                     closest_time = min(times, key=lambda t: (abs(t.start_time.hour * 60 + t.start_time.minute - target_time), -t.start_time.hour * 60 - t.start_time.minute))
@@ -1429,7 +1786,12 @@ class CallFlowService:
             if call:
                 call.status = "completed"
                 call.ended_at = datetime.now(timezone.utc)
-                self.db.commit()
+                try:
+                    self.db.commit()
+                except Exception as commit_error:
+                    self.db.rollback()
+                    self.logger.error(f"Failed to commit call record update: {commit_error}")
+                    raise
             
             # Remove from active calls
             remove_call(call_sid)

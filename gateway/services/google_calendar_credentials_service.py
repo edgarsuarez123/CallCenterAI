@@ -78,7 +78,14 @@ class GoogleCalendarCredentialsService:
             credential_record.is_active = True
             credential_record.last_used_at = datetime.now(timezone.utc)
             
-            self.db.commit()
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                self.logger.error(f"Failed to commit credentials for provider {provider_id}: {commit_error}")
+                return False
+            
             self.logger.info(f"Successfully stored Google Calendar credentials for provider {provider_id}")
             return True
             
@@ -117,7 +124,11 @@ class GoogleCalendarCredentialsService:
                     self.logger.warning(f"Credentials expired for provider {provider_id}")
                     # Mark as inactive
                     credential_record.is_active = False
-                    self.db.commit()
+                    try:
+                        self.db.commit()
+                    except Exception as commit_error:
+                        self.db.rollback()
+                        self.logger.error(f"Failed to commit expired credentials update for provider {provider_id}: {commit_error}")
                     return None
             
             # Decrypt access token
@@ -156,12 +167,20 @@ class GoogleCalendarCredentialsService:
             
             # Update last used timestamp
             credential_record.last_used_at = datetime.now(timezone.utc)
-            self.db.commit()
+            
+            # Commit with error handling
+            try:
+                self.db.commit()
+            except Exception as commit_error:
+                self.db.rollback()
+                self.logger.error(f"Failed to commit last_used_at update for provider {provider_id}: {commit_error}")
+                # Still return credentials even if commit fails
             
             self.logger.info(f"Successfully retrieved credentials for provider {provider_id}")
             return credentials
             
         except Exception as e:
+            self.db.rollback()
             self.logger.error(f"Failed to retrieve credentials for provider {provider_id}: {e}")
             return None
     
@@ -183,7 +202,15 @@ class GoogleCalendarCredentialsService:
             if credential_record:
                 credential_record.is_active = False
                 credential_record.updated_at = datetime.now(timezone.utc)
-                self.db.commit()
+                
+                # Commit with error handling
+                try:
+                    self.db.commit()
+                except Exception as commit_error:
+                    self.db.rollback()
+                    self.logger.error(f"Failed to commit credential revocation for provider {provider_id}: {commit_error}")
+                    return False
+                
                 self.logger.info(f"Successfully revoked credentials for provider {provider_id}")
                 return True
             else:

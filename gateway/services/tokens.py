@@ -59,17 +59,29 @@ def tokenize_text(db: Session, call_id: str, text: str) -> Tuple[str, List[str],
             tokens.append(token)
         
         # Batch upsert: insert new tokens or update last_used_at for existing ones
-        stmt = insert(Mapping).values(insert_data)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=['token'],
-            set_={
-                'last_used_at': func.now()
-                # Note: We DO NOT update call_id to preserve original for audit trail
-                # Note: We DO NOT update encrypted values (they should be identical anyway)
-            }
-        )
-        db.execute(stmt)
-        db.commit()
+        try:
+            stmt = insert(Mapping).values(insert_data)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=['token'],
+                set_={
+                    'last_used_at': func.now()
+                    # Note: We DO NOT update call_id to preserve original for audit trail
+                    # Note: We DO NOT update encrypted values (they should be identical anyway)
+                }
+            )
+            db.execute(stmt)
+            
+            # Commit with error handling
+            try:
+                db.commit()
+            except Exception as commit_error:
+                db.rollback()
+                logging.error(f"Failed to commit token mappings: {commit_error}")
+                # Continue execution - tokens are not critical for call flow
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to store token mappings: {e}")
+            # Continue execution - tokens are not critical for call flow
 
     # Basic residual check: if we still find phones/emails/names ? residual true
     if PHONE_RE.search(text) or EMAIL_RE.search(text) or NAME_RE.search(text):
@@ -80,7 +92,7 @@ def tokenize_text(db: Session, call_id: str, text: str) -> Tuple[str, List[str],
 def hydrate_text(db: Session, text_tokenized: str) -> Tuple[str, List[str]]:
     """Replace tokens with original values from DB; returns hydrated text and missing list."""
     missing: List[str] = []
-    # Find tokens by pattern KIND_HEX… (we use 6+ uppercase hex chars)
+    # Find tokens by pattern KIND_HEXï¿½ (we use 6+ uppercase hex chars)
     token_candidates = set(re.findall(r"\b([A-Z]+_[A-F0-9]{6,})\b", text_tokenized))
     if not token_candidates:
         return text_tokenized, missing

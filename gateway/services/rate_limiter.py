@@ -59,8 +59,13 @@ class TokenBucket:
             # Calculate wait time for next token
             async with self._lock:
                 if self.tokens < tokens:
-                    wait_time = (tokens - self.tokens) / self.rate
-                    await asyncio.sleep(min(wait_time, 0.1))
+                    # Division by zero check
+                    if self.rate > 0:
+                        wait_time = (tokens - self.tokens) / self.rate
+                        await asyncio.sleep(min(wait_time, 0.1))
+                    else:
+                        # If rate is 0, wait a short time and retry
+                        await asyncio.sleep(0.01)
                 else:
                     await asyncio.sleep(0.01)
         
@@ -74,10 +79,34 @@ class RateLimiter:
         self._lock = asyncio.Lock()
     
     def _get_tier(self, clinic_id: str) -> SubscriptionTier:
-        """Get subscription tier for clinic. TODO: Query from database."""
-        # For now, default to basic tier
-        # In production, query from clinic.subscription_tier
-        return SUBSCRIPTION_TIERS["basic"]
+        """Get subscription tier for clinic."""
+        # Validate clinic_id
+        if not clinic_id or not isinstance(clinic_id, str) or len(clinic_id.strip()) == 0:
+            logger.warning(f"Invalid clinic_id in _get_tier: {clinic_id}, using basic tier")
+            return SUBSCRIPTION_TIERS["basic"]
+        
+        # Issue 30, 79: Query subscription tier from database
+        try:
+            from services.database import get_db_session
+            with get_db_session() as db:
+                from models.models import ClinicLicense
+                license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
+                if license_record and license_record.tier:
+                    # Map database tier to SubscriptionTier
+                    tier_name = license_record.tier.lower()
+                    if tier_name in SUBSCRIPTION_TIERS:
+                        return SUBSCRIPTION_TIERS[tier_name]
+                    else:
+                        logger.warning(f"Unknown tier '{tier_name}' for clinic {clinic_id}, using basic tier")
+                        return SUBSCRIPTION_TIERS["basic"]
+                else:
+                    # No license record or tier not set - default to basic
+                    logger.debug(f"No tier found for clinic {clinic_id}, using basic tier")
+                    return SUBSCRIPTION_TIERS["basic"]
+        except Exception as db_error:
+            logger.error(f"Failed to query tier for clinic {clinic_id}: {db_error}")
+            # Fallback to basic tier on error
+            return SUBSCRIPTION_TIERS["basic"]
     
     async def check_acs_call_limit(self, clinic_id: str) -> bool:
         """Check if clinic can make ACS call (answer incoming call)."""
@@ -106,6 +135,23 @@ class RateLimiter:
     async def _get_limiter(self, clinic_id: str, limiter_type: str, 
                           rate: float, capacity: int) -> TokenBucket:
         """Get or create token bucket for clinic and type."""
+        # Validate inputs
+        if not clinic_id or not isinstance(clinic_id, str) or len(clinic_id.strip()) == 0:
+            logger.warning(f"Invalid clinic_id in _get_limiter: {clinic_id}")
+            raise ValueError("clinic_id cannot be empty")
+        
+        if not limiter_type or not isinstance(limiter_type, str) or len(limiter_type.strip()) == 0:
+            logger.warning(f"Invalid limiter_type in _get_limiter: {limiter_type}")
+            raise ValueError("limiter_type cannot be empty")
+        
+        if rate <= 0:
+            logger.warning(f"Invalid rate in _get_limiter: {rate}")
+            raise ValueError("rate must be greater than 0")
+        
+        if capacity <= 0:
+            logger.warning(f"Invalid capacity in _get_limiter: {capacity}")
+            raise ValueError("capacity must be greater than 0")
+        
         async with self._lock:
             if clinic_id not in self._clinic_limiters:
                 self._clinic_limiters[clinic_id] = {}
