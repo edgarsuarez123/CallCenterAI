@@ -28,7 +28,6 @@ services:
       - postgres
     volumes:
       - ./gateway:/app
-    command: ["./start_dev.sh"]
     restart: unless-stopped
 
   postgres:

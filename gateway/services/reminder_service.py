@@ -13,12 +13,14 @@ Critical for patient engagement and reducing no-shows.
 
 import asyncio
 from datetime import datetime, timezone, timedelta
+from dataclasses import dataclass
+from collections import deque
 
 # Atlantic Standard Time (UTC-4)
 AST = timezone(timedelta(hours=-4))
-from typing import Dict, List, Optional, Any, Tuple
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+from typing import Dict, List, Optional, Any
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import and_, or_, select
 
 from models.models import (
     Reminder, ReminderLog, Appointment, Patient, Clinic, 
@@ -26,7 +28,6 @@ from models.models import (
 )
 from services.azure_communication_service import get_azure_communication_service, AzureCommunicationService
 from services.azure_speech_tts import get_text_to_speech_service, TextToSpeechService
-from services.bilingual_manager import get_bilingual_manager, BilingualManager
 from services.crypto import make_ulid_token
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.configuration import get_settings
@@ -34,6 +35,22 @@ from services.exceptions import (
     AzureCommunicationError, ExternalServiceUnavailableError,
     ValidationError, CallCenterAIException, ErrorCode
 )
+
+
+@dataclass
+class QueuedReminder:
+    """Represents a reminder waiting in the queue."""
+    reminder_id: str
+    appointment_id: str
+    patient_phone: str
+    message: str
+    clinic_id: str
+    retry_count: int = 0
+    queued_at: datetime = None
+    
+    def __post_init__(self):
+        if self.queued_at is None:
+            self.queued_at = datetime.now(timezone.utc)
 
 
 class ReminderService:
@@ -53,31 +70,34 @@ class ReminderService:
         self.settings = get_settings()
         self.acs_service: AzureCommunicationService = get_azure_communication_service()
         self.tts_service: TextToSpeechService = get_text_to_speech_service()
-        self.bilingual_manager: BilingualManager = get_bilingual_manager()
         
-        # Concurrency control
-        self._call_semaphore = asyncio.Semaphore(10)  # Max 10 concurrent reminder calls
+        # Reminder queue for processing calls
+        self._reminder_queue: deque = deque()
+        self._queue_lock = asyncio.Lock()
+        self._processing = False
+        self._max_retries = 5  # Max retries per reminder for the day
+        self._retry_delay_minutes = 30  # Delay between retries
         
         # Reminder call templates
         self.reminder_templates = {
             'appointment_reminder': {
-                'en': "Hello, this is a reminder about your upcoming appointment. Your appointment is scheduled for {appointment_time}. Please call us if you need to reschedule. Thank you.",
-                'es': "Hola, este es un recordatorio sobre su próxima cita. Su cita está programada para {appointment_time}. Por favor llámenos si necesita reprogramar. Gracias."
+                'en': "Hello {patient_name}, this is a reminder about your upcoming appointment. Your appointment is scheduled for {appointment_time}. Please call us if you need to reschedule. Thank you.",
+                'es': "Hola {patient_name}, este es un recordatorio sobre su próxima cita. Su cita está programada para {appointment_time}. Por favor llámenos si necesita reprogramar. Gracias."
             },
             'follow_up': {
-                'en': "Hello, this is a follow-up call regarding your recent appointment. How are you feeling? Please call us if you have any questions. Thank you.",
-                'es': "Hola, esta es una llamada de seguimiento sobre su cita reciente. ¿Cómo se siente? Por favor llámenos si tiene alguna pregunta. Gracias."
+                'en': "Hello {patient_name}, this is a follow-up call regarding your recent appointment. How are you feeling? Please call us if you have any questions. Thank you.",
+                'es': "Hola {patient_name}, esta es una llamada de seguimiento sobre su cita reciente. ¿Cómo se siente? Por favor llámenos si tiene alguna pregunta. Gracias."
             },
             'cancellation_reminder': {
-                'en': "Hello, this is a reminder that your appointment has been cancelled. Please call us to reschedule if needed. Thank you.",
-                'es': "Hola, este es un recordatorio de que su cita ha sido cancelada. Por favor llámenos para reprogramar si es necesario. Gracias."
+                'en': "Hello {patient_name}, this is a reminder that your appointment has been cancelled. Please call us to reschedule if needed. Thank you.",
+                'es': "Hola {patient_name}, este es un recordatorio de que su cita ha sido cancelada. Por favor llámenos para reprogramar si es necesario. Gracias."
             }
         }
         
         self.logger.info("ReminderService initialized.", LogCategory.REMINDER)
     
     @log_performance("reminder_scheduling")
-    async def schedule_reminder(self, db: Session, appointment_id: str, 
+    async def schedule_reminder(self, db: AsyncSession, appointment_id: str, 
                               reminder_type: str = 'appointment_reminder',
                               custom_scheduled_time: Optional[datetime] = None) -> Reminder:
         """
@@ -98,10 +118,11 @@ class ReminderService:
         
         try:
             # Get appointment and related data
-            appointment = db.query(Appointment).filter(
+            appointment_result = await db.execute(select(Appointment).where(
                 Appointment.appointment_id == appointment_id,
                 Appointment.is_deleted == 'no'
-            ).first()
+            ))
+            appointment = appointment_result.scalar_one_or_none()
             
             if not appointment:
                 raise CallCenterAIException(
@@ -118,11 +139,12 @@ class ReminderService:
                 )
             
             # Issue 74: Check if reminder already exists for this appointment
-            existing_reminder = db.query(Reminder).filter(
+            existing_reminder_result = await db.execute(select(Reminder).where(
                 Reminder.appointment_id == appointment_id,
                 Reminder.is_deleted == 'no',
                 Reminder.status.in_(['scheduled', 'pending'])
-            ).first()
+            ))
+            existing_reminder = existing_reminder_result.scalar_one_or_none()
             if existing_reminder:
                 self.logger.info(f"Reminder already exists for appointment {appointment_id}, skipping duplicate", LogCategory.REMINDER)
                 raise CallCenterAIException(
@@ -131,10 +153,13 @@ class ReminderService:
                 )
             
             # Get clinic settings
-            clinic = db.query(Clinic).join(Patient).filter(
-                Patient.patient_id == appointment.patient_id,
-                Clinic.is_deleted == 'no'
-            ).first()
+            clinic_result = await db.execute(
+                select(Clinic).join(Patient).where(
+                    Patient.patient_id == appointment.patient_id,
+                    Clinic.is_deleted == 'no'
+                )
+            )
+            clinic = clinic_result.scalar_one_or_none()
             
             if not clinic:
                 raise CallCenterAIException(
@@ -150,21 +175,27 @@ class ReminderService:
                     error_code=ErrorCode.CONFIGURATION_ERROR
                 )
             
-            # Calculate scheduled time
+            # Calculate scheduled time - always 24 hours before appointment
             if custom_scheduled_time:
                 scheduled_time = custom_scheduled_time
             else:
-                # Use clinic settings to calculate reminder time
                 if not appointment.start_time:
                     raise ValidationError("Appointment start_time is required for reminder scheduling")
                 
-                now = datetime.now(AST)
-                scheduled_time = appointment.start_time - timedelta(hours=clinic.reminder_hours_before)
+                now = datetime.now(timezone.utc)
+                # Ensure appointment.start_time is timezone-aware
+                if appointment.start_time.tzinfo is None:
+                    # If naive, assume UTC
+                    appointment_start = appointment.start_time.replace(tzinfo=timezone.utc)
+                else:
+                    appointment_start = appointment.start_time
+                # Always schedule 24 hours before appointment
+                scheduled_time = appointment_start - timedelta(hours=24)
             
             # Check if reminder is too far in the past
             if scheduled_time < now:  # Use captured 'now'
                 self.logger.warning(f"Reminder scheduled time {scheduled_time} is in the past for appointment {appointment_id}", LogCategory.REMINDER)
-                raise ValidationError("Reminder scheduled time cannot be in the past")
+                raise ValidationError("scheduled_time", scheduled_time, "Reminder scheduled time cannot be in the past")
             
             # Create reminder record
             reminder_id = make_ulid_token('REMINDER')
@@ -174,15 +205,15 @@ class ReminderService:
                 scheduled_time=scheduled_time,
                 reminder_type=reminder_type,
                 status='scheduled',
-                max_retries=3  # Default retry count
+                max_retries=self._max_retries  # Use service-level max retries
             )
             
             db.add(reminder)
             try:
-                db.commit()
-                db.refresh(reminder)
+                await db.commit()
+                await db.refresh(reminder)
             except Exception as commit_error:
-                db.rollback()
+                await db.rollback()
                 self.logger.error(f"Failed to commit reminder: {commit_error}", LogCategory.REMINDER, exception=commit_error)
                 raise
             
@@ -197,9 +228,9 @@ class ReminderService:
             return reminder
             
         except Exception as e:
-            db.rollback()
+            await db.rollback()
             self.logger.error(f"Failed to schedule reminder for appointment {appointment_id}: {e}", LogCategory.REMINDER, exception=e)
-            if isinstance(e, (CallCenterAIException, ValidationError, CallCenterAIException)):
+            if isinstance(e, (CallCenterAIException, ValidationError)):
                 raise
             raise CallCenterAIException(
                 f"Failed to schedule reminder: {e}",
@@ -207,7 +238,7 @@ class ReminderService:
             )
     
     @log_performance("reminder_execution")
-    async def execute_reminder(self, db: Session, reminder_id: str) -> Dict[str, Any]:
+    async def execute_reminder(self, db: AsyncSession, reminder_id: str) -> Dict[str, Any]:
         """
         Execute a reminder call.
         
@@ -224,10 +255,11 @@ class ReminderService:
         
         try:
             # Get reminder and related data
-            reminder = db.query(Reminder).filter(
+            reminder_result = await db.execute(select(Reminder).where(
                 Reminder.reminder_id == reminder_id,
                 Reminder.is_deleted == 'no'
-            ).first()
+            ))
+            reminder = reminder_result.scalar_one_or_none()
             
             if not reminder:
                 raise CallCenterAIException(
@@ -242,10 +274,13 @@ class ReminderService:
                 )
             
             # Get appointment and patient data
-            appointment = db.query(Appointment).join(Patient).filter(
-                Appointment.appointment_id == reminder.appointment_id,
-                Appointment.is_deleted == 'no'
-            ).first()
+            appointment_result = await db.execute(
+                select(Appointment).join(Patient).where(
+                    Appointment.appointment_id == reminder.appointment_id,
+                    Appointment.is_deleted == 'no'
+                )
+            )
+            appointment = appointment_result.scalar_one_or_none()
             
             if not appointment:
                 raise CallCenterAIException(
@@ -261,9 +296,9 @@ class ReminderService:
                 reminder.completed_at = datetime.now(AST)
                 reminder.deletion_reason = 'appointment_cancelled'
                 try:
-                    db.commit()
+                    await db.commit()
                 except Exception as commit_error:
-                    db.rollback()
+                    await db.rollback()
                     self.logger.error(f"Failed to update reminder status: {commit_error}", LogCategory.REMINDER)
                 raise CallCenterAIException(
                     "Cannot execute reminder for cancelled appointment",
@@ -272,13 +307,13 @@ class ReminderService:
             
             # Issue 73: Check and update reminder status atomically to prevent duplicate execution
             # Use SELECT FOR UPDATE to lock the reminder row
-            from sqlalchemy import select
-            locked_reminder = db.execute(
+            locked_reminder_result = await db.execute(
                 select(Reminder).where(
                     Reminder.reminder_id == reminder_id,
                     Reminder.status.in_(['scheduled', 'failed'])
                 ).with_for_update()
-            ).scalar_one_or_none()
+            )
+            locked_reminder = locked_reminder_result.scalar_one_or_none()
             
             if not locked_reminder or locked_reminder.status not in ['scheduled', 'failed']:
                 raise CallCenterAIException(
@@ -290,8 +325,8 @@ class ReminderService:
             # Keep lock held during execution to prevent concurrent execution attempts
             locked_reminder.status = 'executing'
             locked_reminder.started_at = datetime.now(AST)
-            db.commit()
-            db.refresh(locked_reminder)
+            await db.commit()
+            await db.refresh(locked_reminder)
             reminder = locked_reminder  # Use the locked reminder for the rest of the method
             
             # Issue 156: Note: Lock is released after commit, but status is 'executing' which prevents other workers
@@ -299,29 +334,31 @@ class ReminderService:
             # would be needed to prevent duplicate execution.
             
             # Get patient's phone number
-            if not appointment.patient or not appointment.patient.caller_phone_token:
+            if not appointment.patient or not appointment.patient.phone_token:
                 raise CallCenterAIException(
                     f"Patient phone token not found for appointment {appointment.appointment_id}",
                     error_code=ErrorCode.RESOURCE_NOT_FOUND
                 )
             
             # Issue 194: Re-query patient phone number when executing reminder to handle phone number changes
-            phone_mapping = db.query(Mapping).filter(
-                Mapping.token == appointment.patient.caller_phone_token,
+            phone_mapping_result = await db.execute(select(Mapping).where(
+                Mapping.token == appointment.patient.phone_token,
                 Mapping.is_deleted == 'no'
-            ).first()
+            ))
+            phone_mapping = phone_mapping_result.scalar_one_or_none()
             
             if not phone_mapping:
                 # Issue 194: Try to get phone number from patient record if mapping not found
                 # This handles cases where phone number was updated but mapping wasn't refreshed
                 self.logger.warning(f"Phone mapping not found for patient {appointment.patient_id}, attempting to re-query")
                 # Re-query patient to get latest phone token
-                db.refresh(appointment.patient)
-                if appointment.patient.caller_phone_token:
-                    phone_mapping = db.query(Mapping).filter(
-                        Mapping.token == appointment.patient.caller_phone_token,
+                await db.refresh(appointment.patient)
+                if appointment.patient.phone_token:
+                    phone_mapping_result = await db.execute(select(Mapping).where(
+                        Mapping.token == appointment.patient.phone_token,
                         Mapping.is_deleted == 'no'
-                    ).first()
+                    ))
+                    phone_mapping = phone_mapping_result.scalar_one_or_none()
                 
                 if not phone_mapping:
                     raise CallCenterAIException(
@@ -329,22 +366,29 @@ class ReminderService:
                         error_code=ErrorCode.RESOURCE_NOT_FOUND
                     )
             
-            if not phone_mapping.actual_value:
+            # Decrypt phone number from mapping
+            from services.crypto import decrypt_str
+            try:
+                patient_phone = decrypt_str(phone_mapping.value_nonce, phone_mapping.value_ciphertext)
+            except Exception as decrypt_error:
+                raise CallCenterAIException(
+                    f"Failed to decrypt phone number for patient {appointment.patient_id}: {decrypt_error}",
+                    error_code=ErrorCode.RESOURCE_NOT_FOUND
+                )
+            
+            if not patient_phone:
                 raise CallCenterAIException(
                     f"Phone number value is empty for patient {appointment.patient_id}",
                     error_code=ErrorCode.RESOURCE_NOT_FOUND
                 )
             
-            # Issue 194: Use the most recent phone number from mapping
-            patient_phone = phone_mapping.actual_value
-            
             # Update reminder status
             reminder.status = 'calling'
             reminder.retry_count += 1
             try:
-                db.commit()
+                await db.commit()
             except Exception as commit_error:
-                db.rollback()
+                await db.rollback()
                 self.logger.error(f"Failed to commit reminder status update: {commit_error}", LogCategory.REMINDER, exception=commit_error)
                 raise
             
@@ -359,14 +403,14 @@ class ReminderService:
             )
             db.add(reminder_log)
             try:
-                db.commit()
+                await db.commit()
             except Exception as commit_error:
-                db.rollback()
+                await db.rollback()
                 self.logger.error(f"Failed to commit reminder log: {commit_error}", LogCategory.REMINDER, exception=commit_error)
                 raise
             
             # Generate reminder message
-            message = await self._generate_reminder_message(appointment, reminder.reminder_type)
+            message = await self._generate_reminder_message(appointment, reminder.reminder_type, db)
             
             # Make the outbound call
             call_result = await self._make_reminder_call(
@@ -383,29 +427,33 @@ class ReminderService:
             reminder_log.caller_id = call_result.get('caller_id')
             
             # Update reminder with final status
-            if call_result['status'] == 'completed':
+            if call_result['status'] == 'completed' and call_result.get('outcome') == 'answered':
+                # Call was answered - mark as completed
                 reminder.status = 'completed'
                 reminder.completed_at = datetime.now(AST)
                 reminder.call_duration_seconds = call_result.get('duration_seconds')
                 reminder.call_outcome = call_result.get('outcome')
                 reminder.reminder_call_id = call_result.get('call_id')
             else:
-                # Determine if we should retry
+                # Call failed or not answered - put back in queue for retry
                 if reminder.retry_count < reminder.max_retries:
-                    # Schedule retry
-                    retry_delay = timedelta(minutes=30)  # Default retry delay
-                    reminder.next_retry_time = datetime.now(AST) + retry_delay
+                    # Put back in queue for retry
                     reminder.status = 'failed'
+                    reminder.next_retry_time = datetime.now(AST) + timedelta(minutes=self._retry_delay_minutes)
+                    # Re-queue the reminder
+                    await self._enqueue_reminder_for_retry(
+                        db, reminder_id, patient_phone, message, appointment, reminder.retry_count
+                    )
                 else:
-                    # Max retries reached
+                    # Max retries reached for the day
                     reminder.status = 'failed'
                     reminder.completed_at = datetime.now(AST)
                     reminder.call_outcome = call_result.get('outcome', 'max_retries_exceeded')
             
             try:
-                db.commit()
+                await db.commit()
             except Exception as commit_error:
-                db.rollback()
+                await db.rollback()
                 self.logger.error(f"Failed to commit reminder final status: {commit_error}", LogCategory.REMINDER, exception=commit_error)
                 raise
             
@@ -431,18 +479,26 @@ class ReminderService:
             }
             
         except Exception as e:
-            db.rollback()
+            await db.rollback()
             self.logger.error(f"Failed to execute reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
-            if isinstance(e, (CallCenterAIException, CallCenterAIException)):
+            if isinstance(e, CallCenterAIException):
                 raise
             raise CallCenterAIException(
                 f"Failed to execute reminder: {e}",
                 error_code=ErrorCode.DATABASE_ERROR
             )
     
-    async def _generate_reminder_message(self, appointment: Appointment, reminder_type: str) -> str:
+    async def _generate_reminder_message(self, appointment: Appointment, reminder_type: str, db: Optional[AsyncSession] = None) -> str:
         """
         Generate the reminder message text based on appointment and reminder type.
+        
+        Args:
+            appointment: Appointment object
+            reminder_type: Type of reminder
+            db: Database session (optional, needed to decrypt patient name)
+            
+        Returns:
+            Formatted reminder message
         """
         try:
             # Get template for reminder type
@@ -454,8 +510,33 @@ class ReminderService:
             else:
                 appointment_time = "your scheduled time"
             
+            # Get patient name from tokenized storage
+            patient_name = "there"  # Default fallback
+            if appointment.patient and appointment.patient.name_token and db:
+                try:
+                    from services.crypto import decrypt_str
+                    name_mapping_result = await db.execute(select(Mapping).where(
+                        Mapping.token == appointment.patient.name_token,
+                        Mapping.is_deleted == 'no'
+                    ))
+                    name_mapping = name_mapping_result.scalar_one_or_none()
+                    
+                    if name_mapping:
+                        try:
+                            patient_name = decrypt_str(name_mapping.value_nonce, name_mapping.value_ciphertext)
+                        except Exception as decrypt_error:
+                            self.logger.warning(
+                                f"Failed to decrypt patient name for appointment {appointment.appointment_id}: {decrypt_error}",
+                                LogCategory.REMINDER
+                            )
+                except Exception as name_error:
+                    self.logger.warning(
+                        f"Failed to get patient name for appointment {appointment.appointment_id}: {name_error}",
+                        LogCategory.REMINDER
+                    )
+            
             # For now, default to English. In a real system, you'd detect patient language
-            message = template['en'].format(appointment_time=appointment_time)
+            message = template['en'].format(patient_name=patient_name, appointment_time=appointment_time)
             
             return message
             
@@ -482,83 +563,70 @@ class ReminderService:
             else:
                 clinic_id = appointment.clinic_id
             
-            from services.rate_limiter import get_rate_limiter
-            rate_limiter = get_rate_limiter()
-            if not await rate_limiter.check_reminder_limit(clinic_id):
-                self.logger.warning(f"Reminder rate limit exceeded for clinic {clinic_id}")
-                # Reschedule for later
-                await self._reschedule_reminder(clinic_id, reminder_id, delay_minutes=10)
-                return {
-                    'status': 'rescheduled',
-                    'reason': 'rate_limit_exceeded',
-                    'rescheduled_for': datetime.now(AST) + timedelta(minutes=10)
-                }
+            # Concurrent calls are handled by admission_controller.py
+            # Generate TTS audio for the message
+            # For now, default to English. In a real system, you'd detect patient language
+            audio_bytes = await self.tts_service.synthesize_speech(message, "en-US")
             
-            # Limit concurrency
-            async with self._call_semaphore:
-                # Generate TTS audio for the message
-                # For now, default to English. In a real system, you'd detect patient language
-                audio_bytes = await self.tts_service.synthesize_speech(message, "en-US")
+            if not audio_bytes:
+                raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
+            
+            # Issue 44: Make the outbound call using ACS with proper error handling
+            try:
+                call_result = await self.acs_service.make_outbound_call(
+                    to_phone=patient_phone,
+                    from_phone=self.settings.azure.communication.phone_number,
+                    audio_content=audio_bytes,
+                    call_context={
+                        'reminder_id': reminder_id,
+                        'appointment_id': appointment.appointment_id,
+                        'call_type': 'reminder'
+                    }
+                )
                 
-                if not audio_bytes:
-                    raise ExternalServiceUnavailableError("Failed to generate TTS audio for reminder message")
+                # Issue 44: Validate call result and handle failures gracefully
+                if not call_result:
+                    raise ExternalServiceUnavailableError("Call result is None")
                 
-                # Issue 44: Make the outbound call using ACS with proper error handling
-                try:
-                    call_result = await self.acs_service.make_outbound_call(
-                        to_phone=patient_phone,
-                        from_phone=self.settings.azure.communication.phone_number,
-                        audio_content=audio_bytes,
-                        call_context={
-                            'reminder_id': reminder_id,
-                            'appointment_id': appointment.appointment_id,
-                            'call_type': 'reminder'
-                        }
-                    )
-                    
-                    # Issue 44: Validate call result and handle failures gracefully
-                    if not call_result:
-                        raise ExternalServiceUnavailableError("Call result is None")
-                    
-                    call_success = call_result.get('success', False)
-                    if not call_success:
-                        # Issue 44: Extract error information from call result
-                        error_code = call_result.get('error_code', 'unknown_error')
-                        error_message = call_result.get('error_message', 'Call failed')
-                        self.logger.warning(f"Reminder call failed: {error_code} - {error_message}", LogCategory.REMINDER)
-                        return {
-                            'status': 'failed',
-                            'call_id': call_result.get('call_id'),
-                            'duration_seconds': call_result.get('duration_seconds', 0),
-                            'outcome': 'failed',
-                            'error_code': error_code,
-                            'error_message': error_message,
-                            'caller_id': self.settings.azure.communication.phone_number
-                        }
-                    
+                call_success = call_result.get('success', False)
+                if not call_success:
+                    # Issue 44: Extract error information from call result
+                    error_code = call_result.get('error_code', 'unknown_error')
+                    error_message = call_result.get('error_message', 'Call failed')
+                    self.logger.warning(f"Reminder call failed: {error_code} - {error_message}", LogCategory.REMINDER)
                     return {
-                        'status': 'completed',
+                        'status': 'failed',
                         'call_id': call_result.get('call_id'),
-                        'duration_seconds': call_result.get('duration_seconds'),
-                        'outcome': 'answered',
+                        'duration_seconds': call_result.get('duration_seconds', 0),
+                        'outcome': 'failed',
+                        'error_code': error_code,
+                        'error_message': error_message,
                         'caller_id': self.settings.azure.communication.phone_number
                     }
-                # Issue 172: Handle call failure after status update - reminder status remains 'calling'
-                # This is already handled by the outer try-except which updates status on failure
-                except Exception as call_error:
-                    # Issue 44: Handle call failures gracefully with specific error codes
-                    error_type = type(call_error).__name__
-                    if 'phone' in str(call_error).lower() or 'invalid' in str(call_error).lower():
-                        error_code = 'invalid_phone_number'
-                    elif 'network' in str(call_error).lower() or 'connection' in str(call_error).lower():
-                        error_code = 'network_error'
-                    elif 'rate' in str(call_error).lower() or 'limit' in str(call_error).lower():
-                        error_code = 'rate_limit_exceeded'
-                    else:
-                        error_code = 'call_failed'
-                    
-                    self.logger.error(f"Reminder call error ({error_code}): {call_error}", LogCategory.REMINDER, exception=call_error)
-                    raise  # Re-raise to be caught by outer exception handler
+                
+                return {
+                    'status': 'completed',
+                    'call_id': call_result.get('call_id'),
+                    'duration_seconds': call_result.get('duration_seconds'),
+                    'outcome': 'answered',
+                    'caller_id': self.settings.azure.communication.phone_number
+                }
+            # Issue 172: Handle call failure after status update - reminder status remains 'calling'
+            # This is already handled by the outer try-except which updates status on failure
+            except Exception as call_error:
+                # Issue 44: Handle call failures gracefully with specific error codes
+                error_type = type(call_error).__name__
+                if 'phone' in str(call_error).lower() or 'invalid' in str(call_error).lower():
+                    error_code = 'invalid_phone_number'
+                elif 'network' in str(call_error).lower() or 'connection' in str(call_error).lower():
+                    error_code = 'network_error'
+                elif 'rate' in str(call_error).lower() or 'limit' in str(call_error).lower():
+                    error_code = 'rate_limit_exceeded'
+                else:
+                    error_code = 'call_failed'
+                
+                self.logger.error(f"Reminder call error ({error_code}): {call_error}", LogCategory.REMINDER, exception=call_error)
+                raise  # Re-raise to be caught by outer exception handler
             
         except AzureCommunicationError as e:
             self.logger.error(f"ACS error making reminder call: {e.message}", LogCategory.REMINDER, exception=e)
@@ -585,7 +653,7 @@ class ReminderService:
                 'error_message': str(e)
             }
     
-    async def _update_usage_metrics(self, db: Session, appointment: Appointment, call_result: Dict[str, Any]):
+    async def _update_usage_metrics(self, db: AsyncSession, appointment: Appointment, call_result: Dict[str, Any]):
         """
         Update clinic usage metrics for reminder calls.
         """
@@ -595,10 +663,13 @@ class ReminderService:
                 self.logger.warning(f"Patient or clinic_id not found for appointment {appointment.appointment_id}", LogCategory.REMINDER)
                 return
             
-            clinic_usage = db.query(ClinicUsage).filter(
-                ClinicUsage.clinic_id == appointment.patient.clinic_id,
-                ClinicUsage.is_deleted == 'no'
-            ).order_by(ClinicUsage.created_at.desc()).first()
+            clinic_usage_result = await db.execute(
+                select(ClinicUsage).where(
+                    ClinicUsage.clinic_id == appointment.patient.clinic_id,
+                    ClinicUsage.is_deleted == 'no'
+                ).order_by(ClinicUsage.created_at.desc())
+            )
+            clinic_usage = clinic_usage_result.scalar_one_or_none()
             
             if clinic_usage:
                 # Update reminder call metrics
@@ -613,9 +684,9 @@ class ReminderService:
                 clinic_usage.total_cost_usd += estimated_cost
                 
                 try:
-                    db.commit()
+                    await db.commit()
                 except Exception as commit_error:
-                    db.rollback()
+                    await db.rollback()
                     self.logger.error(f"Failed to commit usage metrics update: {commit_error}", LogCategory.REMINDER, exception=commit_error)
                     # Don't raise - this is not critical for reminder execution
                 
@@ -623,29 +694,32 @@ class ReminderService:
             self.logger.error(f"Failed to update usage metrics: {e}", LogCategory.REMINDER, exception=e)
             # Don't raise - this is not critical for reminder execution
     
-    async def get_due_reminders(self, db: Session, limit: int = 100) -> List[Reminder]:
+    async def get_due_reminders(self, db: AsyncSession, limit: int = 100) -> List[Reminder]:
         """
         Get reminders that are due for execution.
         """
         try:
             now = datetime.now(AST)
             
-            reminders = db.query(Reminder).filter(
-                and_(
-                    Reminder.is_deleted == 'no',
-                    or_(
-                        and_(
-                            Reminder.status == 'scheduled',
-                            Reminder.scheduled_time <= now
-                        ),
-                        and_(
-                            Reminder.status == 'failed',
-                            Reminder.next_retry_time <= now,
-                            Reminder.retry_count < Reminder.max_retries
+            reminders_result = await db.execute(
+                select(Reminder).where(
+                    and_(
+                        Reminder.is_deleted == 'no',
+                        or_(
+                            and_(
+                                Reminder.status == 'scheduled',
+                                Reminder.scheduled_time <= now
+                            ),
+                            and_(
+                                Reminder.status == 'failed',
+                                Reminder.next_retry_time <= now,
+                                Reminder.retry_count < Reminder.max_retries
+                            )
                         )
                     )
-                )
-            ).limit(limit).all()
+                ).limit(limit)
+            )
+            reminders = list(reminders_result.scalars().all())
             
             return reminders
             
@@ -656,15 +730,16 @@ class ReminderService:
                 error_code=ErrorCode.DATABASE_ERROR
             )
     
-    async def cancel_reminder(self, db: Session, reminder_id: str, reason: str = "cancelled_by_user") -> bool:
+    async def cancel_reminder(self, db: AsyncSession, reminder_id: str, reason: str = "cancelled_by_user") -> bool:
         """
         Cancel a scheduled reminder.
         """
         try:
-            reminder = db.query(Reminder).filter(
+            reminder_result = await db.execute(select(Reminder).where(
                 Reminder.reminder_id == reminder_id,
                 Reminder.is_deleted == 'no'
-            ).first()
+            ))
+            reminder = reminder_result.scalar_one_or_none()
             
             if not reminder:
                 raise CallCenterAIException(
@@ -680,13 +755,13 @@ class ReminderService:
             reminder.completed_at = datetime.now(AST)
             reminder.call_outcome = reason
             
-            db.commit()
+            await db.commit()
             
             self.logger.info(f"Reminder {reminder_id} cancelled: {reason}", LogCategory.REMINDER)
             return True
             
         except Exception as e:
-            db.rollback()
+            await db.rollback()
             self.logger.error(f"Failed to cancel reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
             if isinstance(e, CallCenterAIException):
                 raise
@@ -695,36 +770,231 @@ class ReminderService:
                 error_code=ErrorCode.DATABASE_ERROR
             )
     
-    async def _reschedule_reminder(self, clinic_id: str, reminder_id: str, delay_minutes: int = 10):
+    async def _enqueue_reminder_for_retry(
+        self, db: AsyncSession, reminder_id: str, patient_phone: str, 
+        message: str, appointment: Appointment, retry_count: int
+    ):
         """
-        Reschedule a reminder call for later due to rate limiting.
+        Add a reminder back to the queue for retry.
         
         Args:
-            clinic_id: Clinic ID
-            reminder_id: Reminder ID to reschedule
-            delay_minutes: Minutes to delay the reminder
+            db: Database session
+            reminder_id: Reminder ID
+            patient_phone: Patient phone number
+            message: Reminder message
+            appointment: Appointment object
+            retry_count: Current retry count
         """
         try:
-            # In a real implementation, you would:
-            # 1. Update the reminder's scheduled_time in the database
-            # 2. Add it back to the scheduler queue
-            # 3. Log the rescheduling event
+            # Get clinic_id
+            if not hasattr(appointment, 'clinic_id') or not appointment.clinic_id:
+                clinic_id = appointment.patient.clinic_id if appointment.patient else None
+            else:
+                clinic_id = appointment.clinic_id
+            
+            if not clinic_id:
+                self.logger.warning(f"Cannot enqueue reminder {reminder_id} - no clinic_id", LogCategory.REMINDER)
+                return
+            
+            # Create queued reminder
+            queued_reminder = QueuedReminder(
+                reminder_id=reminder_id,
+                appointment_id=appointment.appointment_id,
+                patient_phone=patient_phone,
+                message=message,
+                clinic_id=clinic_id,
+                retry_count=retry_count
+            )
+            
+            # Add to queue
+            async with self._queue_lock:
+                self._reminder_queue.append(queued_reminder)
             
             self.logger.info(
-                f"Rescheduling reminder {reminder_id} for clinic {clinic_id} due to rate limiting",
+                f"Reminder {reminder_id} added to queue for retry (attempt {retry_count + 1})",
                 LogCategory.REMINDER,
                 extra_data={
                     "reminder_id": reminder_id,
-                    "clinic_id": clinic_id,
-                    "delay_minutes": delay_minutes
+                    "retry_count": retry_count + 1,
+                    "queue_size": len(self._reminder_queue)
                 }
             )
             
-            # For now, just log the rescheduling
-            # TODO: Implement actual rescheduling logic
+        except Exception as e:
+            self.logger.error(f"Failed to enqueue reminder {reminder_id} for retry: {e}", LogCategory.REMINDER, exception=e)
+    
+    async def process_reminder_queue(self, db: AsyncSession) -> Dict[str, Any]:
+        """
+        Process all reminders in the queue until empty or max retries reached.
+        This processes all reminders for the day.
+        
+        Args:
+            db: Database session
+            
+        Returns:
+            Dictionary with processing statistics
+        """
+        if self._processing:
+            self.logger.warning("Reminder queue is already being processed", LogCategory.REMINDER)
+            return {"status": "already_processing", "processed": 0, "succeeded": 0, "failed": 0}
+        
+        self._processing = True
+        processed = 0
+        succeeded = 0
+        failed = 0
+        
+        try:
+            self.logger.info("Starting reminder queue processing", LogCategory.REMINDER)
+            
+            while True:
+                # Get next reminder from queue
+                async with self._queue_lock:
+                    if not self._reminder_queue:
+                        break
+                    queued_reminder = self._reminder_queue.popleft()
+                
+                try:
+                    processed += 1
+                    
+                    # Execute the reminder
+                    result = await self.execute_reminder(db, queued_reminder.reminder_id)
+                    
+                    if result.get('status') == 'completed' and result.get('outcome') == 'answered':
+                        succeeded += 1
+                    else:
+                        failed += 1
+                        # If not max retries, it's already back in queue
+                    
+                except Exception as e:
+                    failed += 1
+                    self.logger.error(
+                        f"Failed to process queued reminder {queued_reminder.reminder_id}",
+                        LogCategory.REMINDER,
+                        exception=e
+                    )
+                    # If retries not exhausted, it will be re-queued by execute_reminder
+                
+                # Small delay between calls to avoid overwhelming the system
+                await asyncio.sleep(1)
+            
+            self.logger.info(
+                f"Reminder queue processing completed",
+                LogCategory.REMINDER,
+                extra_data={
+                    "processed": processed,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "remaining_in_queue": len(self._reminder_queue)
+                }
+            )
+            
+            return {
+                "status": "completed",
+                "processed": processed,
+                "succeeded": succeeded,
+                "failed": failed,
+                "remaining_in_queue": len(self._reminder_queue)
+            }
+            
+        finally:
+            self._processing = False
+    
+    async def load_due_reminders_into_queue(self, db: AsyncSession, limit: int = 100) -> int:
+        """
+        Load due reminders from database into the processing queue.
+        
+        Args:
+            db: Database session
+            limit: Maximum number of reminders to load
+            
+        Returns:
+            Number of reminders loaded into queue
+        """
+        try:
+            due_reminders = await self.get_due_reminders(db, limit=limit)
+            loaded = 0
+            
+            for reminder in due_reminders:
+                try:
+                    # Get appointment and patient data
+                    appointment_result = await db.execute(
+                        select(Appointment).join(Patient).where(
+                            Appointment.appointment_id == reminder.appointment_id,
+                            Appointment.is_deleted == 'no'
+                        )
+                    )
+                    appointment = appointment_result.scalar_one_or_none()
+                    
+                    if not appointment or not appointment.patient or not appointment.patient.phone_token:
+                        continue
+                    
+                    # Get phone number
+                    phone_mapping_result = await db.execute(select(Mapping).where(
+                        Mapping.token == appointment.patient.phone_token,
+                        Mapping.is_deleted == 'no'
+                    ))
+                    phone_mapping = phone_mapping_result.scalar_one_or_none()
+                    
+                    if not phone_mapping:
+                        continue
+                    
+                    # Decrypt phone number
+                    from services.crypto import decrypt_str
+                    try:
+                        patient_phone = decrypt_str(phone_mapping.value_nonce, phone_mapping.value_ciphertext)
+                    except Exception as decrypt_error:
+                        self.logger.warning(
+                            f"Failed to decrypt phone number for reminder {reminder.reminder_id}: {decrypt_error}",
+                            LogCategory.REMINDER
+                        )
+                        continue
+                    
+                    if not patient_phone:
+                        continue
+                    
+                    # Generate message
+                    message = await self._generate_reminder_message(appointment, reminder.reminder_type, db)
+                    
+                    # Get clinic_id
+                    clinic_id = appointment.clinic_id if hasattr(appointment, 'clinic_id') and appointment.clinic_id else appointment.patient.clinic_id
+                    
+                    if not clinic_id:
+                        continue
+                    
+                    # Create queued reminder
+                    queued_reminder = QueuedReminder(
+                        reminder_id=reminder.reminder_id,
+                        appointment_id=reminder.appointment_id,
+                        patient_phone=patient_phone,
+                        message=message,
+                        clinic_id=clinic_id,
+                        retry_count=reminder.retry_count
+                    )
+                    
+                    # Add to queue
+                    async with self._queue_lock:
+                        self._reminder_queue.append(queued_reminder)
+                    
+                    loaded += 1
+                    
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to load reminder {reminder.reminder_id} into queue: {e}",
+                        LogCategory.REMINDER,
+                        exception=e
+                    )
+            
+            self.logger.info(
+                f"Loaded {loaded} reminders into queue",
+                LogCategory.REMINDER,
+                extra_data={"loaded": loaded, "queue_size": len(self._reminder_queue)}
+            )
+            
+            return loaded
             
         except Exception as e:
-            self.logger.error(f"Failed to reschedule reminder {reminder_id}: {e}", LogCategory.REMINDER, exception=e)
+            self.logger.error(f"Failed to load due reminders into queue: {e}", LogCategory.REMINDER, exception=e)
+            return 0
 
 
 # Global instance for dependency injection

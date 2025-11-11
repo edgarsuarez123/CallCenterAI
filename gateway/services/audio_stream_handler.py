@@ -14,11 +14,10 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Set, Callable
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
 
 from fastapi import WebSocket, WebSocketDisconnect
-from sqlalchemy.orm import Session
 
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.exceptions import (
@@ -26,7 +25,7 @@ from services.exceptions import (
     ValidationError,
     ExternalServiceUnavailableError
 )
-from services.azure_communication_service import get_azure_communication_service
+# Import azure_communication_service and call_orchestrator inside functions to avoid circular imports
 
 
 logger = get_logger("audio_stream_handler")
@@ -52,11 +51,9 @@ class AudioStreamConnection:
     connected_at: datetime
     last_activity: datetime
     audio_buffer: List[AudioChunk] = field(default_factory=list)
-    buffer_size: int = 100  # Maximum number of chunks to buffer
+    buffer_size: int = 20  # Maximum number of chunks to buffer
     is_active: bool = True
     language_detected: Optional[str] = None
-    language_locked: bool = False
-    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def add_audio_chunk(self, chunk: AudioChunk):
         """Add audio chunk to buffer, maintaining size limit."""
@@ -86,7 +83,6 @@ class AudioStreamHandler:
     def __init__(self):
         self.logger = logger
         self.active_connections: Dict[str, AudioStreamConnection] = {}
-        self.connection_pool: Set[str] = set()
         self.audio_processors: Dict[str, Callable] = {}
         self.max_connections = 100
         self.connection_timeout = 300  # 5 minutes
@@ -126,10 +122,12 @@ class AudioStreamHandler:
             ValidationError: If connection limit exceeded
         """
         try:
-            # Validate call exists
-            acs_service = get_azure_communication_service()
-            call_status = await acs_service.get_call_status(call_id)
-            if not call_status:
+            # Validate call exists using call_orchestrator (single source of truth)
+            # Import here to avoid circular import
+            from services.call_orchestrator import get_call_orchestrator
+            call_orchestrator = get_call_orchestrator()
+            call_context = await call_orchestrator.get_call_context(call_id)
+            if not call_context:
                 raise CallNotFoundError(call_id)
             
             # Check connection limit and store connection with lock
@@ -153,10 +151,16 @@ class AudioStreamHandler:
                 
                 # Store connection
                 self.active_connections[connection_id] = connection
-                self.connection_pool.add(connection_id)
             
             # Start audio streaming for the call
+            # Import here to avoid circular import
+            from services.azure_communication_service import get_azure_communication_service
+            acs_service = get_azure_communication_service()
             await acs_service.start_audio_stream(call_id)
+            
+            # Get total connections count with lock (thread-safe)
+            async with self._connections_lock:
+                total_connections = len(self.active_connections)
             
             self.logger.info(
                 f"Audio stream connected: {connection_id} for call {call_id}",
@@ -164,7 +168,7 @@ class AudioStreamHandler:
                 extra_data={
                     "connection_id": connection_id,
                     "call_id": call_id,
-                    "total_connections": len(self.active_connections)
+                    "total_connections": total_connections
                 }
             )
             
@@ -182,12 +186,13 @@ class AudioStreamHandler:
             else:
                 raise ExternalServiceUnavailableError("Audio Stream Handler", str(e))
     
-    async def handle_incoming_audio(self, connection_id: str) -> None:
+    async def handle_incoming_audio(self, connection_id: str, data: Optional[bytes] = None) -> None:
         """
         Handle incoming audio data from WebSocket.
         
         Args:
             connection_id: ID of the connection
+            data: Optional audio data (if provided, process it directly; otherwise receive from websocket)
         """
         try:
             # Get connection with lock
@@ -198,11 +203,42 @@ class AudioStreamHandler:
                     return
             
             websocket = connection.websocket
+            MAX_AUDIO_CHUNK_SIZE = 64 * 1024  # 64KB max chunk size
             
-            # Issue 161: Check connection status before entering loop
+            # If data is provided, process it directly; otherwise receive from websocket
+            if data is not None:
+                # Process provided data directly
+                if not data or len(data) == 0:
+                    self.logger.warning(f"Received empty audio data for connection {connection_id}")
+                    return
+                
+                # Validate audio data size
+                if len(data) > MAX_AUDIO_CHUNK_SIZE:
+                    self.logger.warning(
+                        f"Audio chunk too large ({len(data)} bytes) for connection {connection_id}, skipping",
+                        LogCategory.AZURE_COMMUNICATION
+                    )
+                    return
+                
+                # Create audio chunk and process
+                chunk = AudioChunk(
+                    data=data,
+                    timestamp=datetime.now(timezone.utc),
+                    chunk_id=str(uuid.uuid4()),
+                    sequence_number=len(connection.audio_buffer) + 1
+                )
+                connection.add_audio_chunk(chunk)
+                
+                # Process audio if processor is registered
+                if connection_id in self.audio_processors:
+                    await self.audio_processors[connection_id](chunk, connection)
+                
+                return
+            
+            # Receive audio data from websocket in a loop
             while connection.is_active:
                 try:
-                    # Issue 161: Check connection status before receiving data
+                    # Check connection status before receiving data
                     async with self._connections_lock:
                         if connection_id not in self.active_connections or not connection.is_active:
                             self.logger.info(f"Connection {connection_id} is no longer active, stopping audio processing")
@@ -211,13 +247,11 @@ class AudioStreamHandler:
                     # Receive audio data
                     data = await websocket.receive_bytes()
                     
-                    # Issue 90: Validate audio format before processing
+                    # Validate audio data
                     if not data or len(data) == 0:
                         self.logger.warning(f"Received empty audio data for connection {connection_id}")
                         continue
                     
-                    # Issue 90: Validate audio data size (reasonable limits)
-                    MAX_AUDIO_CHUNK_SIZE = 64 * 1024  # 64KB max chunk size
                     if len(data) > MAX_AUDIO_CHUNK_SIZE:
                         self.logger.warning(
                             f"Audio chunk too large ({len(data)} bytes) for connection {connection_id}, skipping",
@@ -225,21 +259,18 @@ class AudioStreamHandler:
                         )
                         continue
                     
-                    # Create audio chunk
+                    # Create audio chunk and process
                     chunk = AudioChunk(
                         data=data,
                         timestamp=datetime.now(timezone.utc),
                         chunk_id=str(uuid.uuid4()),
                         sequence_number=len(connection.audio_buffer) + 1
                     )
-                    
-                    # Add to buffer
                     connection.add_audio_chunk(chunk)
                     
                     # Process audio if processor is registered
                     if connection_id in self.audio_processors:
-                        processor = self.audio_processors[connection_id]
-                        await processor(chunk, connection)
+                        await self.audio_processors[connection_id](chunk, connection)
                     
                     self.logger.debug(
                         f"Received audio chunk: {chunk.chunk_id}",
@@ -293,10 +324,9 @@ class AudioStreamHandler:
                 if not connection or not connection.is_active:
                     return False
             
-            # Issue 91: Check buffer size before sending
+            # Check buffer size before sending - split large buffers into smaller chunks
             MAX_AUDIO_BUFFER_SIZE = 128 * 1024  # 128KB max buffer size
             if len(audio_data) > MAX_AUDIO_BUFFER_SIZE:
-                # Issue 91: Split large buffers into smaller chunks
                 self.logger.debug(
                     f"Audio buffer too large ({len(audio_data)} bytes), splitting into chunks",
                     LogCategory.AZURE_COMMUNICATION
@@ -311,15 +341,6 @@ class AudioStreamHandler:
                         return False
                 return True
             
-            # Create audio chunk for outgoing data
-            chunk = AudioChunk(
-                data=audio_data,
-                timestamp=datetime.now(timezone.utc),
-                chunk_id=str(uuid.uuid4()),
-                sequence_number=len(connection.audio_buffer) + 1,
-                audio_format=audio_format
-            )
-            
             # Send via WebSocket
             await connection.websocket.send_bytes(audio_data)
             
@@ -329,11 +350,10 @@ class AudioStreamHandler:
                     connection.last_activity = datetime.now(timezone.utc)
             
             self.logger.debug(
-                f"Sent audio chunk: {chunk.chunk_id}",
+                f"Sent audio data for connection {connection_id}",
                 LogCategory.AZURE_COMMUNICATION,
                 extra_data={
                     "connection_id": connection_id,
-                    "chunk_id": chunk.chunk_id,
                     "data_size": len(audio_data),
                     "audio_format": audio_format
                 }
@@ -371,37 +391,30 @@ class AudioStreamHandler:
                         connection = conn
                         break
             
-            if not connection:
+            if not connection or not connection.is_active:
                 self.logger.warning(f"No active connection found for call: {call_id}")
                 return False
             
-            # Issue 37, 182: Verify connection is still active right before sending and during send
-            if not connection.is_active:
-                self.logger.warning(f"Connection {connection.connection_id} is no longer active")
-                return False
+            # Verify connection is still active before sending
+            async with self._connections_lock:
+                if connection.connection_id not in self.active_connections or not connection.is_active:
+                    self.logger.warning(f"Connection {connection.connection_id} is no longer active")
+                    return False
             
-            # Issue 89, 182: Handle connection errors gracefully and check connection during send
+            # Send audio
             try:
-                # Issue 182: Check connection status before sending
-                async with self._connections_lock:
-                    if connection.connection_id not in self.active_connections or not connection.is_active:
-                        self.logger.warning(f"Connection {connection.connection_id} became inactive before send")
-                        return False
-                
-                # Issue 182: Send audio and check connection status after send
                 result = await self.handle_outgoing_audio(connection.connection_id, audio_data, audio_format)
                 
-                # Issue 182: Verify connection is still active after send
+                # Verify connection is still active after send
                 async with self._connections_lock:
-                    if connection.connection_id in self.active_connections:
-                        if not self.active_connections[connection.connection_id].is_active:
-                            self.logger.warning(f"Connection {connection.connection_id} became inactive during send")
-                            return False
+                    if connection.connection_id not in self.active_connections or not connection.is_active:
+                        self.logger.warning(f"Connection {connection.connection_id} became inactive during send")
+                        return False
                 
                 return result
             except Exception as conn_error:
                 self.logger.error(f"Connection error while sending audio: {conn_error}")
-                # Issue 182: Mark connection as inactive on error
+                # Mark connection as inactive on error
                 async with self._connections_lock:
                     if connection.connection_id in self.active_connections:
                         self.active_connections[connection.connection_id].is_active = False
@@ -454,9 +467,6 @@ class AudioStreamHandler:
             async with self._connections_lock:
                 if connection_id in self.active_connections:
                     del self.active_connections[connection_id]
-                
-                if connection_id in self.connection_pool:
-                    self.connection_pool.remove(connection_id)
             
             # Get total connections with lock
             async with self._connections_lock:
@@ -506,104 +516,40 @@ class AudioStreamHandler:
             connection_id: ID of the connection
             callback: Function to handle STT results
         """
-        self.audio_processors[connection_id] = callback
+        # Issue 18: Check if processor already exists and merge instead of overwriting
+        if connection_id in self.audio_processors:
+            existing_processor = self.audio_processors[connection_id]
+            # Issue 18: Create wrapper that calls both processors
+            async def combined_processor(chunk, connection):
+                # Call existing processor
+                try:
+                    if asyncio.iscoroutinefunction(existing_processor):
+                        await existing_processor(chunk, connection)
+                    else:
+                        existing_processor(chunk, connection)
+                except Exception as e:
+                    self.logger.error(f"Error in existing processor for {connection_id}: {e}")
+                # Call new STT callback
+                try:
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(chunk, connection)
+                    else:
+                        callback(chunk, connection)
+                except Exception as e:
+                    self.logger.error(f"Error in STT callback for {connection_id}: {e}")
+            self.audio_processors[connection_id] = combined_processor
+            self.logger.warning(
+                f"STT callback already exists for connection {connection_id}, merging with existing processor",
+                LogCategory.AZURE_COMMUNICATION
+            )
+        else:
+            self.audio_processors[connection_id] = callback
         
         self.logger.info(
             f"STT callback registered: {connection_id}",
             LogCategory.AZURE_COMMUNICATION,
             extra_data={"connection_id": connection_id}
         )
-    
-    def unregister_audio_processor(self, connection_id: str):
-        """
-        Unregister an audio processor for a connection.
-        
-        Args:
-            connection_id: ID of the connection
-        """
-        if connection_id in self.audio_processors:
-            del self.audio_processors[connection_id]
-            
-            self.logger.info(
-                f"Audio processor unregistered: {connection_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={"connection_id": connection_id}
-            )
-    
-    async def get_connection_status(self, connection_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get status of an audio stream connection.
-        
-        Args:
-            connection_id: ID of the connection
-            
-        Returns:
-            Connection status information or None if not found
-        """
-        async with self._connections_lock:
-            connection = self.active_connections.get(connection_id)
-            if not connection:
-                return None
-        
-        return {
-            "connection_id": connection.connection_id,
-            "call_id": connection.call_id,
-            "connected_at": connection.connected_at.isoformat(),
-            "last_activity": connection.last_activity.isoformat(),
-            "is_active": connection.is_active,
-            "buffer_size": len(connection.audio_buffer),
-            "language_detected": connection.language_detected,
-            "language_locked": connection.language_locked,
-            "has_processor": connection_id in self.audio_processors
-        }
-    
-    async def get_call_connection(self, call_id: str) -> Optional[AudioStreamConnection]:
-        """
-        Get audio stream connection for a specific call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            AudioStreamConnection or None if not found
-        """
-        async with self._connections_lock:
-            for connection in self.active_connections.values():
-                if connection.call_id == call_id and connection.is_active:
-                    return connection
-            return None
-    
-    async def get_active_connections_count(self) -> int:
-        """Get count of active connections."""
-        async with self._connections_lock:
-            return len(self.active_connections)
-    
-    async def get_connection_statistics(self) -> Dict[str, Any]:
-        """Get connection statistics."""
-        async with self._connections_lock:
-            total_connections = len(self.active_connections)
-            connections_copy = dict(self.active_connections)
-        
-        active_processors = len(self.audio_processors)
-        
-        # Calculate average buffer size (with division by zero check)
-        total_buffer_size = sum(len(conn.audio_buffer) for conn in connections_copy.values())
-        avg_buffer_size = total_buffer_size / total_connections if total_connections > 0 else 0
-        
-        # Count connections by call
-        call_connections = {}
-        for connection in connections_copy.values():
-            call_id = connection.call_id
-            call_connections[call_id] = call_connections.get(call_id, 0) + 1
-        
-        return {
-            "total_connections": total_connections,
-            "active_processors": active_processors,
-            "average_buffer_size": avg_buffer_size,
-            "call_connections": call_connections,
-            "max_connections": self.max_connections,
-            "connection_utilization": (total_connections / self.max_connections) * 100
-        }
     
     async def _cleanup_inactive_connections(self):
         """Clean up inactive connections periodically."""

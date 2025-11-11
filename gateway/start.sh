@@ -21,12 +21,12 @@ done
 
 log_with_timestamp "Database is ready!"
 
-# Reset database and run clean migration
-log_with_timestamp "Resetting database and running clean migration..."
+# Run database migrations
+log_with_timestamp "Running database migrations..."
 cd /app
-python reset_db.py
+python migrate.py upgrade head
 
-log_with_timestamp "Database reset and migration completed!"
+log_with_timestamp "Database migrations completed!"
 
 # Start the application
 if [ "$APP_ENVIRONMENT" = "development" ]; then

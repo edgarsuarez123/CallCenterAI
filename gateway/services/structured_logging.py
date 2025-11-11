@@ -20,8 +20,10 @@ Key Features:
 - Error pattern analysis
 """
 
+import asyncio
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -30,11 +32,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 from functools import wraps
-import hashlib
 import threading
 from collections import defaultdict, deque
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from services.configuration import get_settings
@@ -56,8 +57,10 @@ class LogCategory(Enum):
     SYSTEM = "system"
     DATABASE = "database"
     API = "api"
+    ROUTING = "routing"
     AUTHENTICATION = "authentication"
     AUTHORIZATION = "authorization"
+    CONFIG = "config"
     
     # Business categories
     APPOINTMENT = "appointment"
@@ -189,9 +192,17 @@ class StructuredLogger:
         # File handler for persistent logs (only if enabled in config)
         settings = get_settings()
         if settings.logging.file_enabled:
-            file_handler = logging.FileHandler('/app/logs/callcenter_ai.log')
-            file_handler.setFormatter(StructuredFormatter())
-            self.logger.addHandler(file_handler)
+            # Use configurable log directory or default to current directory
+            log_dir = getattr(settings.logging, 'log_directory', None) or os.getenv('LOG_DIRECTORY', './logs')
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, 'callcenter_ai.log')
+            try:
+                file_handler = logging.FileHandler(log_file)
+                file_handler.setFormatter(StructuredFormatter())
+                self.logger.addHandler(file_handler)
+            except Exception as e:
+                # Fallback to console only if file logging fails
+                self.logger.warning(f"Failed to setup file logging to {log_file}: {e}")
     
     def _detect_and_mask_phi(self, message: str) -> str:
         """
@@ -342,7 +353,11 @@ class StructuredLogger:
     def _get_traceback(self, exception: Exception) -> str:
         """Get formatted traceback for exception."""
         import traceback
-        return traceback.format_exc()
+        import io
+        # Use StringIO to capture traceback for the specific exception
+        tb_buffer = io.StringIO()
+        traceback.print_exception(type(exception), exception, exception.__traceback__, file=tb_buffer)
+        return tb_buffer.getvalue()
     
     def _get_performance_metrics(self) -> Dict[str, Any]:
         """Get current performance metrics."""
@@ -514,7 +529,11 @@ class StructuredLogger:
         )
     
     def log_audit_event(self, action: str, resource: str, details: Dict[str, Any]):
-        """Log audit events for compliance."""
+        """Log audit events for compliance.
+        
+        NOTE: For database audit trails (HIPAA compliance), use audit_utils.log_audit_trail() instead.
+        This method is for general application logging only.
+        """
         self.info(
             f"Audit: {action} on {resource}",
             LogCategory.AUDIT,
@@ -536,7 +555,7 @@ class StructuredLogger:
             }
         )
     
-    # Analytics and reporting methods
+    # Analytics and reporting methods (unused but kept for potential future monitoring dashboards)
     def get_error_summary(self) -> Dict[str, Any]:
         """Get summary of recent errors for monitoring dashboards."""
         return {
@@ -652,43 +671,80 @@ def get_logger(name: str = None) -> StructuredLogger:
 
 
 def log_performance(operation_name: str = None):
-    """Decorator to log function performance."""
+    """Decorator to log function performance. Supports both sync and async functions."""
     def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = time.time()
-            operation = operation_name or f"{func.__module__}.{func.__name__}"
-            
-            try:
-                result = func(*args, **kwargs)
-                duration_ms = (time.time() - start_time) * 1000
+        if asyncio.iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                start_time = time.time()
+                operation = operation_name or f"{func.__module__}.{func.__name__}"
                 
-                logger.info(
-                    f"Operation completed: {operation}",
-                    LogCategory.PERFORMANCE,
-                    extra_data={
-                        'operation': operation,
-                        'duration_ms': duration_ms,
-                        'success': True
-                    }
-                )
+                try:
+                    result = await func(*args, **kwargs)
+                    duration_ms = (time.time() - start_time) * 1000
+                    
+                    logger.info(
+                        f"Operation completed: {operation}",
+                        LogCategory.PERFORMANCE,
+                        extra_data={
+                            'operation': operation,
+                            'duration_ms': duration_ms,
+                            'success': True
+                        }
+                    )
+                    
+                    return result
+                except Exception as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    
+                    logger.error(
+                        f"Operation failed: {operation}",
+                        LogCategory.PERFORMANCE,
+                        exception=e,
+                        extra_data={
+                            'operation': operation,
+                            'duration_ms': duration_ms,
+                            'success': False
+                        }
+                    )
+                    raise
+            return async_wrapper
+        else:
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                start_time = time.time()
+                operation = operation_name or f"{func.__module__}.{func.__name__}"
                 
-                return result
-            except Exception as e:
-                duration_ms = (time.time() - start_time) * 1000
-                
-                logger.error(
-                    f"Operation failed: {operation}",
-                    LogCategory.PERFORMANCE,
-                    exception=e,
-                    extra_data={
-                        'operation': operation,
-                        'duration_ms': duration_ms,
-                        'success': False
-                    }
-                )
-                raise
-        return wrapper
+                try:
+                    result = func(*args, **kwargs)
+                    duration_ms = (time.time() - start_time) * 1000
+                    
+                    logger.info(
+                        f"Operation completed: {operation}",
+                        LogCategory.PERFORMANCE,
+                        extra_data={
+                            'operation': operation,
+                            'duration_ms': duration_ms,
+                            'success': True
+                        }
+                    )
+                    
+                    return result
+                except Exception as e:
+                    duration_ms = (time.time() - start_time) * 1000
+                    
+                    logger.error(
+                        f"Operation failed: {operation}",
+                        LogCategory.PERFORMANCE,
+                        exception=e,
+                        extra_data={
+                            'operation': operation,
+                            'duration_ms': duration_ms,
+                            'success': False
+                        }
+                    )
+                    raise
+            return sync_wrapper
     return decorator
 
 def log_database_queries(engine: Engine):
@@ -725,111 +781,15 @@ def log_database_queries(engine: Engine):
                 }
             )
 
-# Database integration for audit logging
-class AuditLogger:
-    """Specialized logger for audit trails and compliance."""
-    
-    def __init__(self, db_session: Session):
-        self.db_session = db_session
-        self.logger = get_logger("audit")
-    
-    def log_phi_access(self, user_id: str, resource_type: str, resource_id: str, action: str):
-        """Log PHI access for compliance auditing."""
-        self.logger.log_audit_event(
-            f"PHI_ACCESS_{action.upper()}",
-            f"{resource_type}:{resource_id}",
-            {
-                'user_id': user_id,
-                'resource_type': resource_type,
-                'resource_id': resource_id,
-                'action': action,
-                'compliance_required': True
-            }
-        )
-    
-    def log_data_modification(self, user_id: str, table_name: str, record_id: str, action: str, changes: Dict[str, Any]):
-        """Log data modifications for audit trail."""
-        self.logger.log_audit_event(
-            f"DATA_MODIFICATION_{action.upper()}",
-            f"{table_name}:{record_id}",
-            {
-                'user_id': user_id,
-                'table_name': table_name,
-                'record_id': record_id,
-                'action': action,
-                'changes': changes
-            }
-        )
-    
-    def log_system_event(self, event_type: str, details: Dict[str, Any]):
-        """Log system events for monitoring."""
-        self.logger.log_audit_event(
-            f"SYSTEM_{event_type.upper()}",
-            "system",
-            details
-        )
-
-# Performance monitoring
-class PerformanceMonitor:
-    """Monitor and log performance metrics."""
-    
-    def __init__(self):
-        self.logger = get_logger("performance")
-        self._metrics = defaultdict(list)
-    
-    @contextmanager
-    def time_operation(self, operation_name: str, category: LogCategory = LogCategory.PERFORMANCE):
-        """Context manager to time operations."""
-        start_time = time.time()
-        try:
-            yield
-        finally:
-            duration_ms = (time.time() - start_time) * 1000
-            self._metrics[operation_name].append(duration_ms)
-            
-            self.logger.info(
-                f"Operation timing: {operation_name}",
-                category,
-                extra_data={
-                    'operation': operation_name,
-                    'duration_ms': duration_ms,
-                    'avg_duration_ms': sum(self._metrics[operation_name]) / len(self._metrics[operation_name])
-                }
-            )
-    
-    def get_metrics_summary(self) -> Dict[str, Any]:
-        """Get performance metrics summary."""
-        summary = {}
-        for operation, times in self._metrics.items():
-            if times:
-                summary[operation] = {
-                    'count': len(times),
-                    'avg_ms': sum(times) / len(times),
-                    'min_ms': min(times),
-                    'max_ms': max(times),
-                    'total_ms': sum(times)
-                }
-        return summary
-
-# Global instances
-audit_logger = None
-performance_monitor = PerformanceMonitor()
-
-def setup_audit_logging(db_session: Session):
-    """Setup audit logging with database session."""
-    global audit_logger
-    
-    # Get configuration
-    settings = get_settings()
-    
-    # Only setup audit logging if enabled in configuration
-    if settings.logging.audit_enabled:
-        audit_logger = AuditLogger(db_session)
-    else:
-        audit_logger = None
-
-def get_audit_logger() -> AuditLogger:
-    """Get the global audit logger instance."""
-    if audit_logger is None:
-        raise RuntimeError("Audit logging not initialized. Call setup_audit_logging() first.")
-    return audit_logger
+# NOTE: AuditLogger and PerformanceMonitor classes are unused.
+# For database audit trails, use audit_utils.log_audit_trail() instead.
+# For performance monitoring, use the log_performance decorator or metrics.py.
+#
+# Difference between structured_logging.py and audit_utils.py:
+# - structured_logging.py: General application logging (console, files, monitoring)
+#   - PHI masking, structured JSON logs, performance tracking, security events
+#   - Used for debugging, monitoring, and operational visibility
+# - audit_utils.py: Database audit trail logging (compliance records)
+#   - Writes to AuditLog database table for HIPAA compliance
+#   - Tracks data modifications, PHI access, and system events
+#   - Used for compliance auditing and regulatory requirements

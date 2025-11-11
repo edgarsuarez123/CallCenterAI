@@ -12,13 +12,11 @@ Provides REST API for monitoring and managing background jobs:
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel, Field
 
-from services.database import get_db
-from services.background_jobs import get_background_job_manager, BackgroundJobManager
+from services.background_jobs import get_background_job_manager
 from services.structured_logging import get_logger, LogCategory
-from sqlalchemy.orm import Session
 
 
 router = APIRouter(prefix="/background-jobs", tags=["Background Jobs"])
@@ -63,12 +61,6 @@ class SystemHealthResponse(BaseModel):
     total_executed: int
     total_failed: int
     success_rate: float
-
-
-class JobControlRequest(BaseModel):
-    """Request model for job control operations."""
-    enabled: Optional[bool] = None
-    priority: Optional[int] = None
 
 
 @router.get("/", response_model=Dict[str, JobStatusResponse])

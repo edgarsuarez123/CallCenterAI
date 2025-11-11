@@ -13,7 +13,6 @@ and automating routine maintenance tasks without manual intervention.
 """
 
 import asyncio
-import logging
 import concurrent.futures
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any, Callable
@@ -21,11 +20,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 import threading
 import time
-from contextlib import asynccontextmanager
-import json
 
 from sqlalchemy.orm import Session
-from sqlalchemy import text, func, and_, or_
+from sqlalchemy import text, func, and_, or_, select
 
 from services.database import get_db_session
 from services.soft_delete import SoftDeleteService
@@ -258,26 +255,6 @@ class BackgroundJobManager:
             priority=JobPriority.LOW
         )
         
-        # NLP cleanup job
-        self.register_job(
-            job_id="cleanup_nlp_statistics",
-            name="Cleanup NLP Statistics",
-            description="Clean up expired NLP call statistics",
-            function=self._cleanup_nlp_statistics,
-            schedule_interval=300,  # Every 5 minutes
-            priority=JobPriority.NORMAL
-        )
-        
-        # TTS session cleanup job
-        self.register_job(
-            job_id="cleanup_tts_sessions",
-            name="Cleanup TTS Sessions",
-            description="Clean up expired TTS sessions",
-            function=self._cleanup_tts_sessions,
-            schedule_interval=300,  # Every 5 minutes
-            priority=JobPriority.NORMAL
-        )
-        
         # STT session cleanup job
         self.register_job(
             job_id="cleanup_stt_sessions",
@@ -288,25 +265,17 @@ class BackgroundJobManager:
             priority=JobPriority.NORMAL
         )
         
-        # Bilingual manager cleanup job
+        # Issue 5.1: Sync pending calendar events
         self.register_job(
-            job_id="cleanup_bilingual_data",
-            name="Cleanup Bilingual Data",
-            description="Clean up expired bilingual conversation data",
-            function=self._cleanup_bilingual_data,
+            job_id="sync_pending_calendar_events",
+            name="Sync Pending Calendar Events",
+            description="Sync appointments that need calendar sync to Google Calendar",
+            function=self._sync_pending_calendar_events,
             schedule_interval=300,  # Every 5 minutes
-            priority=JobPriority.NORMAL
+            priority=JobPriority.HIGH
         )
         
-        # Call router queue cleanup job
-        self.register_job(
-            job_id="cleanup_call_queues",
-            name="Cleanup Call Queues",
-            description="Clean up expired call queues",
-            function=self._cleanup_call_queues,
-            schedule_interval=300,  # Every 5 minutes
-            priority=JobPriority.NORMAL
-        )
+        # Removed sync_call_states job - state management consolidated in call_orchestrator
     
     def register_job(self, job_id: str, name: str, description: str, 
                     function: Callable, schedule_interval: int,
@@ -571,12 +540,14 @@ class BackgroundJobManager:
             # Calls active for more than 24 hours
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
             
-            abandoned_calls = db.query(Call).filter(
-                and_(
-                    Call.status == CallStatus.ACTIVE.value,
-                    Call.started_at < cutoff_time
+            abandoned_calls = db.execute(
+                select(Call).where(
+                    and_(
+                        Call.status == CallStatus.ACTIVE.value,
+                        Call.started_at < cutoff_time
+                    )
                 )
-            ).all()
+            ).scalars().all()
             
             records_affected = 0
             for call in abandoned_calls:
@@ -619,9 +590,11 @@ class BackgroundJobManager:
             # Keep audit logs for 7 years (HIPAA requirement)
             cutoff_date = datetime.now(timezone.utc) - timedelta(days=2555)
             
-            old_logs = db.query(AuditLog).filter(
-                AuditLog.created_at < cutoff_date
-            ).all()
+            old_logs = db.execute(
+                select(AuditLog).where(
+                    AuditLog.created_at < cutoff_date
+                )
+            ).scalars().all()
             
             records_affected = 0
             for log in old_logs:
@@ -670,9 +643,11 @@ class BackgroundJobManager:
         
         with get_db_session() as db:
             # Reset usage counters for all active licenses
-            licenses = db.query(ClinicLicense).filter(
-                ClinicLicense.license_status == "active"
-            ).all()
+            licenses = db.execute(
+                select(ClinicLicense).where(
+                    ClinicLicense.license_status == "active"
+                )
+            ).scalars().all()
             
             records_affected = 0
             for license in licenses:
@@ -715,20 +690,42 @@ class BackgroundJobManager:
         with get_db_session() as db:
             # Issue 82: Use proper locking to handle concurrent updates
             from sqlalchemy import func
-            from sqlalchemy import select
             
-            # Get active call counts per clinic in one query
-            active_calls_per_clinic = db.query(
-                Patient.clinic_id,
-                func.count(Call.call_id).label('active_calls')
-            ).join(
-                Call, Patient.patient_id == Call.patient_id
-            ).filter(
-                Call.status == CallStatus.ACTIVE.value
-            ).group_by(Patient.clinic_id).all()
+            # Get active call counts per clinic
+            # Handle both calls with patient_id (via Patient) and calls without patient_id (via clinic_id directly)
+            active_calls_with_patient = db.execute(
+                select(
+                    Patient.clinic_id,
+                    func.count(Call.call_id).label('active_calls')
+                ).join(
+                    Call, Patient.patient_id == Call.patient_id
+                ).where(
+                    Call.status == CallStatus.ACTIVE.value
+                ).group_by(Patient.clinic_id)
+            ).all()
             
-            # Create a dictionary for quick lookup
-            active_calls_dict = {clinic_id: count for clinic_id, count in active_calls_per_clinic}
+            # Get active calls without patient_id (directly from Call.clinic_id if it exists)
+            # Note: This assumes Call has a clinic_id field. If not, only count calls with patient_id.
+            active_calls_without_patient = []
+            if hasattr(Call, 'clinic_id'):
+                active_calls_without_patient = db.execute(
+                    select(
+                        Call.clinic_id,
+                        func.count(Call.call_id).label('active_calls')
+                    ).where(
+                        and_(
+                            Call.status == CallStatus.ACTIVE.value,
+                            Call.patient_id.is_(None)
+                        )
+                    ).group_by(Call.clinic_id)
+                ).all()
+            
+            # Merge both results into a single dictionary
+            active_calls_dict = {}
+            for clinic_id, count in active_calls_with_patient:
+                active_calls_dict[clinic_id] = active_calls_dict.get(clinic_id, 0) + count
+            for clinic_id, count in active_calls_without_patient:
+                active_calls_dict[clinic_id] = active_calls_dict.get(clinic_id, 0) + count
             
             # Issue 82, 189: Update all licenses with SELECT FOR UPDATE to prevent concurrent updates
             # Issue 189: Use distributed locking or ensure only one worker runs this job at a time
@@ -870,12 +867,14 @@ class BackgroundJobManager:
             current_time = datetime.now(timezone.utc)
             
             # Find licenses in grace period
-            grace_period_licenses = db.query(ClinicLicense).filter(
-                and_(
-                    ClinicLicense.license_status == "grace_period",
-                    ClinicLicense.grace_period_end < current_time
+            grace_period_licenses = db.execute(
+                select(ClinicLicense).where(
+                    and_(
+                        ClinicLicense.license_status == "grace_period",
+                        ClinicLicense.grace_period_end < current_time
+                    )
                 )
-            ).all()
+            ).scalars().all()
             
             records_affected = 0
             for license in grace_period_licenses:
@@ -957,68 +956,47 @@ class BackgroundJobManager:
             raise
     
     def _process_due_reminders(self) -> Dict[str, Any]:
-        """Process reminders that are due for execution."""
+        """Process reminders that are due for execution using queue-based system."""
         try:
             reminder_service = get_reminder_service()
             
-            # Issue 51: Move loop inside context manager to keep session alive
-            processed_count = 0
-            success_count = 0
-            failed_count = 0
-            
             # Use proper database session context manager
             with get_db_session() as db_session:
-                # Get due reminders
-                due_reminders = _safe_run_async(reminder_service.get_due_reminders(db_session, limit=50))
+                # Load due reminders into queue
+                loaded = _safe_run_async(reminder_service.load_due_reminders_into_queue(db_session, limit=100))
                 
-                for reminder in due_reminders:
-                    try:
-                        processed_count += 1
-                        
-                        # Execute the reminder
-                        result = _safe_run_async(reminder_service.execute_reminder(db_session, reminder.reminder_id))
-                    
-                        if result['status'] == 'completed':
-                            success_count += 1
-                        else:
-                            failed_count += 1
-                            
-                    except Exception as e:
-                        failed_count += 1
-                        self.logger.error(
-                            f"Failed to process reminder {reminder.reminder_id}",
-                            LogCategory.REMINDER,
-                            exception=e
-                        )
-                        # Issue 165: Update reminder status to 'failed' if execution fails
-                        try:
-                            reminder.status = 'failed'
-                            reminder.completed_at = datetime.now(timezone.utc)
-                            reminder.deletion_reason = f'execution_failed: {str(e)}'
-                            db_session.commit()
-                        except Exception as status_error:
-                            self.logger.error(f"Failed to update reminder status: {status_error}")
-            
-            self.logger.info(
-                f"Processed {processed_count} due reminders: {success_count} successful, {failed_count} failed",
-                LogCategory.REMINDER,
-                extra_data={
-                    'processed_count': processed_count,
-                    'success_count': success_count,
-                    'failed_count': failed_count
+                if loaded == 0:
+                    return {
+                        "status": "no_reminders",
+                        "loaded": 0,
+                        "processed": 0,
+                        "succeeded": 0,
+                        "failed": 0
+                    }
+                
+                # Process all reminders in the queue until empty
+                result = _safe_run_async(reminder_service.process_reminder_queue(db_session))
+                
+                result_dict = {
+                    "status": result.get("status", "completed"),
+                    "loaded": loaded,
+                    "processed": result.get("processed", 0),
+                    "succeeded": result.get("succeeded", 0),
+                    "failed": result.get("failed", 0),
+                    "remaining_in_queue": result.get("remaining_in_queue", 0)
                 }
-            )
-            
-            # Issue 52: Return dict (JobResult is created by _execute_job from dict)
-            # Note: _execute_job handles dict returns and creates JobResult (line 451-454)
-            return {
-                'records_processed': processed_count,
-                'records_affected': success_count,
-                'metadata': {
-                    'success_count': success_count,
-                    'failed_count': failed_count
+                
+                self.logger.info(
+                    f"Processed reminders: {result_dict['processed']} processed, {result_dict['succeeded']} succeeded, {result_dict['failed']} failed",
+                    LogCategory.REMINDER,
+                    extra_data=result_dict
+                )
+                
+                return {
+                    'records_processed': result_dict['processed'],
+                    'records_affected': result_dict['succeeded'],
+                    'metadata': result_dict
                 }
-            }
             
         except Exception as e:
             self.logger.error(
@@ -1035,13 +1013,15 @@ class BackgroundJobManager:
                 cutoff_date = datetime.now(timezone.utc) - timedelta(days=30)
             
                 # Find old completed reminders
-                old_reminders = db.query(Reminder).filter(
-                    and_(
-                        Reminder.is_deleted == 'no',
-                        Reminder.status.in_(['completed', 'cancelled']),
-                        Reminder.completed_at < cutoff_date
+                old_reminders = db.execute(
+                    select(Reminder).where(
+                        and_(
+                            Reminder.is_deleted == 'no',
+                            Reminder.status.in_(['completed', 'cancelled']),
+                            Reminder.completed_at < cutoff_date
+                        )
                     )
-                ).all()
+                ).scalars().all()
                 
                 deleted_count = 0
                 
@@ -1218,56 +1198,6 @@ class BackgroundJobManager:
             )
         }
     
-    def _cleanup_nlp_statistics(self) -> Dict[str, Any]:
-        """Clean up expired NLP call statistics."""
-        try:
-            from services.hybrid_nlp_service import get_hybrid_nlp_service
-            
-            hybrid_nlp = get_hybrid_nlp_service()
-            _safe_run_async(hybrid_nlp.cleanup_expired_data())
-            
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": True
-            }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to cleanup NLP statistics: {e}",
-                LogCategory.SYSTEM,
-                exception=e
-            )
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": False,
-                "error": str(e)
-            }
-    
-    def _cleanup_tts_sessions(self) -> Dict[str, Any]:
-        """Clean up expired TTS sessions."""
-        try:
-            from services.azure_speech_tts import get_tts_service
-            tts_service = get_tts_service()
-            _safe_run_async(tts_service.cleanup_expired_sessions())
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": True
-            }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to cleanup TTS sessions: {e}",
-                LogCategory.SYSTEM,
-                exception=e
-            )
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": False,
-                "error": str(e)
-            }
-    
     def _cleanup_stt_sessions(self) -> Dict[str, Any]:
         """Clean up expired STT sessions."""
         try:
@@ -1292,94 +1222,153 @@ class BackgroundJobManager:
                 "error": str(e)
             }
     
-    def _cleanup_bilingual_data(self) -> Dict[str, Any]:
-        """Clean up expired bilingual conversation data."""
+    @log_performance("sync_pending_calendar_events")
+    def _sync_pending_calendar_events(self) -> Dict[str, Any]:
+        """Sync appointments that need calendar sync to Google Calendar."""
         try:
-            from services.bilingual_manager import get_bilingual_manager
-            bilingual_manager = get_bilingual_manager()
-            _safe_run_async(bilingual_manager.cleanup_expired_data())
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": True
-            }
+            from services.google_calendar_service import get_google_calendar_service
+            from sqlalchemy import select
+            
+            google_calendar_service = get_google_calendar_service()
+            if not google_calendar_service:
+                return {
+                    'records_processed': 0,
+                    'records_affected': 0,
+                    'metadata': {'error': 'Google Calendar service not available'}
+                }
+            
+            with get_db_session() as db:
+                # Find appointments needing sync (limit to 100 per run to avoid overload)
+                appointments = db.execute(
+                    select(Appointment).where(
+                        Appointment.needs_calendar_sync == True,
+                        Appointment.status == 'scheduled',
+                        Appointment.is_deleted == 'no'
+                    ).limit(100)
+                ).scalars().all()
+                
+                records_processed = 0
+                records_synced = 0
+                records_failed = 0
+                
+                for appointment in appointments:
+                    records_processed += 1
+                    try:
+                        # Attempt sync
+                        event_id = _safe_run_async(
+                            google_calendar_service.sync_appointment_to_calendar(
+                                appointment, appointment.provider_id, None
+                            )
+                        )
+                        
+                        if event_id:
+                            appointment.google_event_id = event_id
+                            appointment.needs_calendar_sync = False
+                            db.commit()
+                            records_synced += 1
+                        else:
+                            # Sync returned None - keep needs_calendar_sync = True
+                            records_failed += 1
+                            self.logger.warning(
+                                f"Calendar sync returned None for appointment {appointment.appointment_id}",
+                                LogCategory.SYSTEM,
+                                extra_data={'appointment_id': appointment.appointment_id}
+                            )
+                    except Exception as e:
+                        records_failed += 1
+                        self.logger.error(
+                            f"Failed to sync appointment {appointment.appointment_id} to calendar: {e}",
+                            LogCategory.SYSTEM,
+                            exception=e,
+                            extra_data={'appointment_id': appointment.appointment_id}
+                        )
+                        # Keep needs_calendar_sync = True for retry
+                        db.rollback()
+                
+                return {
+                    'records_processed': records_processed,
+                    'records_affected': records_synced,
+                    'records_failed': records_failed,
+                    'metadata': {
+                        'synced': records_synced,
+                        'failed': records_failed
+                    }
+                }
         except Exception as e:
             self.logger.error(
-                f"Failed to cleanup bilingual data: {e}",
+                f"Failed to sync pending calendar events: {e}",
                 LogCategory.SYSTEM,
                 exception=e
             )
             return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": False,
-                "error": str(e)
+                'records_processed': 0,
+                'records_affected': 0,
+                'metadata': {'error': str(e)}
             }
     
-    def _cleanup_call_queues(self) -> Dict[str, Any]:
-        """Clean up expired call queues."""
-        try:
-            from services.call_router import get_call_router
-            call_router = get_call_router()
-            _safe_run_async(call_router.cleanup_expired_queues())
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": True
-            }
-        except Exception as e:
-            self.logger.error(
-                f"Failed to cleanup call queues: {e}",
-                LogCategory.SYSTEM,
-                exception=e
-            )
-            return {
-                "records_processed": 0,
-                "records_affected": 0,
-                "success": False,
-                "error": str(e)
-            }
+    # Removed _sync_call_states job - state management consolidated in call_orchestrator
     
     def _refresh_google_calendar_tokens(self):
         """Refresh Google Calendar tokens that will expire soon."""
         try:
-            from services.database import get_db
             from models.models import GoogleCalendarCredentials
-            from datetime import datetime, timezone, timedelta
-            from services.google_calendar_credentials_service import GoogleCalendarCredentialsService
+            from services.google_calendar_service import GoogleCalendarService, GoogleCalendarConfig
             from google.oauth2.credentials import Credentials
             from google.auth.transport.requests import Request
             
-            # Issue 56: Use context manager instead of next(get_db())
             with get_db_session() as db:
                 # Find credentials expiring in next 15 minutes
                 expiry_threshold = datetime.now(timezone.utc) + timedelta(minutes=15)
                 
-                expiring_creds = db.query(GoogleCalendarCredentials).filter(
-                    GoogleCalendarCredentials.is_active == True,
-                    GoogleCalendarCredentials.token_expires_at <= expiry_threshold,
-                    GoogleCalendarCredentials.refresh_token_ciphertext.isnot(None)
-                ).all()
+                expiring_creds = db.execute(
+                    select(GoogleCalendarCredentials).where(
+                        and_(
+                            GoogleCalendarCredentials.is_active == True,
+                            GoogleCalendarCredentials.token_expires_at <= expiry_threshold,
+                            GoogleCalendarCredentials.refresh_token_ciphertext.isnot(None)
+                        )
+                    )
+                ).scalars().all()
                 
-                credentials_service = GoogleCalendarCredentialsService(db)
+                # Create GoogleCalendarService instance for credentials management
+                config = GoogleCalendarConfig(
+                    client_id=self.settings.google_calendar.client_id,
+                    client_secret=self.settings.google_calendar.client_secret.get_secret_value(),
+                    redirect_uri=self.settings.google_calendar.redirect_uri
+                )
+                credentials_service = GoogleCalendarService(config, db)
                 refreshed_count = 0
                 
                 for cred_record in expiring_creds:
                     try:
-                        # Get credentials
-                        credentials = credentials_service.get_credentials(cred_record.provider_id)
+                        # Get credentials (async method, need to run it)
+                        credentials = _safe_run_async(
+                            credentials_service._get_credentials(cred_record.provider_id)
+                        )
                         if credentials and credentials.refresh_token:
-                            # Refresh
+                            # Refresh token (synchronous operation)
                             credentials.refresh(Request())
-                            # Save back
-                            credentials_service.store_credentials(cred_record.provider_id, credentials)
+                            # Save back (async method, need to run it)
+                            _safe_run_async(
+                                credentials_service._store_credentials(cred_record.provider_id, credentials)
+                            )
                             refreshed_count += 1
-                            self.logger.info(f"Refreshed Google token for provider {cred_record.provider_id}")
+                            self.logger.info(
+                                f"Refreshed Google token for provider {cred_record.provider_id}",
+                                LogCategory.SYSTEM
+                            )
                     except Exception as e:
-                        self.logger.error(f"Failed to refresh token for provider {cred_record.provider_id}: {e}")
+                        self.logger.error(
+                            f"Failed to refresh token for provider {cred_record.provider_id}: {e}",
+                            LogCategory.SYSTEM,
+                            exception=e
+                        )
                 
                 if refreshed_count > 0:
-                    self.logger.info(f"Refreshed {refreshed_count} Google Calendar tokens")
+                    self.logger.info(
+                        f"Refreshed {refreshed_count} Google Calendar tokens",
+                        LogCategory.SYSTEM
+                    )
                 
                 return {
                     'records_processed': len(expiring_creds),
@@ -1388,7 +1377,11 @@ class BackgroundJobManager:
                 }
                 
         except Exception as e:
-            self.logger.error(f"Failed to refresh Google Calendar tokens: {e}")
+            self.logger.error(
+                f"Failed to refresh Google Calendar tokens: {e}",
+                LogCategory.SYSTEM,
+                exception=e
+            )
             return {
                 'records_processed': 0,
                 'records_affected': 0,

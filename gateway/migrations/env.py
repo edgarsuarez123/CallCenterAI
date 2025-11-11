@@ -37,7 +37,7 @@ def get_database_url():
     if database_url:
         return database_url
     
-    # Use configuration system
+    # Use configuration system (DB_* variables)
     try:
         from services.configuration import get_settings
         from urllib.parse import quote_plus
@@ -48,6 +48,23 @@ def get_database_url():
         db_name = settings.database.name
         db_user = settings.database.user
         db_pass = settings.database.password.get_secret_value()
+        
+        # Fallback to POSTGRES_* variables for backward compatibility (deprecated)
+        if not db_host or db_host == "localhost":
+            postgres_host = os.getenv('POSTGRES_HOST')
+            postgres_port = os.getenv('POSTGRES_PORT', '5432')
+            postgres_db = os.getenv('POSTGRES_DB')
+            postgres_user = os.getenv('POSTGRES_USER')
+            postgres_password = os.getenv('POSTGRES_PASSWORD')
+            
+            if postgres_host:
+                import warnings
+                warnings.warn("POSTGRES_* environment variables are deprecated. Use DB_* variables instead.", DeprecationWarning)
+                db_host = postgres_host
+                db_port = int(postgres_port)
+                db_name = postgres_db or db_name
+                db_user = postgres_user or db_user
+                db_pass = postgres_password or db_pass
         
         # URL encode password
         db_pass_encoded = quote_plus(db_pass)

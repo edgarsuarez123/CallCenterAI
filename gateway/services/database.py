@@ -1,7 +1,6 @@
-import os
 import logging
 import time
-from typing import Generator
+from typing import AsyncGenerator
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -144,9 +143,30 @@ class ConnectionPoolMonitor:
         }
     
     @staticmethod
+    async def get_async_pool_status() -> dict:
+        """Get current async connection pool status."""
+        pool = async_engine.pool
+        return {
+            "pool_size": pool.size(),
+            "checked_in": pool.checkedin(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "total_connections": pool.size() + pool.overflow(),
+            "available_connections": pool.checkedin(),
+            "utilization_percent": round((pool.checkedout() / (pool.size() + pool.overflow())) * 100, 2) if (pool.size() + pool.overflow()) > 0 else 0
+        }
+    
+    @staticmethod
     def is_pool_healthy() -> bool:
         """Check if connection pool is healthy."""
         status = ConnectionPoolMonitor.get_pool_status()
+        # Pool is healthy if utilization is below 90%
+        return status["utilization_percent"] < 90
+    
+    @staticmethod
+    async def is_async_pool_healthy() -> bool:
+        """Check if async connection pool is healthy."""
+        status = await ConnectionPoolMonitor.get_async_pool_status()
         # Pool is healthy if utilization is below 90%
         return status["utilization_percent"] < 90
     
@@ -161,6 +181,20 @@ class ConnectionPoolMonitor:
         
         if status["checked_out"] > status["pool_size"]:
             warnings.append(f"Using overflow connections: {status['checked_out']}/{status['pool_size']}")
+        
+        return warnings
+    
+    @staticmethod
+    async def get_async_pool_warnings() -> list:
+        """Get any warnings about async pool health."""
+        warnings = []
+        status = await ConnectionPoolMonitor.get_async_pool_status()
+        
+        if status["utilization_percent"] > 90:
+            warnings.append(f"High async pool utilization: {status['utilization_percent']}%")
+        
+        if status["checked_out"] > status["pool_size"]:
+            warnings.append(f"Using async overflow connections: {status['checked_out']}/{status['pool_size']}")
         
         return warnings
 
@@ -186,24 +220,30 @@ def receive_invalidate(dbapi_connection, connection_record, exception):
     """Log when connections are invalidated."""
     logger.warning(f"Database connection invalidated: {exception}")
 
-def get_db() -> Generator[Session, None, None]:
+async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Dependency to get database session with proper connection management.
+    FastAPI dependency to get async database session with proper connection management.
     
     This function ensures:
     - Connections are properly returned to the pool
     - Exceptions don't leave connections hanging
     - Pool health is monitored
+    
+    Usage:
+        @router.post("/")
+        async def endpoint(db: AsyncSession = Depends(get_async_db)):
+            result = await db.execute(select(Model))
     """
-    db = SessionLocal()
+    db = AsyncSessionLocal()
     try:
         yield db
+        await db.commit()
     except Exception as e:
         logger.error(f"Database session error: {e}")
-        db.rollback()
+        await db.rollback()
         raise
     finally:
-        db.close()
+        await db.close()
 
 @asynccontextmanager
 async def get_async_db_session():
@@ -217,40 +257,6 @@ async def get_async_db_session():
         raise
     finally:
         await db.close()
-
-def get_db_with_retry(max_retries: int = 3) -> Generator[Session, None, None]:
-    """
-    Get database session with retry logic for connection failures.
-    
-    Args:
-        max_retries: Maximum number of retry attempts (default: 3)
-    
-    Yields:
-        Database session with automatic retry on connection failures
-    """
-    db = None
-    for attempt in range(max_retries):
-        try:
-            db = SessionLocal()
-            yield db
-            return
-        except Exception as e:
-            if db:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                try:
-                    db.close()
-                except Exception:
-                    pass
-                db = None
-            
-            if attempt == max_retries - 1:
-                logger.error(f"Database connection failed after {max_retries} attempts: {e}")
-                raise
-            logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
-            time.sleep(1)  # Wait before retry
 
 @contextmanager
 def get_db_session():

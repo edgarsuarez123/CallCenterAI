@@ -3,21 +3,18 @@ Azure Speech-to-Text service for real-time audio transcription.
 
 This service provides:
 - Continuous speech recognition
-- Bilingual language detection (English/Spanish)
+- Automatic bilingual language detection (English/Spanish) via AutoDetectSourceLanguageConfig
 - Real-time transcription with confidence scores
-- Language locking after detection
 - Integration with audio stream handler
 """
 
 import asyncio
-import io
 import json
-import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Callable, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Callable
+from dataclasses import dataclass
 from enum import Enum
 
 import azure.cognitiveservices.speech as speechsdk
@@ -31,11 +28,12 @@ from azure.cognitiveservices.speech import (
 from services.configuration import get_settings
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.exceptions import (
-    ExternalServiceUnavailableError,
-    ValidationError,
-    AzureCommunicationError
+    ExternalServiceUnavailableError
 )
-from services.audio_stream_handler import AudioChunk, get_audio_stream_handler
+# Use TYPE_CHECKING for forward reference to avoid circular import
+from typing import TYPE_CHECKING, List
+if TYPE_CHECKING:
+    from services.audio_stream_handler import AudioChunk, get_audio_stream_handler
 
 
 logger = get_logger("azure_speech_stt")
@@ -46,8 +44,6 @@ class TranscriptionStatus(Enum):
     IDLE = "idle"
     LISTENING = "listening"
     PROCESSING = "processing"
-    DETECTING_LANGUAGE = "detecting_language"
-    LANGUAGE_LOCKED = "language_locked"
     ERROR = "error"
 
 
@@ -62,16 +58,6 @@ class TranscriptionResult:
     duration_ms: int
     offset_ms: int
     result_id: str
-
-
-@dataclass
-class LanguageDetectionResult:
-    """Result of language detection."""
-    detected_language: str
-    confidence: float
-    alternatives: List[Tuple[str, float]]
-    timestamp: datetime
-    is_locked: bool = False
 
 
 class SpeechToTextService:
@@ -95,9 +81,7 @@ class SpeechToTextService:
         # Active recognizers by call ID
         self.active_recognizers: Dict[str, SpeechRecognizer] = {}
         self.recognition_status: Dict[str, TranscriptionStatus] = {}
-        self.language_detection_results: Dict[str, LanguageDetectionResult] = {}
         self.transcription_callbacks: Dict[str, Callable] = {}
-        self.language_detection_callbacks: Dict[str, Callable] = {}
         self.audio_streams: Dict[str, speechsdk.audio.PushAudioInputStream] = {}
         
         # Audio processing
@@ -165,15 +149,16 @@ class SpeechToTextService:
     
     @log_performance("stt_start_recognition")
     async def start_continuous_recognition(self, call_id: str, 
-                                         transcription_callback: Optional[Callable] = None,
-                                         language_detection_callback: Optional[Callable] = None) -> bool:
+                                         transcription_callback: Optional[Callable] = None) -> bool:
         """
         Start continuous speech recognition for a call.
+        
+        Language detection is automatically handled via AutoDetectSourceLanguageConfig.
+        The detected language is included in each TranscriptionResult.
         
         Args:
             call_id: ID of the call
             transcription_callback: Callback function for transcription results
-            language_detection_callback: Callback function for language detection results
             
         Returns:
             True if recognition started successfully
@@ -191,14 +176,12 @@ class SpeechToTextService:
                         # Recognizer exists but is None - clean up and continue
                         del self.active_recognizers[call_id]
                 
-                # Store callbacks
+                # Store callback
                 if transcription_callback:
                     self.transcription_callbacks[call_id] = transcription_callback
-                if language_detection_callback:
-                    self.language_detection_callbacks[call_id] = language_detection_callback
                 
                 # Initialize status
-                self.recognition_status[call_id] = TranscriptionStatus.DETECTING_LANGUAGE
+                self.recognition_status[call_id] = TranscriptionStatus.LISTENING
                 self.transcription_stats[call_id] = {
                     "start_time": datetime.now(timezone.utc),
                     "total_transcriptions": 0,
@@ -264,6 +247,14 @@ class SpeechToTextService:
             self.logger.debug(f"Speech recognition session started for call: {call_id}")
             with self._sync_lock:
                 self.recognition_status[call_id] = TranscriptionStatus.LISTENING
+                # Track recognition start time for latency measurement
+                if call_id not in self.transcription_stats:
+                    self.transcription_stats[call_id] = {
+                        "total_transcriptions": 0,
+                        "final_transcriptions": 0,
+                        "average_confidence": 0.0
+                    }
+                self.transcription_stats[call_id]["recognition_start_time"] = time.time()
         
         def on_session_stopped(evt):
             self.logger.debug(f"Speech recognition session stopped for call: {call_id}")
@@ -284,13 +275,21 @@ class SpeechToTextService:
             """Handle partial recognition results."""
             try:
                 if evt.result.reason == speechsdk.ResultReason.RecognizingSpeech:
+                    # Parse confidence from JSON result
+                    confidence = 0.0
+                    try:
+                        json_result = json.loads(evt.result.properties.get(
+                            speechsdk.PropertyId.SpeechServiceResponse_JsonResult, 
+                            "{}"
+                        ))
+                        confidence = json_result.get("Confidence", 0.0)
+                    except (json.JSONDecodeError, KeyError):
+                        confidence = 0.0
+                    
                     # Create transcription result
                     result = TranscriptionResult(
                         text=evt.result.text,
-                        confidence=evt.result.properties.get(
-                            speechsdk.PropertyId.SpeechServiceResponse_JsonResult, 
-                            "{}"
-                        ),
+                        confidence=confidence,
                         language=evt.result.properties.get(
                             speechsdk.PropertyId.SpeechServiceConnection_AutoDetectSourceLanguageResult,
                             self.primary_language
@@ -357,6 +356,23 @@ class SpeechToTextService:
                         result_id=f"final_{int(time.time() * 1000)}"
                     )
                     
+                    # Record STT latency metric (time from recognition start to final result)
+                    try:
+                        from services.metrics import get_metrics_service
+                        metrics_service = get_metrics_service()
+                        # Get recognition start time from stats if available
+                        with self._sync_lock:
+                            if call_id in self.transcription_stats:
+                                stats = self.transcription_stats[call_id]
+                                recognition_start = stats.get('recognition_start_time')
+                                if recognition_start:
+                                    stt_latency_ms = (time.time() - recognition_start) * 1000
+                                    # Get clinic_id from call_id if available
+                                    clinic_id = call_id.split('_')[0] if call_id and '_' in call_id else 'unknown'
+                                    metrics_service.record_stt_latency(clinic_id, stt_latency_ms)
+                    except Exception as metrics_error:
+                        self.logger.warning(f"Failed to record STT latency metric: {metrics_error}")
+                    
                     # Update stats
                     self._update_transcription_stats(call_id, result)
                     
@@ -367,7 +383,17 @@ class SpeechToTextService:
                         try:
                             callback(result)
                         except Exception as e:
-                            self.logger.error(f"Error in transcription callback: {e}")
+                            # Issue 5: Add call_id and text to error logging
+                            self.logger.error(
+                                f"Error in transcription callback for call {call_id}: {e}",
+                                LogCategory.AZURE_SPEECH,
+                                exception=e,
+                                extra_data={
+                                    "call_id": call_id,
+                                    "text": result.text if result else None,
+                                    "error": str(e)
+                                }
+                            )
                     
                     self.logger.info(
                         f"Final transcription for call {call_id}: {evt.result.text}",
@@ -428,172 +454,6 @@ class SpeechToTextService:
         except Exception as e:
             self.logger.error(f"Error updating transcription stats: {e}")
     
-    async def detect_language(self, call_id: str, audio_samples: List[AudioChunk]) -> Optional[LanguageDetectionResult]:
-        """
-        Detect the primary language from audio samples.
-        
-        Args:
-            call_id: ID of the call
-            audio_samples: List of audio chunks to analyze
-            
-        Returns:
-            Language detection result or None if detection fails
-        """
-        try:
-            if not audio_samples:
-                return None
-            
-            # Combine audio samples for analysis
-            combined_audio = b''.join(chunk.data for chunk in audio_samples)
-            
-            # Create a temporary recognizer for language detection
-            audio_stream = speechsdk.audio.PushAudioInputStream()
-            audio_config = AudioConfig(stream=audio_stream)
-            
-            recognizer = SpeechRecognizer(
-                speech_config=self.speech_config,
-                auto_detect_source_language_config=self.language_config,
-                audio_config=audio_config
-            )
-            
-            # Set up language detection callback
-            detection_result = None
-            
-            def on_language_detected(evt):
-                nonlocal detection_result
-                try:
-                    if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-                        detected_language = evt.result.properties.get(
-                            speechsdk.PropertyId.SpeechServiceConnection_AutoDetectSourceLanguageResult,
-                            self.primary_language
-                        )
-                        
-                        # Parse confidence from JSON
-                        confidence = 0.0
-                        try:
-                            json_result = json.loads(evt.result.properties.get(
-                                speechsdk.PropertyId.SpeechServiceResponse_JsonResult, 
-                                "{}"
-                            ))
-                            confidence = json_result.get("Confidence", 0.0)
-                        except (json.JSONDecodeError, KeyError):
-                            confidence = 0.0
-                        
-                        detection_result = LanguageDetectionResult(
-                            detected_language=detected_language,
-                            confidence=confidence,
-                            alternatives=[(self.primary_language, 1.0 - confidence)],
-                            timestamp=datetime.now(timezone.utc)
-                        )
-                        
-                        self.logger.info(
-                            f"Language detected for call {call_id}: {detected_language} (confidence: {confidence})",
-                            LogCategory.AZURE_SPEECH,
-                            extra_data={
-                                "call_id": call_id,
-                                "detected_language": detected_language,
-                                "confidence": confidence
-                            }
-                        )
-                        
-                except Exception as e:
-                    self.logger.error(f"Error in language detection: {e}")
-            
-            recognizer.recognized.connect(on_language_detected)
-            
-            # Start recognition
-            recognizer.start_continuous_recognition()
-            
-            # Push audio data
-            audio_stream.write(combined_audio)
-            
-            # Wait for detection (with timeout)
-            start_time = time.time()
-            while detection_result is None and (time.time() - start_time) < 5.0:
-                await asyncio.sleep(0.1)
-            
-            # Stop recognition
-            try:
-                recognizer.stop_continuous_recognition()
-            except Exception as e:
-                self.logger.warning(f"Error stopping recognition: {e}")
-            finally:
-                # Always close audio stream
-                try:
-                    audio_stream.close()
-                except Exception as e:
-                    self.logger.warning(f"Error closing audio stream: {e}")
-            
-            # Store result (with lock)
-            if detection_result:
-                async with self._lock:
-                    self.language_detection_results[call_id] = detection_result
-                    callback = self.language_detection_callbacks.get(call_id)
-                
-                # Call callback if registered
-                if callback:
-                    try:
-                        callback(detection_result)
-                    except Exception as e:
-                        self.logger.error(f"Error in language detection callback: {e}")
-            
-            return detection_result
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to detect language for call {call_id}: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            return None
-    
-    def lock_language(self, call_id: str, language: str) -> bool:
-        """
-        Lock the language for a call after detection.
-        
-        Args:
-            call_id: ID of the call
-            language: Language to lock to
-            
-        Returns:
-            True if language was locked successfully
-        """
-        try:
-            # Check and get detection result with lock
-            async with self._lock:
-                if call_id not in self.language_detection_results:
-                    return False
-                detection_result = self.language_detection_results[call_id]
-            
-            if not detection_result:
-                return False
-            
-            # Update detection result
-            detection_result.is_locked = True
-            
-            # Update recognition status (with sync lock)
-            with self._sync_lock:
-                self.recognition_status[call_id] = TranscriptionStatus.LANGUAGE_LOCKED
-            
-            self.logger.info(
-                f"Language locked for call {call_id}: {language}",
-                LogCategory.AZURE_SPEECH,
-                extra_data={
-                    "call_id": call_id,
-                    "locked_language": language
-                }
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to lock language for call {call_id}: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            return False
-    
     async def stop_continuous_recognition(self, call_id: str) -> bool:
         """
         Stop continuous speech recognition for a call.
@@ -646,12 +506,8 @@ class SpeechToTextService:
                     del self.recognition_status[call_id]
                 if call_id in self.transcription_callbacks:
                     del self.transcription_callbacks[call_id]
-                if call_id in self.language_detection_callbacks:
-                    del self.language_detection_callbacks[call_id]
                 if call_id in self.transcription_stats:
                     del self.transcription_stats[call_id]
-                if call_id in self.language_detection_results:
-                    del self.language_detection_results[call_id]
             
             self.logger.info(
                 f"Continuous speech recognition stopped for call: {call_id}",
@@ -668,86 +524,6 @@ class SpeechToTextService:
                 exception=e
             )
             return False
-    
-    def get_partial_result(self, call_id: str) -> Optional[TranscriptionResult]:
-        """
-        Get the most recent partial transcription result.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Most recent partial result or None
-        """
-        # In a real implementation, you would store and return the latest partial result
-        # For now, return None as this would require additional state management
-        return None
-    
-    def get_final_result(self, call_id: str) -> Optional[TranscriptionResult]:
-        """
-        Get the most recent final transcription result.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Most recent final result or None
-        """
-        # In a real implementation, you would store and return the latest final result
-        # For now, return None as this would require additional state management
-        return None
-    
-    def get_recognition_status(self, call_id: str) -> Optional[TranscriptionStatus]:
-        """
-        Get the current recognition status for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Current recognition status or None
-        """
-        with self._sync_lock:
-            return self.recognition_status.get(call_id)
-    
-    def get_language_detection_result(self, call_id: str) -> Optional[LanguageDetectionResult]:
-        """
-        Get the language detection result for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Language detection result or None
-        """
-        # Note: language_detection_results is accessed from both async and sync contexts
-        # Since this is a sync method, we'll use sync lock for consistency
-        # For async access, we use async lock
-        with self._sync_lock:
-            return self.language_detection_results.get(call_id)
-    
-    def get_transcription_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get transcription statistics for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Transcription statistics or None
-        """
-        with self._sync_lock:
-            if call_id not in self.transcription_stats:
-                return None
-            
-            stats = self.transcription_stats[call_id].copy()
-            stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
-            return stats
-    
-    def get_active_calls_count(self) -> int:
-        """Get count of active recognition sessions."""
-        with self._sync_lock:
-            return len(self.active_recognizers)
     
     async def process_audio_chunk(self, call_id: str, audio_data: bytes):
         """

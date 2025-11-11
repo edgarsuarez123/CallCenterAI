@@ -358,6 +358,9 @@ class Appointment(Base):
     google_event_id = Column(String(255), nullable=True)
     # Google Calendar event ID for syncing updates/deletions
     
+    needs_calendar_sync = Column(Boolean, default=False, nullable=False)
+    # Flag to indicate if appointment needs calendar sync (e.g., sync failed during creation)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
@@ -1063,6 +1066,20 @@ class Clinic(Base):
     
     last_call_at = Column(DateTime(timezone=True), nullable=True)
     # Most recent call received (for monitoring inactive clinics)
+    
+    # ============================================================================
+    # SOFT DELETE FIELDS (HIPAA Compliance)
+    # ============================================================================
+    
+    is_deleted = Column(String(10), default="no", nullable=False)
+    # "yes" = soft deleted, "no" = active
+    # Prevents hard delete of clinic data
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    # When this clinic was soft deleted
+    
+    deleted_by = Column(String(64), nullable=True)
+    # Who deleted this clinic (user_id, system, etc.)
     
     # ============================================================================
     # RELATIONSHIPS

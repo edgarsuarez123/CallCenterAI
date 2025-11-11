@@ -51,6 +51,7 @@ class ErrorCode(Enum):
     CALL_ALREADY_EXISTS = "call_already_exists"
     INVALID_CALL_STATUS = "invalid_call_status"
     CALL_ROUTING_FAILED = "call_routing_failed"
+    CALL_CAPACITY_EXCEEDED = "call_capacity_exceeded"
     
     # Authentication and authorization errors
     AUTHENTICATION_FAILED = "authentication_failed"
@@ -348,6 +349,48 @@ class InvalidCallStatusError(CallCenterAIException):
         )
 
 
+class CallRoutingError(CallCenterAIException):
+    """Raised when call routing fails."""
+    
+    def __init__(self, routing_type: str, reason: str = "Call routing failed"):
+        super().__init__(
+            message=f"Call routing failed: {reason}",
+            error_code=ErrorCode.CALL_ROUTING_FAILED,
+            http_status=500,
+            details={"routing_type": routing_type, "reason": reason},
+            user_message="Unable to route call. Please try again.",
+            context={"routing_type": routing_type}
+        )
+
+
+class CallCapacityExceededError(CallCenterAIException):
+    """Raised when clinic call capacity is exceeded."""
+    
+    def __init__(self, clinic_id: str, current_calls: int, max_calls: int):
+        super().__init__(
+            message=f"Clinic {clinic_id} call capacity exceeded: {current_calls}/{max_calls}",
+            error_code=ErrorCode.CALL_CAPACITY_EXCEEDED,
+            http_status=503,
+            details={"clinic_id": clinic_id, "current_calls": current_calls, "max_calls": max_calls},
+            user_message="All lines are currently busy. Please try again later.",
+            context={"clinic_id": clinic_id}
+        )
+
+
+class CapacityExceededError(CallCenterAIException):
+    """Raised when resource capacity is exceeded."""
+    
+    def __init__(self, resource_type: str, reason: str = "Capacity exceeded"):
+        super().__init__(
+            message=f"{resource_type} capacity exceeded: {reason}",
+            error_code=ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+            http_status=503,
+            details={"resource_type": resource_type, "reason": reason},
+            user_message="Service is currently at capacity. Please try again later.",
+            context={"resource_type": resource_type}
+        )
+
+
 # Authentication and authorization exceptions
 class AuthenticationFailedError(CallCenterAIException):
     """Raised when authentication fails."""
@@ -606,9 +649,9 @@ class ExceptionMapper:
             elif "patient" in str(exception).lower():
                 return PatientAlreadyExistsError("unknown", "unknown")
             elif "provider" in str(exception).lower():
-                return ProviderAlreadyExistsError("unknown")
+                return BusinessRuleViolationError("unique_constraint", f"Provider already exists: {str(exception)}")
             elif "clinic" in str(exception).lower():
-                return ClinicAlreadyExistsError("unknown")
+                return BusinessRuleViolationError("unique_constraint", f"Clinic already exists: {str(exception)}")
             else:
                 return BusinessRuleViolationError("unique_constraint", str(exception))
         

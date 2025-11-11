@@ -3,8 +3,9 @@ Provider Management Service
 Handles all business logic for provider operations including creation, scheduling, and availability.
 """
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
@@ -12,23 +13,24 @@ from datetime import datetime, timezone, timedelta
 AST = timezone(timedelta(hours=-4))
 from zoneinfo import ZoneInfo
 
-from models.models import Provider, AppointmentSlot, Clinic, AuditLog
+from models.models import Provider, AppointmentSlot, Clinic
 from models.enums import YesNo
 from models.schemas import (
     ProviderCreateRequest, ProviderUpdateRequest, ProviderSearchRequest,
-    ProviderResponse, AppointmentSlotCreateRequest
+    AppointmentSlotCreateRequest
 )
-from services.crypto import make_ulid_token, make_unique_audit_log_id
-from services.auth_context import get_request_context
+from services.crypto import make_ulid_token
+from services.audit_utils import log_audit_trail
+from services.structured_logging import get_logger, LogCategory
 
 
 class ProviderManagementService:
     """Service for managing provider operations and scheduling."""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
     
-    def add_provider(self, clinic_id: str, provider_data: ProviderCreateRequest) -> Provider:
+    async def add_provider(self, clinic_id: str, provider_data: ProviderCreateRequest) -> Provider:
         """
         Add a new provider to a clinic.
         
@@ -52,12 +54,13 @@ class ProviderManagementService:
         
         try:
             # Verify clinic exists
-            clinic = self.db.query(Clinic).filter_by(clinic_id=clinic_id).first()
+            clinic_result = await self.db.execute(select(Clinic).where(Clinic.clinic_id == clinic_id))
+            clinic = clinic_result.scalar_one_or_none()
             if not clinic:
                 raise ValueError(f"Clinic {clinic_id} not found")
             
             # Check provider limit
-            if not self._check_provider_limit(clinic_id):
+            if not await self._check_provider_limit(clinic_id):
                 raise ValueError(f"Provider limit exceeded for clinic {clinic_id}")
             
             # Generate unique provider ID
@@ -74,35 +77,38 @@ class ProviderManagementService:
             )
             
             self.db.add(provider)
-            self.db.flush()  # Get the provider_id for audit
+            await self.db.flush()  # Get the provider_id for audit
             
             # Log the creation
-            self._log_audit("providers", provider_id, "CREATE", None, provider_data.dict())
+            await self._log_audit("providers", provider_id, "CREATE", None, provider_data.model_dump())
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit provider: {str(commit_error)}")
             
             return provider
             
         except IntegrityError as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Provider already exists: {str(e)}")
         except ValueError:
             # Re-raise ValueError as-is
             raise
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to add provider: {str(e)}")
     
-    def get_provider(self, provider_id: str) -> Optional[Provider]:
+    async def get_provider(self, provider_id: str) -> Optional[Provider]:
         """Get provider by ID."""
-        return self.db.query(Provider).filter_by(provider_id=provider_id).filter(Provider.is_deleted == 'no').first()
+        result = await self.db.execute(
+            select(Provider).where(Provider.provider_id == provider_id, Provider.is_deleted == 'no')
+        )
+        return result.scalar_one_or_none()
     
-    def update_provider(self, provider_id: str, updates: ProviderUpdateRequest) -> Optional[Provider]:
+    async def update_provider(self, provider_id: str, updates: ProviderUpdateRequest) -> Optional[Provider]:
         """
         Update provider information.
         
@@ -120,7 +126,7 @@ class ProviderManagementService:
         if not updates:
             return None
         
-        provider = self.get_provider(provider_id)
+        provider = await self.get_provider(provider_id)
         if not provider:
             return None
         
@@ -135,7 +141,7 @@ class ProviderManagementService:
             }
             
             # Update fields
-            update_data = updates.dict(exclude_unset=True)
+            update_data = updates.model_dump(exclude_unset=True)
             for field, value in update_data.items():
                 if hasattr(provider, field):
                     setattr(provider, field, value)
@@ -143,23 +149,29 @@ class ProviderManagementService:
             provider.updated_at = datetime.now(AST)
             
             # Log the update
-            self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
+            await self._log_audit("providers", provider_id, "UPDATE", old_values, update_data)
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit provider update: {str(commit_error)}")
             
             return provider
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to update provider: {str(e)}")
     
-    def list_providers(self, search: ProviderSearchRequest) -> List[Provider]:
+    async def list_providers(self, search: ProviderSearchRequest) -> List[Provider]:
         """
         List providers with optional filtering and pagination.
+        
+        Providers can be associated with a clinic via:
+        1. Direct relationship (Provider.clinic_id)
+        2. Many-to-many relationship (provider_clinics table)
+        
+        This method checks both relationships when clinic_id is provided.
         
         Args:
             search: Search criteria and pagination
@@ -167,29 +179,75 @@ class ProviderManagementService:
         Returns:
             List of matching providers
         """
-        query = self.db.query(Provider).filter(Provider.is_deleted == 'no')
+        # Base filter conditions
+        filter_conditions = []
+        if hasattr(Provider, 'is_deleted'):
+            filter_conditions.append(Provider.is_deleted == 'no')
         
-        # Apply filters
+        # Get providers from direct relationship
+        providers = []
         if search.clinic_id:
-            query = query.filter(Provider.clinic_id == search.clinic_id)
-        
-        if search.specialty:
-            # Prefix search on specialty for better index usage
-            query = query.filter(Provider.specialty.ilike(f"{search.specialty}%"))
-        
-        if search.name:
-            # Prefix search on name for better index usage
-            query = query.filter(Provider.name.ilike(f"{search.name}%"))
-        
-        if search.is_available:
-            query = query.filter(Provider.is_available == search.is_available.value)
+            # Direct relationship: Provider.clinic_id == clinic_id
+            direct_conditions = filter_conditions.copy()
+            direct_conditions.append(Provider.clinic_id == search.clinic_id)
+            
+            if search.specialty:
+                direct_conditions.append(Provider.specialty.ilike(f"{search.specialty}%"))
+            if search.name:
+                direct_conditions.append(Provider.name_token.ilike(f"{search.name}%"))
+            if search.is_available:
+                direct_conditions.append(Provider.is_available == search.is_available.value)
+            
+            direct_stmt = select(Provider).where(*direct_conditions)
+            direct_result = await self.db.execute(direct_stmt)
+            providers = list(direct_result.scalars().all())
+            
+            # Also check many-to-many relationship and combine results
+            from models.models import provider_clinics
+            many_to_many_conditions = filter_conditions.copy()
+            many_to_many_conditions.append(provider_clinics.c.clinic_id == search.clinic_id)
+            
+            if search.specialty:
+                many_to_many_conditions.append(Provider.specialty.ilike(f"{search.specialty}%"))
+            if search.name:
+                many_to_many_conditions.append(Provider.name_token.ilike(f"{search.name}%"))
+            if search.is_available:
+                many_to_many_conditions.append(Provider.is_available == search.is_available.value)
+            
+            many_to_many_stmt = select(Provider).join(provider_clinics).where(*many_to_many_conditions)
+            many_to_many_result = await self.db.execute(many_to_many_stmt)
+            many_to_many_providers = list(many_to_many_result.scalars().all())
+            
+            # Combine results and remove duplicates (by provider_id)
+            provider_dict = {p.provider_id: p for p in providers}
+            for p in many_to_many_providers:
+                if p.provider_id not in provider_dict:
+                    provider_dict[p.provider_id] = p
+            
+            providers = list(provider_dict.values())
+        else:
+            # No clinic_id filter - query all providers
+            stmt = select(Provider).where(*filter_conditions)
+            
+            if search.specialty:
+                stmt = stmt.where(Provider.specialty.ilike(f"{search.specialty}%"))
+            if search.name:
+                stmt = stmt.where(Provider.name_token.ilike(f"{search.name}%"))
+            if search.is_available:
+                stmt = stmt.where(Provider.is_available == search.is_available.value)
+            
+            result = await self.db.execute(stmt)
+            providers = list(result.scalars().all())
         
         # Apply pagination
-        query = query.offset(search.offset).limit(search.limit)
+        if search.offset:
+            providers = providers[search.offset:]
+        if search.limit:
+            providers = providers[:search.limit]
         
-        return query.all()
+        return providers
     
-    def set_provider_availability(self, provider_id: str, is_available: bool) -> bool:
+    async def set_provider_availability(self, provider_id: str, is_available: bool) -> bool:
         """
         Set provider availability status.
         
@@ -204,7 +262,7 @@ class ProviderManagementService:
         if not provider_id or not isinstance(provider_id, str) or not provider_id.strip():
             return False
         
-        provider = self.get_provider(provider_id)
+        provider = await self.get_provider(provider_id)
         if not provider:
             return False
         
@@ -214,22 +272,22 @@ class ProviderManagementService:
             provider.updated_at = datetime.now(AST)
             
             # Log the change
-            self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
+            await self._log_audit("providers", provider_id, "UPDATE_AVAILABILITY", 
                            {"is_available": old_status}, {"is_available": provider.is_available})
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit availability update: {str(commit_error)}")
             
             return True
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to set provider availability: {str(e)}")
     
-    def create_appointment_slots(self, provider_id: str, clinic_id: str, 
+    async def create_appointment_slots(self, provider_id: str, clinic_id: str, 
                                 start_date: datetime, end_date: datetime, 
                                 duration_minutes: int = 60, 
                                 business_hours: Dict[str, str] = None) -> List[AppointmentSlot]:
@@ -267,7 +325,7 @@ class ProviderManagementService:
             raise ValueError("duration_minutes must be positive")
         
         # Verify provider exists
-        provider = self.get_provider(provider_id)
+        provider = await self.get_provider(provider_id)
         if not provider:
             raise ValueError(f"Provider {provider_id} not found")
         
@@ -298,37 +356,39 @@ class ProviderManagementService:
                         start_hour, end_hour, is_overnight = self._parse_business_hours(hours_str)
                         
                         # Create slots for this day - will skip non-existent DST times
-                        day_slots = self._create_day_slots(
+                        day_slots = await self._create_day_slots(
                             provider_id, clinic_id, current_date, 
                             start_hour, end_hour, duration_minutes, is_overnight
                         )
                         created_slots.extend(day_slots)
                     except Exception as e:
                         # Skip DST transition hour or invalid hours
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.warning(f"Skipping DST transition for {current_date.date()}: {e}")
+                        logger = get_logger("provider_management")
+                        logger.warning(
+                            f"Skipping DST transition for {current_date.date()}: {e}",
+                            LogCategory.PROVIDER
+                        )
                         continue
                 
                 current_date += timedelta(days=1)
             
             # Log the creation
-            self._log_audit("appointment_slots", f"BULK_{provider_id}", "CREATE_BULK", 
+            await self._log_audit("appointment_slots", f"BULK_{provider_id}", "CREATE_BULK", 
                            None, {"count": len(created_slots), "provider_id": provider_id})
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit appointment slots: {str(commit_error)}")
             
             return created_slots
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to create appointment slots: {str(e)}")
     
-    def create_appointment_slot(self, slot_data: AppointmentSlotCreateRequest) -> AppointmentSlot:
+    async def create_appointment_slot(self, slot_data: AppointmentSlotCreateRequest) -> AppointmentSlot:
         """
         Create a single appointment slot.
         
@@ -359,12 +419,13 @@ class ProviderManagementService:
         
         try:
             # Verify provider exists
-            provider = self.get_provider(slot_data.provider_id)
+            provider = await self.get_provider(slot_data.provider_id)
             if not provider:
                 raise ValueError(f"Provider {slot_data.provider_id} not found")
             
             # Verify clinic exists
-            clinic = self.db.query(Clinic).filter_by(clinic_id=slot_data.clinic_id).first()
+            clinic_result = await self.db.execute(select(Clinic).where(Clinic.clinic_id == slot_data.clinic_id))
+            clinic = clinic_result.scalar_one_or_none()
             if not clinic:
                 raise ValueError(f"Clinic {slot_data.clinic_id} not found")
             
@@ -385,14 +446,14 @@ class ProviderManagementService:
             
             # Commit with error handling
             try:
-                self.db.commit()
-                self.db.refresh(slot)
+                await self.db.commit()
+                await self.db.refresh(slot)
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit appointment slot: {str(commit_error)}")
             
             # Log the creation
-            self._log_audit("appointment_slots", slot_id, "CREATE", None, {
+            await self._log_audit("appointment_slots", slot_id, "CREATE", None, {
                 "provider_id": slot_data.provider_id,
                 "clinic_id": slot_data.clinic_id,
                 "slot_datetime": slot_data.slot_datetime.isoformat(),
@@ -404,10 +465,10 @@ class ProviderManagementService:
             # Re-raise ValueError as-is
             raise
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to create appointment slot: {str(e)}")
     
-    def get_available_slots(self, provider_id: str, start_date: datetime, 
+    async def get_available_slots(self, provider_id: str, start_date: datetime, 
                            end_date: datetime) -> List[AppointmentSlot]:
         """
         Get available appointment slots for a provider.
@@ -434,19 +495,24 @@ class ProviderManagementService:
             return []
         
         try:
-            return self.db.query(AppointmentSlot).filter(
+            stmt = select(AppointmentSlot).where(
                 AppointmentSlot.provider_id == provider_id,
                 AppointmentSlot.slot_datetime >= start_date,
                 AppointmentSlot.slot_datetime <= end_date,
                 AppointmentSlot.is_booked == YesNo.NO.value
-            ).order_by(AppointmentSlot.slot_datetime).all()
+            ).order_by(AppointmentSlot.slot_datetime)
+            result = await self.db.execute(stmt)
+            return list(result.scalars().all())
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error querying available slots: {e}")
+            logger = get_logger("provider_management")
+            logger.error(
+                f"Error querying available slots: {e}",
+                LogCategory.PROVIDER,
+                exception=e
+            )
             return []
     
-    def book_appointment_slot(self, slot_id: str, appointment_id: str) -> bool:
+    async def book_appointment_slot(self, slot_id: str, appointment_id: str) -> bool:
         """
         Book an appointment slot.
         
@@ -465,7 +531,8 @@ class ProviderManagementService:
             return False
         
         try:
-            slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
+            result = await self.db.execute(select(AppointmentSlot).where(AppointmentSlot.slot_id == slot_id))
+            slot = result.scalar_one_or_none()
             if not slot or slot.is_booked == YesNo.YES.value:
                 return False
             
@@ -479,22 +546,22 @@ class ProviderManagementService:
             slot.updated_at = datetime.now(AST)
             
             # Log the booking
-            self._log_audit("appointment_slots", slot_id, "BOOK", 
+            await self._log_audit("appointment_slots", slot_id, "BOOK", 
                            old_values, {"is_booked": "yes", "appointment_id": appointment_id})
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit slot booking: {str(commit_error)}")
             
             return True
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to book appointment slot: {str(e)}")
     
-    def release_appointment_slot(self, slot_id: str) -> bool:
+    async def release_appointment_slot(self, slot_id: str) -> bool:
         """
         Release a booked appointment slot.
         
@@ -509,7 +576,8 @@ class ProviderManagementService:
             return False
         
         try:
-            slot = self.db.query(AppointmentSlot).filter_by(slot_id=slot_id).first()
+            result = await self.db.execute(select(AppointmentSlot).where(AppointmentSlot.slot_id == slot_id))
+            slot = result.scalar_one_or_none()
             if not slot:
                 return False
             
@@ -519,28 +587,27 @@ class ProviderManagementService:
             }
             
             # Issue 18: Use enum instead of string literal
-            from models.enums import YesNo
             slot.is_booked = YesNo.NO.value
             slot.booked_by_appointment_id = None
             slot.updated_at = datetime.now(AST)
             
             # Log the release
-            self._log_audit("appointment_slots", slot_id, "RELEASE", 
+            await self._log_audit("appointment_slots", slot_id, "RELEASE", 
                            old_values, {"is_booked": "no", "appointment_id": None})
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit slot release: {str(commit_error)}")
             
             return True
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to release appointment slot: {str(e)}")
     
-    def get_provider_schedule(self, provider_id: str, date: datetime) -> List[AppointmentSlot]:
+    async def get_provider_schedule(self, provider_id: str, date: datetime) -> List[AppointmentSlot]:
         """
         Get provider's schedule for a specific date.
         
@@ -562,18 +629,23 @@ class ProviderManagementService:
             start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
             end_of_day = start_of_day + timedelta(days=1)
             
-            return self.db.query(AppointmentSlot).filter(
+            stmt = select(AppointmentSlot).where(
                 AppointmentSlot.provider_id == provider_id,
                 AppointmentSlot.slot_datetime >= start_of_day,
                 AppointmentSlot.slot_datetime < end_of_day
-            ).order_by(AppointmentSlot.slot_datetime).all()
+            ).order_by(AppointmentSlot.slot_datetime)
+            result = await self.db.execute(stmt)
+            return list(result.scalars().all())
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error querying provider schedule: {e}")
+            logger = get_logger("provider_management")
+            logger.error(
+                f"Error querying provider schedule: {e}",
+                LogCategory.PROVIDER,
+                exception=e
+            )
             return []
     
-    def _check_provider_limit(self, clinic_id: str) -> bool:
+    async def _check_provider_limit(self, clinic_id: str) -> bool:
         """Check if clinic has reached provider limit."""
         # Validate input
         if not clinic_id or not isinstance(clinic_id, str) or not clinic_id.strip():
@@ -582,7 +654,8 @@ class ProviderManagementService:
         try:
             # Get clinic license to check provider limit
             from models.models import ClinicLicense
-            license = self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
+            license_result = await self.db.execute(select(ClinicLicense).where(ClinicLicense.clinic_id == clinic_id))
+            license = license_result.scalar_one_or_none()
             
             if not license or not license.max_providers:
                 return True  # No limit or unlimited
@@ -595,9 +668,12 @@ class ProviderManagementService:
             
             return True  # TODO: Implement when clinic_id is added to Provider model
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error checking provider limit: {e}")
+            logger = get_logger("provider_management")
+            logger.error(
+                f"Error checking provider limit: {e}",
+                LogCategory.PROVIDER,
+                exception=e
+            )
             return False
     
     def _parse_business_hours(self, hours_str: str) -> tuple:
@@ -647,7 +723,7 @@ class ProviderManagementService:
                 f"Invalid hours format. Expected format: 'HH:MM-HH:MM'. Error: {str(e)}"
             )
     
-    def _create_day_slots(self, provider_id: str, clinic_id: str, date: datetime,
+    async def _create_day_slots(self, provider_id: str, clinic_id: str, date: datetime,
                          start_hour: int, end_hour: int, duration_minutes: int, is_overnight: bool = False) -> List[AppointmentSlot]:
         """Create appointment slots for a single day, supporting overnight shifts."""
         import uuid
@@ -683,24 +759,15 @@ class ProviderManagementService:
         
         return slots
     
-    def _log_audit(self, table_name: str, record_id: str, action_type: str, 
+    async def _log_audit(self, table_name: str, record_id: str, action_type: str, 
                    old_values: Optional[Dict], new_values: Optional[Dict]):
         """Log audit trail for changes."""
-        details = ""
-        if old_values:
-            details += f"Old values: {old_values}. "
-        if new_values:
-            details += f"New values: {new_values}"
-        
-        ctx = get_request_context()
-        audit_log = AuditLog(
-            log_id=make_unique_audit_log_id(),
+        await log_audit_trail(
+            self.db,
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,
-            details=details,
-            user_id=ctx.user_id,
-            ip_address=ctx.ip_address,
-            user_agent="ProviderManagementService"
+            old_values=old_values,
+            new_values=new_values,
+            service_name="ProviderManagementService"
         )
-        self.db.add(audit_log)

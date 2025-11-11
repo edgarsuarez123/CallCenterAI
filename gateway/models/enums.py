@@ -39,3 +39,9 @@ class BillingCycle(str, Enum):
     MONTHLY = "monthly"
     QUARTERLY = "quarterly"
     ANNUAL = "annual"
+
+class LanguageCode(str, Enum):
+    """Supported language codes."""
+    ENGLISH = "en"
+    SPANISH = "es"
+    AUTO = "auto"
