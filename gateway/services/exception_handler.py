@@ -12,7 +12,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError, OperationalError
 from typing import Union
 import traceback
-import logging
 from .exceptions import (
     CallCenterAIException,
     ErrorCode,
@@ -137,12 +136,12 @@ class ExceptionHandler:
             }
         )
         
-        # Create a generic CallCenterAI exception
+        # Issue 7.2: Create a generic CallCenterAI exception with user-friendly message
         generic_exc = CallCenterAIException(
             message=f"Internal server error: {type(exc).__name__}",
             error_code=ErrorCode.DATABASE_ERROR,
             http_status=500,
-            user_message="An unexpected error occurred. Please try again later.",
+            user_message="We're experiencing technical difficulties. Please try again in a few moments. If the problem persists, please contact support.",
             original_exception=exc
         )
         
@@ -179,42 +178,3 @@ def register_exception_handlers(app):
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
         return exception_handler.handle_generic_exception(request, exc)
-
-
-# Exception handling decorators for route handlers
-def handle_route_exceptions(func):
-    """Decorator to handle exceptions in route handlers."""
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except CallCenterAIException:
-            # Re-raise CallCenterAI exceptions as-is
-            raise
-        except SQLAlchemyError as e:
-            # Map SQLAlchemy errors to CallCenterAI exceptions
-            raise ExceptionMapper.map_database_exception(e, func.__name__)
-        except Exception as e:
-            # Map generic exceptions to CallCenterAI exceptions
-            if "validation" in str(e).lower():
-                raise ExceptionMapper.map_validation_exception(e)
-            else:
-                raise DatabaseError(func.__name__, str(e), e)
-    return wrapper
-
-
-def handle_external_service_exceptions(service: str):
-    """Decorator to handle external service exceptions in route handlers."""
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            try:
-                return await func(*args, **kwargs)
-            except CallCenterAIException:
-                raise
-            except Exception as e:
-                raise ExceptionMapper.map_external_service_exception(e, service, func.__name__)
-        return wrapper
-    return decorator
-
-
-# Removed unused exception helper functions - they were never called in the codebase
-# These functions were defined but never used, so they have been removed to clean up the code

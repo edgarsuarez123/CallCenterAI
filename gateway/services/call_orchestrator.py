@@ -23,12 +23,13 @@ from enum import Enum
 
 from services.azure_speech_stt import get_speech_to_text_service, SpeechToTextService
 from services.azure_speech_tts import get_text_to_speech_service, TextToSpeechService
-from services.azure_openai_service import get_azure_openai_service, AzureOpenAIService, IntentType
-from services.hybrid_nlp_service import get_hybrid_nlp_service, HybridNLPService
-from services.bilingual_manager import get_bilingual_manager, LanguageCode
-from services.audio_stream_handler import get_audio_stream_handler, AudioStreamHandler
-from services.response_templates import get_response_templates
-from services.azure_communication_service import get_azure_communication_service
+from services.nlp_service import get_nlp_service, NLPService, IntentType, ExtractedEntities
+from services.response_service import get_response_templates
+# Use TYPE_CHECKING for forward references to avoid circular imports
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from services.audio_stream_handler import get_audio_stream_handler, AudioStreamHandler
+    from services.azure_communication_service import get_azure_communication_service
 from services.configuration import get_settings
 from services.structured_logging import get_logger, LogCategory, log_performance
 from services.exceptions import (
@@ -36,6 +37,8 @@ from services.exceptions import (
     ExternalServiceUnavailableError,
     CallOrchestrationError
 )
+from models.enums import LanguageCode
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 
 logger = get_logger("call_orchestrator")
@@ -74,7 +77,7 @@ class CallContext:
     language: LanguageCode = LanguageCode.ENGLISH
     start_time: Optional[datetime] = None
     last_activity: Optional[datetime] = None
-    audio_stream_handler: Optional[AudioStreamHandler] = None
+    audio_stream_handler: Optional["AudioStreamHandler"] = None
     conversation_history: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     current_intent: Optional[IntentType] = None
@@ -92,14 +95,8 @@ class CallMetrics:
     start_time: datetime
     end_time: Optional[datetime] = None
     total_duration_seconds: float = 0.0
-    stt_processing_time: float = 0.0
-    nlp_processing_time: float = 0.0
-    tts_processing_time: float = 0.0
     total_interactions: int = 0
-    successful_interactions: int = 0
-    language_switches: int = 0
     errors: int = 0
-    average_response_time: float = 0.0
 
 
 class CallOrchestrator:
@@ -114,14 +111,17 @@ class CallOrchestrator:
         self.settings = get_settings()
         self.logger = logger
         
-        # Service dependencies
+        # Service dependencies (lazy imports to avoid circular dependencies)
         self.stt_service = get_speech_to_text_service()
         self.tts_service = get_text_to_speech_service()
-        self.openai_service = get_azure_openai_service()
-        self.hybrid_nlp = get_hybrid_nlp_service()
-        self.bilingual_manager = get_bilingual_manager()
+        self.nlp_service = get_nlp_service()
         self.response_templates = get_response_templates()
+        # Import here to avoid circular import with audio_stream_handler
+        from services.audio_stream_handler import get_audio_stream_handler
         self.audio_stream_handler = get_audio_stream_handler()
+        
+        # Language preference tracking (moved from bilingual_manager)
+        self.language_preferences: Dict[str, LanguageCode] = {}
         
         # Active calls
         self.active_calls: Dict[str, CallContext] = {}
@@ -143,18 +143,7 @@ class CallOrchestrator:
             "active_calls": 0,
             "completed_calls": 0,
             "failed_calls": 0,
-            "average_call_duration": 0.0,
-            "average_response_time": 0.0
-        }
-        
-        # Event callbacks
-        self.callbacks: Dict[str, List[Callable]] = {
-            "call_started": [],
-            "call_ended": [],
-            "intent_detected": [],
-            "response_generated": [],
-            "language_switched": [],
-            "error_occurred": []
+            "average_call_duration": 0.0
         }
         
         self.logger.info(
@@ -171,7 +160,7 @@ class CallOrchestrator:
     async def start_call(self, call_id: str, caller_phone: str, clinic_id: str, 
                         call_type: Union[str, CallType] = 'inbound',
                         language: LanguageCode = LanguageCode.ENGLISH,
-                        audio_stream_handler: Optional[AudioStreamHandler] = None,
+                        audio_stream_handler: Optional["AudioStreamHandler"] = None,
                         call_metadata: Optional[Dict[str, Any]] = None) -> CallContext:
         """
         Start a new call session.
@@ -198,10 +187,12 @@ class CallOrchestrator:
             
             # Issue 117: Verify clinic exists in database before starting call
             try:
-                from services.database import get_db_session
-                with get_db_session() as db:
+                from services.database import get_async_db_session
+                from sqlalchemy import select
+                async with get_async_db_session() as db:
                     from models.models import Clinic
-                    clinic = db.query(Clinic).filter_by(clinic_id=clinic_id).first()
+                    clinic_result = await db.execute(select(Clinic).where(Clinic.clinic_id == clinic_id))
+                    clinic = clinic_result.scalar_one_or_none()
                     if not clinic:
                         raise ValidationError("clinic_id", clinic_id, f"Clinic {clinic_id} does not exist")
             except ValidationError:
@@ -217,14 +208,98 @@ class CallOrchestrator:
                 except ValueError:
                     # Default to INBOUND if invalid string
                     call_type = CallType.INBOUND
-                    self.logger.warning(f"Invalid call_type '{call_type}', defaulting to INBOUND")
+                    self.logger.warning(
+                        f"Invalid call_type '{call_type}', defaulting to INBOUND",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"call_id": call_id, "invalid_call_type": str(call_type)}
+                    )
+            
+            # Enforce admission control before STT/TTS initialization
+            # This will queue the call if capacity is full
+            from services.admission_controller import get_admission_controller
+            admission_controller = get_admission_controller()
+            admission_result = await admission_controller.check_admission(call_id, clinic_id, timeout_seconds=None)
+            
+            # Track if admission was granted (for cleanup on error)
+            admission_granted = False
+            
+            if not admission_result.admitted:
+                if admission_result.reason == "queue_timeout":
+                    self.logger.warning(
+                        f"Call {call_id} timed out in queue for clinic {clinic_id}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={
+                            'call_id': call_id,
+                            'clinic_id': clinic_id,
+                            'current_calls': admission_result.current_calls,
+                            'max_calls': admission_result.max_calls,
+                            'queue_position': admission_result.queue_position,
+                            'wait_time_seconds': admission_result.wait_time_seconds
+                        }
+                    )
+                    raise CallOrchestrationError(
+                        "queue_timeout",
+                        f"Call {call_id} timed out in queue for clinic {clinic_id}"
+                    )
+                elif admission_result.reason == "cancelled":
+                    self.logger.info(
+                        f"Call {call_id} was cancelled while in queue for clinic {clinic_id}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={
+                            'call_id': call_id,
+                            'clinic_id': clinic_id
+                        }
+                    )
+                    raise CallOrchestrationError(
+                        "call_cancelled",
+                        f"Call {call_id} was cancelled"
+                    )
+                else:
+                    self.logger.warning(
+                        f"Admission rejected for call {call_id} - clinic {clinic_id}: {admission_result.reason}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={
+                            'call_id': call_id,
+                            'clinic_id': clinic_id,
+                            'current_calls': admission_result.current_calls,
+                            'max_calls': admission_result.max_calls,
+                            'reason': admission_result.reason
+                        }
+                    )
+                    raise CallOrchestrationError(
+                        "admission_rejected",
+                        f"Clinic {clinic_id} admission rejected: {admission_result.reason}"
+                    )
+            else:
+                # Admission was granted - semaphore is now held
+                admission_granted = True
+            
+            # Log if call was admitted from queue
+            if admission_result.reason == "admitted_from_queue":
+                self.logger.info(
+                    f"Call {call_id} admitted from queue for clinic {clinic_id} (position {admission_result.queue_position})",
+                    LogCategory.CALL_ORCHESTRATION,
+                    extra_data={
+                        'call_id': call_id,
+                        'clinic_id': clinic_id,
+                        'queue_position': admission_result.queue_position
+                    }
+                )
             
             # Issue 109: Check for duplicate call_connection_id in addition to call_id
             # Issue 120: Handle concurrent start attempts with proper locking
+            # Issue 2.4: Check limit and reserve slot atomically within the same lock
             async with self._calls_lock:
                 # Issue 109: Check if call_id already exists
                 if call_id in self.active_calls:
-                    self.logger.warning(f"Call {call_id} already exists")
+                    # Remove from queue if queued and release admission
+                    await admission_controller.remove_from_queue(call_id)
+                    await admission_controller.release_admission(clinic_id, call_id=call_id)
+                    self.logger.warning(
+                        f"Call {call_id} already exists",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"call_id": call_id}
+                    )
                     return self.active_calls[call_id]
                 
                 # Issue 109: Check if acs_call_id (call_connection_id) is already associated with another call
@@ -234,16 +309,28 @@ class CallOrchestrator:
                     # Check if any existing call has the same acs_call_id
                     for existing_call_id, existing_context in self.active_calls.items():
                         existing_metadata = existing_context.metadata or {}
-                        if existing_metadata.get('acs_call_id') == acs_call_id:
-                            self.logger.warning(f"ACS call ID {acs_call_id} already associated with call {existing_call_id}")
+                        # Check both metadata and call_metadata for acs_call_id (for compatibility)
+                        existing_acs_id = existing_metadata.get('acs_call_id') or existing_context.call_metadata.get('acs_call_id')
+                        if existing_acs_id == acs_call_id:
+                            # Remove from queue if queued and release admission
+                            await admission_controller.remove_from_queue(call_id)
+                            await admission_controller.release_admission(clinic_id, call_id=call_id)
+                            self.logger.warning(
+                                f"ACS call ID {acs_call_id} already associated with call {existing_call_id}",
+                                LogCategory.CALL_ORCHESTRATION,
+                                extra_data={"call_id": call_id, "acs_call_id": acs_call_id, "existing_call_id": existing_call_id}
+                            )
                             return existing_context
                 
-                # Issue 136: Handle maximum concurrent calls race condition
-                # Check limit before creating call to prevent race condition
+                # Issue 2.4: Handle maximum concurrent calls race condition
+                # Check limit atomically within the same lock
                 if len(self.active_calls) >= self.max_concurrent_calls:
+                    # Remove from queue if queued and release admission
+                    await admission_controller.remove_from_queue(call_id)
+                    await admission_controller.release_admission(clinic_id, call_id=call_id)
                     raise CallOrchestrationError("max_calls_exceeded", "Maximum concurrent calls exceeded")
             
-            # Create call context
+            # Create call context (outside lock to avoid holding lock during creation)
             # Capture timestamp once
             current_time = datetime.now(AST)
             
@@ -271,37 +358,81 @@ class CallOrchestrator:
                 start_time=current_time
             )
             
-            # Issue 114: Use transaction-like pattern to ensure all initialization steps succeed
-            # Issue 123: Initialize CallFlowContext BEFORE storing CallContext
-            # Initialize CallFlowContext for call flow state machine (Issue 1, 50, 123)
-            from models.call_flow_models import CallFlowContext, CallFlowState
-            from services.call_store import store_call
-            
+            # Initialize CallFlowService (creates CallFlowContext and database Call record)
+            from services.call_flow_service import CallFlowService
+            from services.database import get_async_db_session
+            from models.call_flow_models import CallFlowContext
+            call_flow_context = None
             try:
+                async with get_async_db_session() as db:
+                    call_flow_service = CallFlowService(db)
+                    flow_response = await call_flow_service.initialize_call(
+                        call_sid=call_id,
+                        caller_phone=caller_phone,
+                        clinic_id=clinic_id
+                    )
+                    # Get the created CallFlowContext
+                    from services.call_flow_service import get_call
+                    call_flow_context = await get_call(call_id)
+                    self.logger.info(
+                        f"CallFlowService initialized for call {call_id}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"call_id": call_id, "clinic_id": clinic_id}
+                    )
+            except Exception as flow_error:
+                self.logger.error(
+                    f"Failed to initialize CallFlowService for call {call_id}: {flow_error}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    exception=flow_error,
+                    extra_data={"call_id": call_id}
+                )
+                # Create minimal CallFlowContext to allow call to proceed
+                from models.call_flow_models import CallFlowState
                 call_flow_context = CallFlowContext(
                     call_sid=call_id,
                     current_state=CallFlowState.GET_INTENT,
                     clinic_id=clinic_id
                 )
+                from services.call_flow_service import store_call
                 await store_call(call_id, call_flow_context)
-            except Exception as flow_error:
-                # Issue 131: Handle CallFlowContext creation failures
-                self.logger.error(f"Failed to create CallFlowContext for call {call_id}: {flow_error}")
-                # Issue 131: Fail the call if CallFlowContext is required
-                raise CallOrchestrationError("flow_context_failed", f"Failed to create call flow context: {flow_error}")
             
-            # Store call context and metrics (with lock)
+            # Store reference to CallFlowContext in CallContext.metadata for easy access
+            if call_flow_context:
+                call_metadata_dict['call_flow_context'] = call_flow_context
+                call_metadata_dict['call_flow_state'] = call_flow_context.current_state.value if hasattr(call_flow_context.current_state, 'value') else str(call_flow_context.current_state)
+            
+            # Register call in ACS service (store ACS metadata)
+            if acs_call_id:
+                call_metadata_dict['acs_call_id'] = acs_call_id
+                call_metadata_dict['acs_status'] = "incoming"
+                call_metadata_dict['websocket_connected'] = False
+                call_metadata_dict['audio_stream_active'] = False
+            
+            # Issue 2.4: Store call context and metrics atomically after creation
+            # This ensures the count check and increment happen within the same lock
             async with self._calls_lock:
+                # Re-check limit before adding (defense in depth)
+                if len(self.active_calls) >= self.max_concurrent_calls:
+                    # Remove from queue if queued and release admission
+                    await admission_controller.remove_from_queue(call_id)
+                    await admission_controller.release_admission(clinic_id, call_id=call_id)
+                    raise CallOrchestrationError("max_calls_exceeded", "Maximum concurrent calls exceeded")
+                
+                # Add call to active_calls atomically
                 self.active_calls[call_id] = call_context
                 self.call_metrics[call_id] = call_metrics
             
-            # Issue 114, 171: Initialize audio stream handler with error handling and verify connection
+            # Issue 6.2: Initialize audio stream handler with error handling and verify connection
             try:
                 if audio_stream_handler:
                     connection_id = await self._initialize_audio_stream(call_context)
-                    # Issue 171: Verify that audio stream handler connection is established
+                    # Issue 6.2: Verify that audio stream handler connection is established
                     if not connection_id:
-                        self.logger.warning(f"Audio stream handler connection returned None for call {call_id}")
+                        self.logger.warning(
+                            f"Audio stream handler connection returned None for call {call_id}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            extra_data={"call_id": call_id}
+                        )
                         # Continue without audio if connection fails - call can still proceed
                     else:
                         # Issue 171: Store connection_id in metadata for later use
@@ -309,13 +440,31 @@ class CallOrchestrator:
                         call_context.metadata['connection_id'] = connection_id
             except Exception as audio_error:
                 # Issue 127: Handle audio stream handler initialization failures
-                self.logger.error(f"Failed to initialize audio stream handler for call {call_id}: {audio_error}")
+                self.logger.error(
+                    f"Failed to initialize audio stream handler for call {call_id}: {audio_error}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    exception=audio_error,
+                    extra_data={"call_id": call_id}
+                )
                 # Issue 127: Clean up on failure
                 async with self._calls_lock:
                     if call_id in self.active_calls:
                         del self.active_calls[call_id]
                     if call_id in self.call_metrics:
                         del self.call_metrics[call_id]
+                
+                # Release admission if it was granted
+                if admission_granted:
+                    try:
+                        await admission_controller.remove_from_queue(call_id)
+                        await admission_controller.release_admission(clinic_id, call_id=call_id)
+                    except Exception as cleanup_error:
+                        self.logger.error(
+                            f"Failed to release admission during audio init cleanup: {cleanup_error}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            exception=cleanup_error
+                        )
+                
                 raise CallOrchestrationError("audio_init_failed", f"Failed to initialize audio stream: {audio_error}")
             
             # Issue 140: Handle timeout task creation failures
@@ -331,6 +480,19 @@ class CallOrchestrator:
                         del self.active_calls[call_id]
                     if call_id in self.call_metrics:
                         del self.call_metrics[call_id]
+                
+                # Release admission if it was granted
+                if admission_granted:
+                    try:
+                        await admission_controller.remove_from_queue(call_id)
+                        await admission_controller.release_admission(clinic_id, call_id=call_id)
+                    except Exception as cleanup_error:
+                        self.logger.error(
+                            f"Failed to release admission during timeout task cleanup: {cleanup_error}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            exception=cleanup_error
+                        )
+                
                 raise CallOrchestrationError("timeout_task_failed", f"Failed to create timeout task: {timeout_error}")
             
             # Update state
@@ -348,14 +510,6 @@ class CallOrchestrator:
                 self.logger.warning(f"Failed to update statistics for call {call_id}: {stats_error}")
                 # Continue - statistics failure shouldn't stop the call
             
-            # Issue 145: Handle callback registration failures
-            try:
-                # Trigger callbacks
-                await self._trigger_callbacks("call_started", call_context)
-            except Exception as callback_error:
-                # Issue 145: Handle callback registration failures gracefully
-                self.logger.warning(f"Failed to trigger callbacks for call {call_id}: {callback_error}")
-                # Continue - callback failure shouldn't stop the call
             
             # Get call_type value safely (handle both enum and string)
             call_type_value = call_type.value if isinstance(call_type, CallType) else str(call_type)
@@ -374,6 +528,31 @@ class CallOrchestrator:
             return call_context
             
         except Exception as e:
+            # Clean up admission if it was granted but call failed to start
+            # This prevents semaphore leaks when start_call() fails after admission
+            if admission_granted:
+                try:
+                    await admission_controller.remove_from_queue(call_id)
+                    await admission_controller.release_admission(clinic_id, call_id=call_id)
+                    self.logger.info(
+                        f"Released admission for failed call {call_id}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"call_id": call_id, "clinic_id": clinic_id}
+                    )
+                except Exception as cleanup_error:
+                    self.logger.error(
+                        f"Failed to release admission during cleanup for call {call_id}: {cleanup_error}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        exception=cleanup_error
+                    )
+            
+            # Clean up active_calls if it was added
+            async with self._calls_lock:
+                if call_id in self.active_calls:
+                    del self.active_calls[call_id]
+                if call_id in self.call_metrics:
+                    del self.call_metrics[call_id]
+            
             self.logger.error(
                 f"Failed to start call {call_id}: {e}",
                 LogCategory.CALL_ORCHESTRATION,
@@ -409,231 +588,6 @@ class CallOrchestrator:
                 exception=e
             )
     
-    async def _handle_emergency(self, call_context: CallContext):
-        """Handle emergency calls - transfer to human immediately"""
-        try:
-            # Get emergency transfer number from system config
-            emergency_number = await self._get_config_value(
-                call_context.clinic_id, 
-                'emergency_transfer_number',
-                fallback='911'
-            )
-            
-            # Log emergency transfer
-            await self._log_audit(
-                clinic_id=call_context.clinic_id,
-                action='emergency_transfer',
-                entity_type='call',
-                entity_id=call_context.call_id,
-                metadata={'emergency_number': emergency_number}
-            )
-            
-            # Play emergency message
-            message = "This is an emergency. Transferring you immediately to our emergency line."
-            await self._synthesize_response(call_context, message)
-            
-            # Transfer call
-            await self._transfer_call(call_context.call_id, emergency_number)
-            
-            logger.info(f"Emergency call {call_context.call_id} transferred to {emergency_number}")
-            
-        except Exception as e:
-            logger.error(f"Error handling emergency call {call_context.call_id}: {e}")
-    
-    async def _transfer_to_department(self, call_context: CallContext, department: str):
-        """Transfer call to human agent in specific department"""
-        try:
-            # Get department transfer number
-            dept_key = f"{department}_department_number"
-            transfer_number = await self._get_config_value(
-                call_context.clinic_id,
-                dept_key,
-                fallback='+1234567890'  # Default clinic number
-            )
-            
-            # Play transfer message
-            message = f"Transferring you to our {department} department."
-            await self._synthesize_response(call_context, message)
-            
-            # Issue 190: Transfer call and verify transfer success
-            try:
-                transfer_result = await self._transfer_call(call_context.call_id, transfer_number)
-                
-                # Issue 190: Verify transfer succeeded
-                if not transfer_result or not transfer_result.get('success', False):
-                    self.logger.error(f"Transfer failed for call {call_context.call_id} to {department}")
-                    # Issue 190: Handle transfer failure - provide fallback message
-                    await self._synthesize_response(
-                        call_context,
-                        "I'm sorry, I'm having trouble transferring you. Please hold while I connect you to our staff."
-                    )
-                    # Update call state to indicate transfer issue
-                    call_context.state = CallState.ERROR
-                    return
-                
-                # Issue 190: Update call state to indicate successful transfer
-                call_context.state = CallState.TRANSFERRED
-                self.logger.info(f"Call {call_context.call_id} successfully transferred to {department}")
-            except Exception as transfer_error:
-                self.logger.error(f"Transfer error for call {call_context.call_id}: {transfer_error}")
-                # Issue 190: Handle transfer exception - provide fallback message
-                await self._synthesize_response(
-                    call_context,
-                    "I'm sorry, I'm having trouble transferring you. Please hold while I connect you to our staff."
-                )
-                call_context.state = CallState.ERROR
-            
-            logger.info(f"Call {call_context.call_id} transferred to {department} department")
-            
-        except Exception as e:
-            logger.error(f"Error transferring call to {department}: {e}")
-    
-    async def _handle_provider_inquiry(self, call_context: CallContext, entities: Dict[str, Any]):
-        """Handle provider information requests"""
-        try:
-            # Use Azure OpenAI to answer provider questions
-            provider_info = await self._get_provider_info(call_context.clinic_id, entities)
-            
-            if provider_info:
-                response = f"Here's the information you requested: {provider_info}"
-            else:
-                response = "I don't have that information available. Let me transfer you to our staff."
-                await self._transfer_to_department(call_context, 'general')
-                return
-            
-            await self._synthesize_response(call_context, response)
-            
-        except Exception as e:
-            logger.error(f"Error handling provider inquiry: {e}")
-    
-    async def _handle_general_inquiry(self, call_context: CallContext, intent_result):
-        """Handle general FAQ using Azure OpenAI"""
-        try:
-            # Extract user_input from conversation history (Issue 3, 22)
-            user_input = ""
-            if call_context.conversation_history:
-                # Get the last user message
-                for msg in reversed(call_context.conversation_history):
-                    if msg.get("role") == "user":
-                        user_input = msg.get("content", "")
-                        break
-            
-            if not user_input:
-                user_input = "How can I help you?"
-            
-            # Convert entities to list format if needed
-            entities_list = []
-            if intent_result.entities:
-                if isinstance(intent_result.entities, list):
-                    entities_list = intent_result.entities
-                elif hasattr(intent_result.entities, '__dict__'):
-                    # Convert ExtractedEntities to dict format
-                    entities_list = [{"type": k, "value": v} for k, v in intent_result.entities.__dict__.items() if v]
-            
-            # Use Azure OpenAI for general questions with correct parameters
-            response_result = await self.openai_service.generate_response(
-                user_input=user_input,
-                call_id=call_context.call_id,
-                language=call_context.language,
-                intent=intent_result.intent,
-                entities=entities_list if entities_list else None
-            )
-            
-            # Extract response text from ResponseResult
-            response_text = response_result.response_text if hasattr(response_result, 'response_text') else str(response_result)
-            
-            await self._synthesize_response(call_context, response_text)
-            
-        except Exception as e:
-            logger.error(f"Error handling general inquiry: {e}")
-    
-    async def _transfer_call(self, call_id: str, transfer_number: str):
-        """Transfer call to another number (stub - logs only, doesn't crash)"""
-        try:
-            logger.info(f"Transfer requested for call {call_id} to {transfer_number}")
-            logger.warning(f"Call transfer not yet implemented - call will continue with AI")
-            
-            # Update call state to show transfer was attempted (with lock)
-            async with self._calls_lock:
-                if call_id in self.active_calls:
-                    self.active_calls[call_id].state = CallState.LISTENING
-                
-            # For now, just continue the call with AI instead of crashing
-            # TODO: Implement actual ACS transfer API call
-            
-        except Exception as e:
-            logger.error(f"Error in transfer stub for call {call_id}: {e}")
-            # Don't raise - just log and continue
-    
-    async def _get_config_value(self, clinic_id: str, key: str, fallback: str = None):
-        """Get configuration value from system_config table"""
-        try:
-            from services.database import get_db_session
-            from models.models import SystemConfig
-            
-            # Query system_config table
-            with get_db_session() as db:
-                config = db.query(SystemConfig).filter(
-                    SystemConfig.config_key == key,
-                    SystemConfig.is_deleted == 'no'
-                ).first()
-                
-                if config:
-                    return config.config_value
-                else:
-                    logger.warning(f"Config key '{key}' not found for clinic {clinic_id}, using fallback: {fallback}")
-                    return fallback or "911"
-                    
-        except Exception as e:
-            logger.error(f"Error getting config value {key}: {e}")
-            return fallback or "911"
-    
-    async def _log_audit(self, clinic_id: str, action: str, entity_type: str, entity_id: str, metadata: Dict = None):
-        """Log audit event"""
-        try:
-            # This would insert into audit_logs table
-            logger.info(f"Audit log: {action} on {entity_type} {entity_id} for clinic {clinic_id}")
-        except Exception as e:
-            logger.error(f"Error logging audit event: {e}")
-    
-    async def _get_provider_info(self, clinic_id: str, entities: Dict[str, Any]):
-        """Get provider information based on entities"""
-        try:
-            # This would query providers table
-            # For now, return placeholder
-            return "Provider information not available"
-        except Exception as e:
-            logger.error(f"Error getting provider info: {e}")
-            return None
-
-    async def _trigger_callbacks(self, event_type: str, call_context: CallContext):
-        """Trigger registered callbacks for the given event."""
-        try:
-            callbacks = self.callbacks.get(event_type, [])
-            if not callbacks:
-                return
-            
-            # Execute all callbacks
-            for callback in callbacks:
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(call_context)
-                    else:
-                        callback(call_context)
-                except Exception as e:
-                    self.logger.error(
-                        f"Error in callback for {event_type}: {e}",
-                        LogCategory.CALL_ORCHESTRATION,
-                        exception=e
-                    )
-                    
-        except Exception as e:
-            self.logger.error(
-                f"Error triggering callbacks for {event_type}: {e}",
-                LogCategory.CALL_ORCHESTRATION,
-                exception=e
-            )
-    
     async def _initialize_audio_stream(self, call_context: CallContext):
         """Initialize audio stream for the call."""
         try:
@@ -646,34 +600,142 @@ class CallOrchestrator:
                 # Extract fields from TranscriptionResult object
                 text = transcription_result.text if hasattr(transcription_result, 'text') else ""
                 detected_language = transcription_result.language if hasattr(transcription_result, 'language') else call_context.language.value
-                asyncio.create_task(self._handle_speech_input(call_context.call_id, text, detected_language))
+                # Issue 2: Add error handling for async task creation
+                try:
+                    task = asyncio.create_task(self._handle_speech_input(call_context.call_id, text, detected_language))
+                    # Add done callback to handle errors
+                    def task_done_callback(task):
+                        try:
+                            task.result()  # This will raise exception if task failed
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error in STT callback task for call {call_context.call_id}: {e}",
+                                LogCategory.CALL_ORCHESTRATION,
+                                exception=e,
+                                extra_data={"call_id": call_context.call_id, "text": text}
+                            )
+                    task.add_done_callback(task_done_callback)
+                except Exception as e:
+                    self.logger.error(
+                        f"Failed to create task for STT callback for call {call_context.call_id}: {e}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        exception=e,
+                        extra_data={"call_id": call_context.call_id, "text": text}
+                    )
             
             call_context.audio_stream_handler.register_stt_callback(call_context.call_id, stt_callback)
             
-            # Register TTS callback
-            def tts_callback(call_id: str, text: str) -> bytes:
-                # Use create_task to handle async synthesis without blocking
-                asyncio.create_task(self._handle_tts_synthesis(call_id, text, call_context.language.value))
-                return b''  # Return empty bytes immediately, audio sent via WebSocket
-            
-            call_context.audio_stream_handler.register_tts_callback(tts_callback)
+            # Note: TTS callback registration removed - audio_stream_handler doesn't have register_tts_callback
+            # TTS audio is sent directly via send_tts_audio() in _synthesize_response()
             
             self.logger.debug(f"Audio stream initialized for call {call_context.call_id}")
             
         except Exception as e:
             self.logger.error(f"Failed to initialize audio stream for call {call_context.call_id}: {e}")
     
-    async def _handle_tts_synthesis(self, call_id: str, text: str, language: str):
-        """Handle TTS synthesis asynchronously."""
+    async def connect_audio_stream(self, call_id: str, connection_id: str) -> bool:
+        """
+        Connect audio stream for a call (called from WebSocket route).
+        
+        Args:
+            call_id: ID of the call
+            connection_id: Connection ID from audio stream handler
+            
+        Returns:
+            True if connection succeeded
+        """
         try:
-            synthesis_result = await self.tts_service.synthesize_speech(text, language, call_id)
             async with self._calls_lock:
-                if call_id in self.active_calls:
-                    call_context = self.active_calls[call_id]
-                    if call_context.audio_stream_handler:
-                        await call_context.audio_stream_handler.send_tts_audio(call_id, synthesis_result.audio_data)
+                if call_id not in self.active_calls:
+                    self.logger.warning(f"Call {call_id} not found for audio stream connection")
+                    return False
+                
+                call_context = self.active_calls[call_id]
+                
+                # Store connection_id in metadata
+                call_context.metadata = call_context.metadata or {}
+                call_context.metadata['connection_id'] = connection_id
+                
+                # Initialize audio stream if not already done
+                if call_context.audio_stream_handler:
+                    await self._initialize_audio_stream(call_context)
+                
+                # Start STT recognition
+                if self.stt_service:
+                    try:
+                        await self.stt_service.start_continuous_recognition(call_id)
+                        self.logger.info(f"Started STT recognition for call {call_id}")
+                    except Exception as stt_error:
+                        self.logger.warning(
+                            f"Failed to start STT recognition for call {call_id}: {stt_error}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            exception=stt_error
+                        )
+                        # Continue - STT failure shouldn't stop the call
+                
+                return True
+                
         except Exception as e:
-            self.logger.error(f"TTS synthesis failed in callback: {e}")
+            self.logger.error(
+                f"Failed to connect audio stream for call {call_id}: {e}",
+                LogCategory.CALL_ORCHESTRATION,
+                exception=e
+            )
+            return False
+    
+    async def handle_acs_event(self, event_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle ACS webhook events.
+        
+        Args:
+            event_type: Type of ACS event
+            payload: Event payload
+            
+        Returns:
+            Event handling result
+        """
+        try:
+            call_connection_id = payload.get('callConnectionId')
+            if not call_connection_id:
+                self.logger.warning("Missing callConnectionId in ACS event payload")
+                return {"status": "ignored", "reason": "missing_call_connection_id"}
+            
+            # Get call_id from metadata
+            call_id = None
+            async with self._calls_lock:
+                for cid, context in self.active_calls.items():
+                    if context.metadata.get('acs_call_id') == call_connection_id:
+                        call_id = cid
+                        break
+            
+            if not call_id:
+                self.logger.warning(f"No active call found for ACS call ID: {call_connection_id}")
+                return {"status": "ignored", "reason": "call_not_found"}
+            
+            # Handle different event types
+            if event_type == "CallConnectionStateChanged":
+                new_state = payload.get("state")
+                await self.update_call_metadata(call_id, 'acs_status', new_state.lower())
+                if new_state == "Disconnected":
+                    await self.end_call(call_id, "disconnected")
+            elif event_type == "MediaStreamingStarted":
+                await self.update_call_metadata(call_id, 'websocket_connected', True)
+                await self.update_call_metadata(call_id, 'audio_stream_active', True)
+            elif event_type == "MediaStreamingStopped":
+                await self.update_call_metadata(call_id, 'websocket_connected', False)
+                await self.update_call_metadata(call_id, 'audio_stream_active', False)
+            else:
+                self.logger.info(f"Unhandled ACS event type: {event_type}")
+            
+            return {"status": "processed", "call_id": call_id}
+            
+        except Exception as e:
+            self.logger.error(
+                f"Failed to handle ACS event: {e}",
+                LogCategory.CALL_ORCHESTRATION,
+                exception=e
+            )
+            return {"status": "error", "message": str(e)}
     
     async def _handle_speech_input(self, call_id: str, text: str, detected_language: str):
         """Handle speech input from STT service."""
@@ -711,16 +773,59 @@ class CallOrchestrator:
         try:
             start_time = time.time()
             
-            # Classify intent using hybrid NLP
-            intent_result = await self.hybrid_nlp.process_input(
-                user_input=text,
-                call_id=call_context.call_id,
-                language=language
-            )
+            # Issue 10: Classify intent using NLP service with error recovery
+            try:
+                intent_result = await self.nlp_service.classify_intent(
+                    user_input=text,
+                    call_id=call_context.call_id,
+                    language=language
+                )
+            except Exception as nlp_error:
+                # Issue 10: Fallback to cached responses or simple pattern matching
+                self.logger.warning(
+                    f"NLP classification failed for call {call_context.call_id}, using fallback: {nlp_error}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    exception=nlp_error,
+                    extra_data={"call_id": call_context.call_id, "text": text}
+                )
+                # Use fallback intent classification
+                from services.nlp_service import IntentType
+                from services.response_service import get_response_cache_service
+                response_cache = get_response_cache_service()
+                
+                # Try to get cached response
+                cached_response = await response_cache.get_cached_response(text, language.value)
+                if cached_response:
+                    intent_result = cached_response.get('intent_result')
+                    if intent_result:
+                        self.logger.info(f"Using cached intent result for call {call_context.call_id}")
+                    else:
+                        # Fallback to default intent
+                        from services.nlp_service import IntentResult
+                        intent_result = IntentResult(
+                            intent=IntentType.GENERAL_INQUIRY,
+                            confidence=0.3,
+                            entities=[],
+                            text=text
+                        )
+                else:
+                    # Fallback to default intent
+                    from services.nlp_service import IntentResult
+                    intent_result = IntentResult(
+                        intent=IntentType.GENERAL_INQUIRY,
+                        confidence=0.3,
+                        entities=[],
+                        text=text
+                    )
             
             # Update call context
             call_context.current_intent = intent_result.intent
-            call_context.entities = intent_result.entities
+            # Convert entities to list format if needed
+            if isinstance(intent_result.entities, ExtractedEntities):
+                entities_list = [{"type": k, "value": v} for k, v in intent_result.entities.__dict__.items() if v]
+            else:
+                entities_list = intent_result.entities if isinstance(intent_result.entities, list) else []
+            call_context.entities = entities_list
             call_context.language = language
             
             # Add to conversation history
@@ -746,162 +851,302 @@ class CallOrchestrator:
                         start_time=call_context.start_time or datetime.now(AST)
                     )
                 call_metrics = self.call_metrics[call_context.call_id]
-                call_metrics.nlp_processing_time += time.time() - start_time
                 call_metrics.total_interactions += 1
             
+            # Route call based on intent: non-patient callers get outbound call to clinic
+            is_non_patient = intent_result.intent in [
+                IntentType.INSURANCE_INQUIRY,
+                IntentType.PROVIDER_INQUIRY,
+                IntentType.CLINIC_INQUIRY,
+                IntentType.BILLING_INQUIRY
+            ]
+            
+            if is_non_patient:
+                # Non-patient caller: make outbound call to clinic and end current call
+                await self._handle_non_patient_caller(call_context, intent_result.intent)
+                return
+            
+            # Patient caller: continue with normal flow
             # Generate response
             await self._generate_response(call_context, intent_result)
-            
-            # Trigger callbacks
-            await self._trigger_callbacks("intent_detected", call_context, intent_result)
             
         except Exception as e:
             self.logger.error(f"Failed to process user input for call {call_context.call_id}: {e}")
             await self._handle_call_error(call_context.call_id, e)
     
-    async def _generate_response(self, call_context: CallContext, intent_result):
-        """Generate and synthesize response based on intent."""
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type((Exception,))
+    )
+    async def _persist_call_flow_state(self, call_id: str, context):
+        """
+        Persist call flow state with retry logic and verification.
+        
+        Args:
+            call_id: ID of the call
+            context: CallFlowContext to persist
+            
+        Raises:
+            Exception: If persistence fails after retries
+        """
+        from services.call_flow_service import store_call, get_call
+        
         try:
-            start_time = time.time()
+            # Store previous state for rollback if needed
+            previous_state = context.current_state
             
-            # Route based on intent
-            # Issue 195: Handle intent classification failures
-            if not intent_result or not hasattr(intent_result, 'intent'):
-                self.logger.error(f"Invalid intent result for call {call_context.call_id}")
-                response_text = "I'm sorry, I'm having trouble understanding. Could you please repeat?"
-            else:
-                intent = intent_result.intent
+            # Persist state
+            await store_call(call_id, context)
+            
+            # Verify persistence succeeded
+            stored_context = await get_call(call_id)
+            if stored_context is None:
+                raise Exception(f"State persistence verification failed: stored context is None for call {call_id}")
+            
+            if hasattr(stored_context, 'current_state') and stored_context.current_state != context.current_state:
+                raise Exception(
+                    f"State persistence verification failed: state mismatch for call {call_id}. "
+                    f"Expected {context.current_state}, got {stored_context.current_state}"
+                )
+            
+            self.logger.debug(
+                f"Successfully persisted and verified call flow state for call {call_id}",
+                LogCategory.CALL_ORCHESTRATION,
+                extra_data={"call_id": call_id, "state": str(context.current_state)}
+            )
+            
+        except Exception as e:
+            self.logger.error(
+                f"Failed to persist call flow state for {call_id}: {e}",
+                LogCategory.CALL_ORCHESTRATION,
+                exception=e,
+                extra_data={"call_id": call_id}
+            )
+            raise
+    
+    async def _handle_non_patient_caller(self, call_context: CallContext, intent: IntentType) -> None:
+        """
+        Handle non-patient callers (physician, pharmacy, insurance) by making outbound call to clinic.
+        
+        Args:
+            call_context: Call context
+            intent: Intent type (INSURANCE_INQUIRY, PROVIDER_INQUIRY, CLINIC_INQUIRY, BILLING_INQUIRY)
+        """
+        try:
+            # Map intent to caller type
+            caller_type_map = {
+                IntentType.INSURANCE_INQUIRY: "insurance",
+                IntentType.PROVIDER_INQUIRY: "provider",
+                IntentType.CLINIC_INQUIRY: "clinic",
+                IntentType.BILLING_INQUIRY: "billing"
+            }
+            caller_type = caller_type_map.get(intent, "general")
+            
+            # Get clinic phone number from clinic_id
+            from services.clinic_management import ClinicManagementService
+            from services.database import get_async_db_session
+            
+            async with get_async_db_session() as db:
+                clinic_service = ClinicManagementService(db)
+                clinic = await clinic_service.get_clinic(call_context.clinic_id)
                 
-                # Issue 195: Validate intent is not None
-                if intent is None:
-                    self.logger.warning(f"Intent is None for call {call_context.call_id}")
-                    response_text = "I'm sorry, I didn't understand that. Could you please repeat?"
+                if not clinic or not clinic.phone_number:
+                    self.logger.error(
+                        f"Failed to get clinic phone number for clinic_id: {call_context.clinic_id}, caller_type: {caller_type}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"clinic_id": call_context.clinic_id, "caller_type": caller_type}
+                    )
+                    # Fallback: play message and end call
+                    await self._synthesize_response(
+                        call_context,
+                        "I'm sorry, I'm unable to transfer your call at this time. Please call the clinic directly."
+                    )
+                    await self.end_call(call_context.call_id, "transfer_failed")
+                    return
+                
+                clinic_phone = clinic.phone_number
+                
+                # Get ACS service and TTS service
+                from services.azure_communication_service import get_azure_communication_service
+                from services.azure_speech_tts import get_text_to_speech_service
+                
+                acs_service = get_azure_communication_service()
+                tts_service = get_text_to_speech_service()
+                
+                # Generate message for outbound call
+                message = f"Hello, this is a call transfer. A {caller_type} inquiry is being transferred to your clinic. Please hold."
+                
+                # Generate TTS audio
+                audio_bytes = await tts_service.synthesize_speech(message, "en-US")
+                
+                if not audio_bytes:
+                    self.logger.warning(
+                        f"Failed to generate TTS audio for outbound call to clinic {clinic_phone}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={"clinic_id": call_context.clinic_id, "caller_type": caller_type}
+                    )
+                    # Continue without audio
+                
+                # Make outbound call to clinic
+                call_result = await acs_service.make_outbound_call(
+                    to_phone=clinic_phone,
+                    audio_content=audio_bytes,
+                    call_context={
+                        'caller_type': caller_type,
+                        'original_call_id': call_context.call_id,
+                        'clinic_id': call_context.clinic_id,
+                        'call_type': 'transfer'
+                    }
+                )
+                
+                if call_result.get('success'):
+                    self.logger.info(
+                        f"Outbound call made to clinic {clinic_phone} for {caller_type} inquiry",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={
+                            "clinic_id": call_context.clinic_id,
+                            "caller_type": caller_type,
+                            "call_connection_id": call_result.get('call_connection_id')
+                        }
+                    )
+                    # Play transfer message to caller
+                    await self._synthesize_response(
+                        call_context,
+                        f"I'll connect you with our staff who can help with your {caller_type} inquiry. Please hold while I transfer you."
+                    )
+                    # End the current call after a short delay
+                    await asyncio.sleep(2)
+                    await self.end_call(call_context.call_id, "transferred")
                 else:
-                    # Initialize response_text to avoid undefined variable
-                    response_text = None
+                    self.logger.error(
+                        f"Failed to make outbound call to clinic {clinic_phone}: {call_result.get('error_message')}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        extra_data={
+                            "clinic_id": call_context.clinic_id,
+                            "caller_type": caller_type,
+                            "error_code": call_result.get('error_code')
+                        }
+                    )
+                    # Fallback: play message and end call
+                    await self._synthesize_response(
+                        call_context,
+                        "I'm sorry, I'm unable to transfer your call at this time. Please call the clinic directly."
+                    )
+                    await self.end_call(call_context.call_id, "transfer_failed")
             
-            if intent in [IntentType.APPOINTMENT_BOOKING, IntentType.APPOINTMENT_CANCELLATION, 
-                        IntentType.APPOINTMENT_RESCHEDULING]:
-                # Use CallFlowService for appointment handling
+        except Exception as e:
+            self.logger.error(
+                f"Error handling non-patient caller: {e}",
+                LogCategory.CALL_ORCHESTRATION,
+                exception=e,
+                extra_data={"clinic_id": call_context.clinic_id, "intent": intent.value if hasattr(intent, 'value') else str(intent)}
+            )
+            # Fallback: play message and end call
+            try:
+                await self._synthesize_response(
+                    call_context,
+                    "I'm sorry, I'm unable to transfer your call at this time. Please call the clinic directly."
+                )
+                await self.end_call(call_context.call_id, "transfer_error")
+            except Exception as end_error:
+                self.logger.error(
+                    f"Failed to end call after transfer error: {end_error}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    exception=end_error
+                )
+    
+    async def _generate_response(self, call_context: CallContext, intent_result):
+        """Generate and synthesize response based on intent. Always delegates to CallFlowService."""
+        try:
+            # Validate intent result
+            if not intent_result or not hasattr(intent_result, 'intent') or not intent_result.intent:
+                response_text = "I'm sorry, I'm having trouble understanding. Could you please repeat your request?"
+            elif not call_context.conversation_history:
+                response_text = "I'm sorry, I didn't catch that. Could you please repeat?"
+            else:
+                # Always delegate to CallFlowService for ALL intents
                 from services.call_flow_service import CallFlowService
                 from services.database import get_async_db_session
                 
-                # Check if conversation_history has at least one entry
-                if not call_context.conversation_history:
-                    self.logger.error(f"No conversation history for call {call_context.call_id}")
-                    response_text = "I'm sorry, I didn't catch that. Could you please repeat?"
-                else:
-                    async with get_async_db_session() as db:
-                        flow_service = CallFlowService(db)
-                        # Issue 4, 5, 6, 14, 25: Pass entities and handle state transitions
-                        # Extract entities from intent_result
-                        entities_list = []
-                        if intent_result.entities:
-                            if isinstance(intent_result.entities, list):
-                                entities_list = intent_result.entities
-                            elif hasattr(intent_result.entities, '__dict__'):
-                                # Convert ExtractedEntities to dict format
-                                entities_list = [{"type": k, "value": v} for k, v in intent_result.entities.__dict__.items() if v]
+                async with get_async_db_session() as db:
+                    flow_service = CallFlowService(db)
+                    
+                    # Extract entities from intent_result
+                    entities_list = []
+                    if intent_result.entities:
+                        if isinstance(intent_result.entities, list):
+                            entities_list = intent_result.entities
+                        elif hasattr(intent_result.entities, '__dict__'):
+                            entities_list = [{"type": k, "value": v} for k, v in intent_result.entities.__dict__.items() if v]
+                    
+                    # Pass entities to flow service - it handles ALL intents
+                    flow_response = await flow_service.process_user_input(
+                        call_context.call_id,
+                        call_context.conversation_history[-1]['content'],
+                        entities=entities_list if entities_list else None
+                    )
+                    
+                    # Extract message from flow response
+                    if hasattr(flow_response, 'message'):
+                        response_text = flow_response.message
+                    elif isinstance(flow_response, str):
+                        response_text = flow_response
+                    else:
+                        response_text = str(flow_response)
+                    
+                    # Update call flow state in orchestrator context
+                    if hasattr(flow_response, 'next_state'):
+                        call_context.metadata = call_context.metadata or {}
+                        call_context.metadata['call_flow_state'] = flow_response.next_state.value if hasattr(flow_response.next_state, 'value') else str(flow_response.next_state)
                         
-                        # Issue 6: Pass entities to flow service instead of re-extracting
-                        flow_response = await flow_service.process_user_input(
-                            call_context.call_id,  # Passed as call_sid parameter
-                            call_context.conversation_history[-1]['content'],
-                            entities=entities_list if entities_list else None  # Issue 6: Pass extracted entities
-                        )
-                        
-                        # Issue 4, 14, 25: Extract message and handle state transitions
-                        if hasattr(flow_response, 'message'):
-                            response_text = flow_response.message
-                        elif isinstance(flow_response, str):
-                            response_text = flow_response
-                        else:
-                            response_text = str(flow_response)
-                        
-                        # Issue 14: Update call flow state in orchestrator context
-                        if hasattr(flow_response, 'next_state'):
-                            # Store state in call context metadata
-                            call_context.metadata = call_context.metadata or {}
-                            call_context.metadata['call_flow_state'] = flow_response.next_state.value if hasattr(flow_response.next_state, 'value') else str(flow_response.next_state)
-                        
-                        # Issue 5: Sync conversation history - add flow service response to orchestrator history
-                        if response_text:
-                            call_context.conversation_history.append({
-                                "role": "assistant",
-                                "content": response_text,
-                                "timestamp": datetime.now(AST),
-                                "language": call_context.language.value,
-                                "intent": intent.value if hasattr(intent, 'value') else str(intent),
-                                "confidence": intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
-                            })
-                
-            elif intent == IntentType.INSURANCE_INQUIRY:
-                # Transfer to human agent
-                await self._transfer_to_department(call_context, 'insurance')
-                return
-                
-            elif intent == IntentType.PROVIDER_INQUIRY:
-                # Handle provider information requests
-                await self._handle_provider_inquiry(call_context, intent_result.entities)
-                return
-                
-            elif intent == IntentType.EMERGENCY:
-                # Immediate transfer to emergency line
-                await self._handle_emergency(call_context)
-                return
-                
-            else:
-                # General inquiry - use Azure OpenAI for FAQ
-                await self._handle_general_inquiry(call_context, intent_result)
-                return
+                        # Update CallFlowContext reference in metadata if it exists
+                        if 'call_flow_context' in call_context.metadata:
+                            call_flow_context = call_context.metadata['call_flow_context']
+                            previous_state = call_flow_context.current_state
+                            call_flow_context.current_state = flow_response.next_state
+                            try:
+                                await self._persist_call_flow_state(call_context.call_id, call_flow_context)
+                            except Exception as persist_error:
+                                self.logger.error(
+                                    f"Failed to persist CallFlowContext state for call {call_context.call_id}: {persist_error}",
+                                    LogCategory.CALL_ORCHESTRATION,
+                                    exception=persist_error,
+                                    extra_data={"call_id": call_context.call_id}
+                                )
+                                call_flow_context.current_state = previous_state
             
-            # Issue 158: Validate that response_text is not None before adding to conversation history
-            if response_text:
-                # Add response to conversation history
-                call_context.conversation_history.append({
-                    "role": "assistant",
-                    "content": response_text,
-                    "timestamp": datetime.now(AST),
-                    "language": call_context.language.value
-                })
-            else:
-                # Issue 158: Provide default response if response_text is None
-                self.logger.warning(f"No response text generated for call {call_context.call_id}, using default response")
-                default_response = "I'm sorry, I didn't understand that. Could you please repeat?"
-                call_context.conversation_history.append({
-                    "role": "assistant",
-                    "content": default_response,
-                    "timestamp": datetime.now(AST),
-                    "language": call_context.language.value
-                })
-                response_text = default_response
+            # Ensure response_text is not None
+            if not response_text:
+                response_text = "I'm sorry, I didn't understand that. Could you please repeat?"
+            
+            # Add response to conversation history
+            call_context.conversation_history.append({
+                "role": "assistant",
+                "content": response_text,
+                "timestamp": datetime.now(AST),
+                "language": call_context.language.value,
+                "intent": intent_result.intent.value if hasattr(intent_result, 'intent') and hasattr(intent_result.intent, 'value') else str(intent_result.intent) if hasattr(intent_result, 'intent') else None,
+                "confidence": intent_result.confidence if hasattr(intent_result, 'confidence') else 0.0
+            })
             
             # Update call state
             call_context.state = CallState.SPEAKING
             call_context.last_activity = datetime.now(AST)
             
-            # Synthesize and play response (only if response_text is set)
-            if response_text:
-                await self._synthesize_response(call_context, response_text)
+            # Synthesize and play response
+            await self._synthesize_response(call_context, response_text)
             
             # Update metrics (with lock)
             async with self._calls_lock:
                 if call_context.call_id not in self.call_metrics:
-                    self.logger.warning(f"No metrics found for call {call_context.call_id}, creating default")
                     self.call_metrics[call_context.call_id] = CallMetrics(
                         call_id=call_context.call_id,
                         start_time=call_context.start_time or datetime.now(AST)
                     )
-                call_metrics = self.call_metrics[call_context.call_id]
-                call_metrics.tts_processing_time += time.time() - start_time
-                call_metrics.successful_interactions += 1
             
             # Update state to listening
             call_context.state = CallState.LISTENING
-            
-            # Trigger callbacks (only if response_text is set)
-            if response_text:
-                await self._trigger_callbacks("response_generated", call_context, response_text)
             
         except Exception as e:
             self.logger.error(f"Failed to generate response for call {call_context.call_id}: {e}")
@@ -909,23 +1154,12 @@ class CallOrchestrator:
     
     async def _synthesize_response(self, call_context: CallContext, response_text: str):
         """Synthesize and play response using TTS with retry logic."""
-        MAX_RETRIES = 3
+        MAX_RETRIES = 2
         
         try:
-            # Issue 87, 175: Check TTS service availability before and during synthesis
-            if not self.tts_service:
+            # Check TTS service availability
+            if not self.tts_service or not hasattr(self.tts_service, 'synthesize_speech'):
                 self.logger.error(f"TTS service not available for call {call_context.call_id}")
-                # Fallback to TextSource
-                await self._play_text_source_fallback(call_context, response_text)
-                return
-            
-            # Issue 175: Re-check TTS service availability before synthesis
-            # Service might become unavailable between the initial check and synthesis
-            try:
-                if not hasattr(self.tts_service, 'synthesize_speech'):
-                    raise AttributeError("TTS service missing synthesize_speech method")
-            except Exception as availability_error:
-                self.logger.error(f"TTS service became unavailable: {availability_error}")
                 await self._play_text_source_fallback(call_context, response_text)
                 return
             
@@ -937,12 +1171,15 @@ class CallOrchestrator:
             )
             
             if not synthesis_result.success:
-                self.logger.error(f"TTS synthesis failed for call {call_context.call_id}: {synthesis_result.error_message}")
-                # Issue 36: Fallback to TextSource when TTS fails
+                self.logger.error(
+                    f"TTS synthesis failed for call {call_context.call_id}: {synthesis_result.error_message}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    extra_data={"call_id": call_context.call_id, "error": synthesis_result.error_message}
+                )
                 await self._play_text_source_fallback(call_context, response_text)
                 return
             
-            # Try multiple times with retry logic
+            # Try playback with retry logic (max 2 attempts)
             for attempt in range(MAX_RETRIES):
                 try:
                     # Try WebSocket audio streaming first
@@ -952,53 +1189,49 @@ class CallOrchestrator:
                             synthesis_result.audio_data
                         )
                         if success:
-                            self.logger.info(f"TTS sent via WebSocket (attempt {attempt + 1})")
                             return
                     
                     # Fallback: Use ACS Play API
+                    from services.azure_communication_service import get_azure_communication_service
                     acs_service = get_azure_communication_service()
-                    async with acs_service._calls_lock:
-                        call_state = acs_service.active_calls.get(call_context.call_id)
+                    acs_call_id = await acs_service._get_acs_call_id(call_context.call_id)
                     
-                    if call_state and call_state.acs_call_id:
+                    if acs_call_id:
                         success = await acs_service.play_audio_to_call(
-                            call_state.acs_call_id,
+                            acs_call_id,
                             synthesis_result.audio_data
                         )
                         if success:
-                            self.logger.info(f"TTS sent via ACS Play API (attempt {attempt + 1})")
                             return
                     
-                    # Exponential backoff
+                    # Wait before retry
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(1)
                     
                 except Exception as e:
                     self.logger.error(f"TTS playback attempt {attempt + 1} failed: {e}")
                     if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(2 ** attempt)
+                        await asyncio.sleep(1)
             
-            # All retries exhausted
+            # All retries exhausted - fallback to TextSource
             self.logger.error(f"Failed to play TTS audio after {MAX_RETRIES} attempts")
-            # Fallback to TextSource
             await self._play_text_source_fallback(call_context, response_text)
                 
         except Exception as e:
             self.logger.error(f"Failed to synthesize response for call {call_context.call_id}: {e}", exc_info=True)
-            # Fallback to TextSource when TTS fails
             await self._play_text_source_fallback(call_context, response_text)
     
     async def _play_text_source_fallback(self, call_context: CallContext, text: str):
         """Fallback to ACS TextSource when TTS synthesis fails."""
         try:
+            from services.azure_communication_service import get_azure_communication_service
             acs_service = get_azure_communication_service()
-            async with acs_service._calls_lock:
-                call_state = acs_service.active_calls.get(call_context.call_id)
+            acs_call_id = await acs_service._get_acs_call_id(call_context.call_id)
             
-            if call_state and call_state.acs_call_id:
+            if acs_call_id:
                 # Use ACS TextSource for immediate playback
                 success = await acs_service.play_scripted_text(
-                    call_state.acs_call_id, 
+                    acs_call_id, 
                     text, 
                     call_context.language.value
                 )
@@ -1014,134 +1247,18 @@ class CallOrchestrator:
             self.logger.error(f"TextSource fallback failed for call {call_context.call_id}: {e}")
             await self._handle_call_error(call_context.call_id, e)
     
-    async def _play_response(self, call_id: str, text: str, is_scripted: bool = False):
-        """
-        Play response - automatically uses TextSource or WebSocket based on is_scripted flag.
-        
-        Args:
-            call_id: Call session ID
-            text: Response text to play
-            is_scripted: True for scripted responses (TextSource), False for AI responses (WebSocket)
-        """
-        try:
-            async with self._calls_lock:
-                call_context = self.active_calls.get(call_id)
-                if not call_context:
-                    self.logger.error(f"Call context not found for {call_id}")
-                    return
-            
-            acs_service = get_azure_communication_service()
-            async with acs_service._calls_lock:
-                call_state = acs_service.active_calls.get(call_id)
-            
-            if not call_state or not call_state.acs_call_id:
-                self.logger.error(f"No ACS call connection for {call_id}")
-                return
-            
-            if is_scripted:
-                # Fast, reliable TextSource (no tokens, no TTS processing)
-                self.logger.info(f"Playing scripted response via TextSource for call {call_id}")
-                
-                # Use ACS TextSource for immediate playback
-                success = await acs_service.play_scripted_text(
-                    call_state.acs_call_id, 
-                    text, 
-                    call_context.language.value
-                )
-                
-                if success:
-                    self.logger.debug(f"Scripted response played successfully for call {call_id}")
-                else:
-                    self.logger.error(f"Failed to play scripted response for call {call_id}")
-                    
-            else:
-                # High-quality Azure Speech SDK (uses tokens, better quality)
-                self.logger.info(f"Playing AI response via WebSocket for call {call_id}")
-                
-                # Synthesize speech using TTS service
-                synthesis_result = await self.tts_service.synthesize_speech(
-                    text=text,
-                    language=call_context.language.value,
-                    call_id=call_id
-                )
-                
-                if not synthesis_result.success:
-                    self.logger.error(f"TTS synthesis failed for call {call_id}: {synthesis_result.error_message}")
-                    # Fallback to TextSource
-                    await acs_service.play_scripted_text(
-                        call_state.acs_call_id, 
-                        text, 
-                        call_context.language.value
-                    )
-                    return
-                
-                # Try WebSocket audio streaming first
-                if call_context.audio_stream_handler:
-                    success = await call_context.audio_stream_handler.send_tts_audio(
-                        call_id, 
-                        synthesis_result.audio_data
-                    )
-                    if success:
-                        self.logger.debug(f"AI response sent via WebSocket for call {call_id}")
-                        return
-                
-                # Fallback: Use ACS Play API
-                success = await acs_service.play_audio_to_call(
-                    call_state.acs_call_id,
-                    synthesis_result.audio_data
-                )
-                
-                if success:
-                    self.logger.info(f"AI response played via ACS Play API for call {call_id}")
-                else:
-                    self.logger.error(f"Failed to play AI response for call {call_id}")
-                    
-        except Exception as e:
-            self.logger.error(f"Failed to play response for call {call_id}: {e}", exc_info=True)
-    
     async def _handle_language_switch(self, call_context: CallContext, new_language: LanguageCode):
         """Handle language switch during the call."""
         try:
             old_language = call_context.language
             call_context.language = new_language
             
-            # Update bilingual manager
-            self.bilingual_manager.set_language_preference(
-                call_context.call_id,
-                new_language,
-                "user"
-            )
+            # Update language preference
+            self.set_language_preference(call_context.call_id, new_language)
             
-            # Issue 39, 88, 186: Update TTS, STT, and NLP service language configuration
-            if self.tts_service:
-                try:
-                    # Issue 186: Explicitly update TTS language configuration
-                    # Note: TTS service should handle language updates internally, but we verify it
-                    if hasattr(self.tts_service, 'update_language'):
-                        await self.tts_service.update_language(call_context.call_id, new_language.value)
-                    self.logger.info(f"TTS language updated to {new_language.value} for call {call_context.call_id}")
-                except Exception as tts_error:
-                    self.logger.warning(f"Failed to update TTS language: {tts_error}")
-            
-            if self.stt_service:
-                try:
-                    # Issue 88, 186: Explicitly update STT language configuration
-                    # Note: STT service should handle language updates internally, but we verify it
-                    if hasattr(self.stt_service, 'update_language'):
-                        await self.stt_service.update_language(call_context.call_id, new_language.value)
-                    self.logger.info(f"STT language updated to {new_language.value} for call {call_context.call_id}")
-                except Exception as stt_error:
-                    self.logger.warning(f"Failed to update STT language: {stt_error}")
-            
-            # Issue 186: Update NLP service language configuration
-            if hasattr(self, 'nlp_service') and self.nlp_service:
-                try:
-                    # Update NLP service language preference
-                    if hasattr(self.nlp_service, 'set_language'):
-                        self.nlp_service.set_language(new_language.value)
-                    self.logger.info(f"NLP language updated to {new_language.value} for call {call_context.call_id}")
-                except Exception as nlp_error:
-                    self.logger.warning(f"Failed to update NLP language: {nlp_error}")
+            # Note: TTS/STT services handle language automatically via AutoDetectSourceLanguageConfig
+            # Language is passed per-request to synthesize_speech() and is detected automatically in STT
+            # No explicit language update methods exist or are needed
             
             # Update metrics (with lock)
             async with self._calls_lock:
@@ -1151,14 +1268,6 @@ class CallOrchestrator:
                         call_id=call_context.call_id,
                         start_time=call_context.start_time or datetime.now(AST)
                     )
-                call_metrics = self.call_metrics[call_context.call_id]
-                call_metrics.language_switches += 1
-            
-            # Trigger callbacks
-            await self._trigger_callbacks("language_switched", call_context, {
-                "old_language": old_language.value,
-                "new_language": new_language.value
-            })
             
             self.logger.info(
                 f"Language switched for call {call_context.call_id}",
@@ -1217,9 +1326,6 @@ class CallOrchestrator:
             
             # Update call state
             call_context.state = CallState.ERROR
-            
-            # Trigger callbacks
-            await self._trigger_callbacks("error_occurred", call_context, error)
             
             # Try to recover
             await self._recover_from_error(call_context)
@@ -1337,54 +1443,197 @@ class CallOrchestrator:
                 )
                 self.call_metrics[call_id] = call_metrics
             
-            # Cancel timeout monitoring task
+            # Issue 4.3: Cancel timeout monitoring task with proper state check
             timeout_task = call_context.metadata.get('timeout_task')
-            if timeout_task and not timeout_task.done():
-                timeout_task.cancel()
-                try:
-                    await timeout_task
-                except asyncio.CancelledError:
-                    pass
+            if timeout_task:
+                # Check task state before cancelling
+                if not timeout_task.done():
+                    timeout_task.cancel()
+                    try:
+                        await timeout_task
+                    except asyncio.CancelledError:
+                        # Task was successfully cancelled
+                        self.logger.debug(f"Timeout task cancelled for call {call_id}")
+                    except Exception as cancel_error:
+                        self.logger.warning(
+                            f"Error cancelling timeout task for call {call_id}: {cancel_error}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            exception=cancel_error,
+                            extra_data={"call_id": call_id}
+                        )
+                else:
+                    # Task already done or cancelled
+                    self.logger.debug(f"Timeout task already done for call {call_id}")
             
             # Update call state
             call_context.state = CallState.ENDING
             
-            # Issue 47, 100: Clean up all resources (STT, TTS, audio streams)
-            # Stop STT recognition
+            # Hang up call via ACS API (before cleanup)
+            acs_call_id = call_context.metadata.get('acs_call_id')
+            if acs_call_id:
+                try:
+                    from services.azure_communication_service import get_azure_communication_service
+                    acs_service = get_azure_communication_service()
+                    success = await acs_service.hangup_call(acs_call_id)
+                    if not success:
+                        self.logger.warning(
+                            f"ACS hangup failed for call {call_id}",
+                            LogCategory.CALL_ORCHESTRATION,
+                            extra_data={"call_id": call_id, "acs_call_id": acs_call_id}
+                        )
+                except Exception as acs_error:
+                    self.logger.warning(
+                        f"Failed to hangup ACS call {acs_call_id}: {acs_error}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        exception=acs_error,
+                        extra_data={"call_id": call_id, "acs_call_id": acs_call_id}
+                    )
+            
+            # Update database call record
+            end_time = datetime.now(AST)
+            try:
+                from services.database import get_async_db_session
+                from sqlalchemy import select
+                from models.models import Call
+                async with get_async_db_session() as db:
+                    call_result = await db.execute(
+                        select(Call).where(Call.call_id == call_id).with_for_update()
+                    )
+                    call_record = call_result.scalar_one_or_none()
+                    if call_record:
+                        call_record.status = "completed"
+                        call_record.ended_at = end_time
+                        try:
+                            await db.commit()
+                        except Exception as commit_error:
+                            await db.rollback()
+                            self.logger.error(f"Failed to commit call record update: {commit_error}")
+                    else:
+                        self.logger.warning(f"Call record not found for update: {call_id}")
+            except Exception as db_error:
+                self.logger.error(
+                    f"Failed to update call record for {call_id}: {db_error}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    exception=db_error
+                )
+            
+            # Decrement clinic capacity and process queue
+            if call_context.clinic_id:
+                try:
+                    from services.admission_controller import get_admission_controller
+                    admission_controller = get_admission_controller()
+                    # Remove from queue if queued (in case caller hung up before admission)
+                    await admission_controller.remove_from_queue(call_id)
+                    # Release admission (this will process the next queued call)
+                    await admission_controller.release_admission(call_context.clinic_id, call_id=call_id)
+                except Exception as capacity_error:
+                    self.logger.error(
+                        f"Failed to release admission for clinic {call_context.clinic_id}: {capacity_error}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        exception=capacity_error
+                    )
+            
+            # Note: Provider capacity release removed - capacity is never updated, so releasing does nothing
+            # If provider capacity management is needed in the future, add it to provider_management.py with proper database persistence
+            
+            # Issue 4.1: Comprehensive resource cleanup with error tracking
+            cleanup_errors = []
+            cleanup_tasks = []
+            
+            # 1. Cancel timeout task
+            timeout_task = call_context.metadata.get('timeout_task')
+            if timeout_task and not timeout_task.done():
+                async def cancel_timeout_task():
+                    try:
+                        timeout_task.cancel()
+                        try:
+                            await timeout_task
+                        except asyncio.CancelledError:
+                            pass
+                    except Exception as e:
+                        raise Exception(f"Failed to cancel timeout task: {e}")
+                cleanup_tasks.append(('timeout_task', cancel_timeout_task()))
+            
+            # 2. Stop STT recognition
             if self.stt_service:
-                try:
-                    await self.stt_service.stop_recognition(call_id)
-                except Exception as stt_error:
-                    self.logger.warning(f"Failed to stop STT recognition: {stt_error}")
+                async def stop_stt():
+                    try:
+                        await self.stt_service.stop_continuous_recognition(call_id)
+                    except Exception as e:
+                        raise Exception(f"Failed to stop STT recognition: {e}")
+                cleanup_tasks.append(('stt', stop_stt()))
             
-            # Stop TTS synthesis
+            # 3. Stop TTS synthesis
             if self.tts_service:
-                try:
-                    # TTS service should clean up sessions automatically
-                    self.logger.debug(f"TTS cleanup for call {call_id}")
-                except Exception as tts_error:
-                    self.logger.warning(f"Failed to cleanup TTS: {tts_error}")
+                async def cleanup_tts():
+                    try:
+                        # TTS service should clean up sessions automatically
+                        self.logger.debug(f"TTS cleanup for call {call_id}")
+                    except Exception as e:
+                        raise Exception(f"Failed to cleanup TTS: {e}")
+                cleanup_tasks.append(('tts', cleanup_tts()))
             
-            # Stop audio stream
+            # 4. Disconnect audio stream
             if call_context.audio_stream_handler:
-                # Get connection ID from call context metadata
                 connection_id = call_context.metadata.get('connection_id')
                 if connection_id:
-                    try:
-                        await call_context.audio_stream_handler.disconnect_audio_stream(connection_id)
-                    except Exception as audio_error:
-                        self.logger.warning(f"Failed to disconnect audio stream: {audio_error}")
+                    async def disconnect_audio():
+                        try:
+                            await call_context.audio_stream_handler.disconnect_audio_stream(connection_id)
+                        except Exception as e:
+                            raise Exception(f"Failed to disconnect audio stream: {e}")
+                    cleanup_tasks.append(('audio_stream', disconnect_audio()))
+            
+            # 5. Release admission (already done above, but keep for cleanup tracking)
+            # Note: Admission is already released above, this is just for cleanup tracking
+            
+            # 6. Remove from call store
+            async def remove_from_store():
+                try:
+                    from services.call_flow_service import remove_call
+                    await remove_call(call_id)
+                except Exception as e:
+                    raise Exception(f"Failed to remove call from call store: {e}")
+            cleanup_tasks.append(('call_store', remove_from_store()))
+            
+            # 7. End NLP conversation
+            async def end_nlp_conversation():
+                try:
+                    await self.nlp_service.end_conversation(call_id)
+                except Exception as e:
+                    raise Exception(f"Failed to end NLP conversation: {e}")
+            cleanup_tasks.append(('nlp', end_nlp_conversation()))
+            
+            # Execute all cleanup tasks
+            for task_name, task in cleanup_tasks:
+                try:
+                    await task
+                except Exception as e:
+                    cleanup_errors.append((task_name, str(e)))
+                    self.logger.warning(
+                        f"Cleanup task {task_name} failed for call {call_id}: {e}",
+                        LogCategory.CALL_ORCHESTRATION,
+                        exception=e,
+                        extra_data={"call_id": call_id, "task_name": task_name}
+                    )
+            
+            # Verify cleanup
+            if cleanup_errors:
+                self.logger.error(
+                    f"Some cleanup tasks failed for call {call_id}: {cleanup_errors}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    extra_data={"call_id": call_id, "cleanup_errors": cleanup_errors}
+                )
+            else:
+                self.logger.info(
+                    f"All cleanup tasks completed successfully for call {call_id}",
+                    LogCategory.CALL_ORCHESTRATION,
+                    extra_data={"call_id": call_id}
+                )
             
             # Update metrics
             call_metrics.end_time = datetime.now(AST)
             call_metrics.total_duration_seconds = (call_metrics.end_time - call_metrics.start_time).total_seconds()
-            
-            if call_metrics.total_interactions > 0:
-                call_metrics.average_response_time = (
-                    call_metrics.stt_processing_time + 
-                    call_metrics.nlp_processing_time + 
-                    call_metrics.tts_processing_time
-                ) / call_metrics.total_interactions
             
             # Update statistics
             async with self._stats_lock:
@@ -1415,19 +1664,8 @@ class CallOrchestrator:
             async with self._stats_lock:
                 self.orchestration_stats["average_call_duration"] = avg_duration
             
-            # Trigger callbacks
-            await self._trigger_callbacks("call_ended", call_context, {"reason": reason})
-            
-            # Clean up AI conversation history immediately when call finishes
-            if hasattr(self, 'azure_openai_service'):
-                await self.azure_openai_service.end_conversation(call_id)
-            
-            # Issue 151: Remove call from CallStore to prevent memory leaks
-            try:
-                from services.call_store import remove_call
-                await remove_call(call_id)
-            except Exception as store_error:
-                self.logger.warning(f"Failed to remove call from call store: {store_error}")
+            # Note: NLP service end_conversation() already called in cleanup_tasks above
+            # azure_openai_service doesn't exist - NLP service handles OpenAI internally
             
             self.logger.info(
                 f"Call ended: {call_id}",
@@ -1445,88 +1683,91 @@ class CallOrchestrator:
         except Exception as e:
             self.logger.error(f"Failed to end call {call_id}: {e}")
     
-    def register_callback(self, event: str, callback: Callable):
-        """Register a callback for orchestration events."""
-        if event in self.callbacks:
-            self.callbacks[event].append(callback)
-        else:
-            self.callbacks[event] = [callback]
-    
-    def unregister_callback(self, event: str, callback: Callable):
-        """Unregister a callback."""
-        if event in self.callbacks and callback in self.callbacks[event]:
-            self.callbacks[event].remove(callback)
-    
-    async def _trigger_callbacks(self, event: str, *args, **kwargs):
-        """Trigger callbacks for an event."""
-        if event in self.callbacks:
-            for callback in self.callbacks[event]:
-                try:
-                    if asyncio.iscoroutinefunction(callback):
-                        await callback(*args, **kwargs)
-                    else:
-                        callback(*args, **kwargs)
-                except Exception as e:
-                    self.logger.error(f"Callback error for event {event}: {e}")
-    
     async def get_call_context(self, call_id: str) -> Optional[CallContext]:
         """Get call context by ID."""
         async with self._calls_lock:
             return self.active_calls.get(call_id)
     
-    async def get_call_metrics(self, call_id: str) -> Optional[CallMetrics]:
-        """Get call metrics by ID."""
-        async with self._calls_lock:
-            return self.call_metrics.get(call_id)
-    
-    async def get_orchestration_statistics(self) -> Dict[str, Any]:
-        """Get orchestration statistics."""
-        async with self._calls_lock:
-            active_calls_copy = dict(self.active_calls)
-        async with self._stats_lock:
-            orchestration_stats_copy = self.orchestration_stats.copy()
+    async def update_call_metadata(self, call_id: str, key: str, value: Any) -> bool:
+        """
+        Atomically update call context metadata with lock protection.
         
-        return {
-            "orchestration_stats": orchestration_stats_copy,
-            "active_calls": len(active_calls_copy),
-            "call_states": {
-                call_id: context.state.value 
-                for call_id, context in active_calls_copy.items()
-            },
-            "service_health": {
-                "stt_service": True,  # TODO: Add health checks
-                "tts_service": True,
-                "openai_service": True,
-                "hybrid_nlp": True
-            }
-        }
+        Args:
+            call_id: ID of the call
+            key: Metadata key to update
+            value: Value to set
+            
+        Returns:
+            True if metadata was updated, False if call context not found
+        """
+        async with self._calls_lock:
+            call_context = self.active_calls.get(call_id)
+            if call_context:
+                # Initialize metadata dicts if needed
+                if call_context.metadata is None:
+                    call_context.metadata = {}
+                if call_context.call_metadata is None:
+                    call_context.call_metadata = {}
+                # Update both for compatibility
+                call_context.metadata[key] = value
+                call_context.call_metadata[key] = value
+                return True
+            return False
     
-    async def cleanup_expired_calls(self):
-        """Clean up expired call data."""
+    async def get_call_metadata(self, call_id: str) -> Dict[str, Any]:
+        """
+        Atomically get call context metadata with lock protection.
+        
+        Args:
+            call_id: ID of the call
+            
+        Returns:
+            Merged metadata dictionary (call_metadata + metadata, with metadata taking precedence)
+        """
+        async with self._calls_lock:
+            call_context = self.active_calls.get(call_id)
+            if call_context:
+                metadata = call_context.metadata or {}
+                call_metadata = call_context.call_metadata or {}
+                # Merge both, with metadata taking precedence
+                return {**call_metadata, **metadata}
+            return {}
+    
+    
+    # Bilingual manager methods (moved from bilingual_manager)
+    def set_language_preference(self, call_id: str, language: LanguageCode) -> bool:
+        """
+        Set the language preference for a conversation.
+        
+        Args:
+            call_id: ID of the call
+            language: Preferred language
+            
+        Returns:
+            True if preference was set successfully
+        """
         try:
-            current_time = datetime.now(AST)
-            expired_calls = []
+            self.language_preferences[call_id] = language
             
-            # Issue 41: Create a copy of call_metrics before iterating to avoid RuntimeError
-            async with self._calls_lock:
-                call_metrics_copy = dict(self.call_metrics)
+            self.logger.info(
+                f"Language preference set for call {call_id}",
+                LogCategory.LANGUAGE_DETECTION,
+                extra_data={
+                    "call_id": call_id,
+                    "language": language.value
+                }
+            )
             
-            # Find expired calls (older than 1 hour)
-            for call_id, metrics in call_metrics_copy.items():
-                if metrics.end_time and (current_time - metrics.end_time).total_seconds() > 3600:
-                    expired_calls.append(call_id)
+            return True
             
-            # Remove expired calls (with lock)
-            if expired_calls:
-                async with self._calls_lock:
-                    for call_id in expired_calls:
-                        if call_id in self.call_metrics:
-                            del self.call_metrics[call_id]
-                self.logger.info(f"Cleaned up {len(expired_calls)} expired calls")
-                
         except Exception as e:
-            self.logger.error(f"Failed to cleanup expired calls: {e}")
-
+            self.logger.error(
+                f"Failed to set language preference for call {call_id}: {e}",
+                LogCategory.LANGUAGE_DETECTION,
+                exception=e
+            )
+            return False
+    
 
 # Global service instance
 _call_orchestrator: Optional[CallOrchestrator] = None

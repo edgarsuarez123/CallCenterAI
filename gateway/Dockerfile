@@ -17,17 +17,17 @@ WORKDIR /app
 ENV PYTHONPATH=/app
 
 # Install Python dependencies from requirements.txt
-COPY requirements.txt /app/
+COPY gateway/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code
-COPY . /app/
+COPY gateway/ /app/
 
 # Create logs directory (file logging disabled by default)
 # RUN mkdir -p /app/logs && touch /app/logs/callcenter_ai.log
 
-# Make startup script executable
-RUN chmod +x start.sh
+# Make startup scripts executable
+RUN chmod +x /app/start.sh && chmod +x /app/debug_startup.sh
 
 # Install pg_isready for database health checks
 RUN apt-get update && apt-get install -y postgresql-client && rm -rf /var/lib/apt/lists/*

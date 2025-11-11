@@ -1,0 +1,117 @@
+# Azure Container Apps Deployment Commands
+# This file contains commands to deploy the CallCenter AI gateway to Azure Container Apps
+# Container Apps provides built-in HTTPS support with automatic certificates
+
+# Step 1: Create Container Apps environment
+az containerapp env create `
+  --name callcenterai-env `
+  --resource-group CallCenterAi-Test `
+  --location centralus `
+  --logs-workspace-id $(az monitor log-analytics workspace show --resource-group CallCenterAi-Test --workspace-name callcenterai-logs --query customerId -o tsv) `
+  --logs-workspace-key $(az monitor log-analytics workspace get-shared-keys --resource-group CallCenterAi-Test --workspace-name callcenterai-logs --query primarySharedKey -o tsv)
+
+# Step 2: Update existing Container App (or create if it doesn't exist)
+# Note: Container App 'callcenterai-app' already exists, so we'll update it
+az containerapp update `
+  --name callcenterai-app `
+  --resource-group CallCenterAi-Test `
+  --image callcenteracr.azurecr.io/callcenter-gateway:111112 `
+  --registry-server callcenteracr.azurecr.io `
+  --registry-username $(az acr credential show --name callcenteracr --query username -o tsv) `
+  --registry-password $(az acr credential show --name callcenteracr --query passwords[0].value -o tsv) `
+  --target-port 8080 `
+  --ingress external `
+  --allow-insecure false `
+  --cpu 2.0 `
+  --memory 4.0Gi `
+  --min-replicas 1 `
+  --max-replicas 10 `
+  --env-vars `
+    APP_ENVIRONMENT=production `
+    APP_DEBUG=false `
+    APP_HOST=0.0.0.0 `
+    APP_PORT=8080 `
+    APP_WORKERS=1 `
+    DB_HOST=callcenterai-db.postgres.database.azure.com `
+    DB_PORT=5432 `
+    DB_NAME=postgres `
+    DB_USER=callcenteradmin `
+    CLINIC_ID=clinic-001 `
+    CLINIC_NAME="St Peters Medical Center" `
+    CLINIC_PHONE=+1-555-123-4567 `
+    CLINIC_SUBSCRIPTION_TIER=professional `
+    CLINIC_TIMEZONE=America/New_York `
+    CLINIC_DEFAULT_LANGUAGE=en `
+    CLINIC_SUPPORTED_LANGUAGES=en,es `
+    CLINIC_EHR_SYSTEM=google_calendar `
+    CLINIC_MAX_CONCURRENT_CALLS=10 `
+    CLINIC_QUEUE_TIMEOUT=45 `
+    CLINIC_BUSINESS_HOURS="Monday-Friday 8AM-5PM, Saturday 9AM-1PM" `
+    CLINIC_ADDRESS="123 Main Street, New York, NY 10001" `
+    CLINIC_EMAIL=info@stpetersmedical.com `
+    CLINIC_SERVICES="General Medicine, Cardiology, Pediatrics, Emergency Care" `
+    CLINIC_INSURANCE_PLANS="Blue Cross Blue Shield, Aetna, Cigna, Medicare, Medicaid" `
+    CLINIC_PHARMACY_PHONE=+1-555-987-6543 `
+    CLINIC_AI_PROMPT_EN="You are a helpful healthcare assistant for appointment scheduling. When registering new patients, collect: full name, phone number, email, date of birth, and complete address (street, city, state, zip code). Always confirm the address for accuracy. Be professional, empathetic, and clear." `
+    CLINIC_AI_PROMPT_ES="Eres un asistente de salud útil para programar citas. Al registrar nuevos pacientes, recopila: nombre completo, número de teléfono, correo electrónico, fecha de nacimiento y dirección completa (calle, ciudad, estado, código postal). Siempre confirma la dirección para mayor precisión. Sé profesional, empático y claro." `
+    SECURITY_CORS_ORIGINS=["https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io"] `
+    SECURITY_CORS_METHODS=["GET","POST","PUT","DELETE"] `
+    SECURITY_CORS_HEADERS=["*"] `
+    GOOGLE_CLIENT_ID=182784858615-03lp1s2iq84989j22v4mabnaomp8uco8.apps.googleusercontent.com `
+    GOOGLE_REDIRECT_URI=https://your-domain.com/auth/callback `
+    ACS_PHONE_NUMBER=+18449197564 `
+    ACS_CALLBACK_URL=https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io/api/v1/acs/webhooks/events `
+    AZURE_SPEECH_REGION=eastus `
+    AZURE_SPEECH_STT_LANGUAGE_PRIMARY=en-US `
+    AZURE_SPEECH_STT_LANGUAGE_SECONDARY=es-US `
+    AZURE_SPEECH_TTS_VOICE_EN=en-US-AriaNeural `
+    AZURE_SPEECH_TTS_VOICE_ES=es-US-PalomaNeural `
+    AZURE_OPENAI_API_VERSION=2024-07-18 `
+    AZURE_OPENAI_DEPLOYMENT_NAME=testmodel `
+    AZURE_OPENAI_SYSTEM_PROMPT_EN="You are a helpful healthcare assistant for appointment scheduling. When registering new patients, collect: full name, phone number, email, date of birth, and complete address (street, city, state, zip code). Always confirm the address for accuracy. Be professional, empathetic, and clear." `
+    AZURE_OPENAI_SYSTEM_PROMPT_ES="Eres un asistente de salud útil para programar citas. Al registrar nuevos pacientes, recopila: nombre completo, número de teléfono, correo electrónico, fecha de nacimiento y dirección completa (calle, ciudad, estado, código postal). Siempre confirma la dirección para mayor precisión. Sé profesional, empático y claro." `
+  --secrets `
+    DB_PASSWORD=literal:REDACTED_DB_PASSWORD `
+    SECURITY_ENCRYPTION_KEY=literal:REDACTED_SECURITY_ENCRYPTION_KEY `
+    SECURITY_JWT_SECRET=literal:REDACTED_SECURITY_JWT_SECRET `
+    GOOGLE_CLIENT_SECRET=literal:REDACTED_GOOGLE_CLIENT_SECRET `
+    ACS_CONNECTION_STRING=endpoint=https://callcenterai-acs.unitedstates.communication.azure.com/;accesskey=literal:REDACTED_ACS_ACCESS_KEY `
+    ACS_WEBHOOK_SECRET=literal:REDACTED_ACS_WEBHOOK_SECRET `
+    AZURE_SPEECH_KEY=literal:REDACTED_AZURE_SPEECH_KEY `
+    AZURE_OPENAI_ENDPOINT=https://edgar-mgu0qkq5-eastus2.cognitiveservices.azure.com `
+    AZURE_OPENAI_API_KEY=literal:REDACTED_AZURE_OPENAI_API_KEY `
+    CLINIC_TOKEN_HMAC_KEY_BASE64=literal:REDACTED_CLINIC_TOKEN_HMAC_KEY `
+    AES_GCM_KEY_BASE64=literal:REDACTED_AES_GCM_KEY `
+  --secret-env-vars `
+    DB_PASSWORD=DB_PASSWORD `
+    SECURITY_ENCRYPTION_KEY=SECURITY_ENCRYPTION_KEY `
+    SECURITY_JWT_SECRET=SECURITY_JWT_SECRET `
+    GOOGLE_CLIENT_SECRET=GOOGLE_CLIENT_SECRET `
+    ACS_CONNECTION_STRING=ACS_CONNECTION_STRING `
+    ACS_WEBHOOK_SECRET=ACS_WEBHOOK_SECRET `
+    AZURE_SPEECH_KEY=AZURE_SPEECH_KEY `
+    AZURE_OPENAI_ENDPOINT=AZURE_OPENAI_ENDPOINT `
+    AZURE_OPENAI_API_KEY=AZURE_OPENAI_API_KEY `
+    CLINIC_TOKEN_HMAC_KEY_BASE64=CLINIC_TOKEN_HMAC_KEY_BASE64 `
+    AES_GCM_KEY_BASE64=AES_GCM_KEY_BASE64
+
+# Step 3: Get HTTPS endpoint (FQDN) - Already configured
+# Current FQDN: https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io
+az containerapp show `
+  --name callcenterai-app `
+  --resource-group CallCenterAi-Test `
+  --query properties.configuration.ingress.fqdn `
+  -o tsv
+
+# Step 4: Verify ACS_CALLBACK_URL is set correctly
+az containerapp show `
+  --name callcenterai-app `
+  --resource-group CallCenterAi-Test `
+  --query "properties.template.containers[0].env[?name=='ACS_CALLBACK_URL']" `
+  -o json
+
+# Note: Container Apps provides automatic HTTPS with certificates managed by Azure
+# Current FQDN: https://callcenterai-app.lemonwater-53bbf57b.centralus.azurecontainerapps.io
+# This endpoint supports HTTPS by default, which is required for Event Grid subscriptions
+# The callback URL is already configured to use this HTTPS endpoint
+

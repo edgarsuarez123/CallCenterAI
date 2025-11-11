@@ -3,36 +3,37 @@ Clinic Management Service
 Handles all business logic for clinic operations including creation, updates, and configuration.
 """
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+import hashlib
 
 # Atlantic Standard Time (UTC-4)
 AST = timezone(timedelta(hours=-4))
-import uuid
 
-from models.models import Clinic, ClinicLicense, SystemConfig, AuditLog
+from models.models import Clinic, ClinicLicense, SystemConfig
 from models.schemas import (
-    ClinicCreateRequest, ClinicUpdateRequest, ClinicSearchRequest,
-    ClinicResponse, SystemConfigCreateRequest
+    ClinicCreateRequest, ClinicUpdateRequest, ClinicSearchRequest
 )
-from services.crypto import make_ulid_token, make_unique_audit_log_id
-from services.auth_context import get_request_context
+from services.crypto import make_ulid_token
+from services.audit_utils import log_audit_trail
 
 
 class ClinicManagementService:
     """Service for managing clinic operations and configuration."""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: AsyncSession):
         self.db = db
     
-    def create_clinic(self, clinic_data: ClinicCreateRequest) -> Clinic:
+    async def create_clinic(self, clinic_data: ClinicCreateRequest, clinic_id: Optional[str] = None) -> Clinic:
         """
         Create a new clinic with license and initial configuration.
         
         Args:
             clinic_data: Clinic creation request data
+            clinic_id: Optional clinic ID (if not provided, will be generated from phone number)
             
         Returns:
             Created clinic instance
@@ -42,8 +43,9 @@ class ClinicManagementService:
             IntegrityError: If clinic already exists
         """
         try:
-            # Generate unique clinic ID
-            clinic_id = self._generate_clinic_id(clinic_data.phone_number)
+            # Use provided clinic_id or generate unique clinic ID
+            if not clinic_id:
+                clinic_id = self._generate_clinic_id(clinic_data.phone_number)
             
             # Create clinic record
             clinic = Clinic(
@@ -63,10 +65,12 @@ class ClinicManagementService:
             )
             
             self.db.add(clinic)
-            self.db.flush()  # Get the clinic_id for license creation
+            await self.db.flush()  # Get the clinic_id for license creation
             
             # Create license
             license_data = self._get_license_config(clinic_data.subscription_tier.value)
+            # Use same 'now' for all billing cycle calculations to avoid race conditions
+            now = datetime.now(AST)
             license = ClinicLicense(
                 license_id=f"LICENSE_{clinic_id}",
                 clinic_id=clinic_id,
@@ -77,43 +81,84 @@ class ClinicManagementService:
                 monthly_fee_usd=license_data['monthly_fee_usd'],
                 license_status="active",
                 current_month_calls=0,
-                billing_cycle_start=self._get_billing_cycle_start(),
-                billing_cycle_end=self._get_billing_cycle_end(),
-                next_billing_date=self._get_next_billing_date()
+                billing_cycle_start=self._get_billing_cycle_start(now),
+                billing_cycle_end=self._get_billing_cycle_end(now),
+                next_billing_date=self._get_next_billing_date(now)
             )
             
             self.db.add(license)
             
             # Create initial system configurations
-            self._create_initial_configs(clinic_id, clinic_data)
+            await self._create_initial_configs(clinic_id, clinic_data)
             
             # Log the creation
-            self._log_audit("clinics", clinic_id, "CREATE", None, clinic_data.dict())
+            await self._log_audit("clinics", clinic_id, "CREATE", None, clinic_data.model_dump())
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit clinic creation: {str(commit_error)}")
             
             return clinic
             
         except IntegrityError as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Clinic with phone number {clinic_data.phone_number} already exists: {str(e)}")
         except ValueError:
             # Re-raise ValueError as-is
             raise
         except Exception as e:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to create clinic: {str(e)}")
     
-    def get_clinic(self, clinic_id: str) -> Optional[Clinic]:
+    async def get_clinic(self, clinic_id: str) -> Optional[Clinic]:
         """Get clinic by ID."""
-        return self.db.query(Clinic).filter_by(clinic_id=clinic_id).first()
+        result = await self.db.execute(select(Clinic).where(Clinic.clinic_id == clinic_id))
+        return result.scalar_one_or_none()
     
-    def update_clinic(self, clinic_id: str, updates: ClinicUpdateRequest) -> Optional[Clinic]:
+    async def get_clinic_by_phone(self, phone_number: str) -> Optional[str]:
+        """
+        Get clinic ID from phone number.
+        
+        Args:
+            phone_number: The called phone number
+            
+        Returns:
+            Clinic ID or None if not found
+        """
+        from services.structured_logging import get_logger, LogCategory
+        logger = get_logger("clinic_management")
+        
+        # Validate input
+        if not phone_number or not isinstance(phone_number, str) or not phone_number.strip():
+            logger.warning(f"Invalid phone number provided: {phone_number}", LogCategory.CLINIC_MANAGEMENT)
+            return None
+        
+        # Normalize phone number (remove spaces, dashes, parentheses)
+        normalized_phone = phone_number.strip().replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+        
+        # Query database (with error handling)
+        # Try both original and normalized phone number for matching
+        try:
+            clinic_result = await self.db.execute(select(Clinic).where(
+                (Clinic.phone_number == phone_number) | (Clinic.phone_number == normalized_phone),
+                Clinic.is_deleted == 'no'
+            ))
+            clinic = clinic_result.scalar_one_or_none()
+            
+            if clinic and clinic.clinic_id:
+                logger.info(f"Mapped phone {phone_number} to clinic {clinic.clinic_id}", LogCategory.CLINIC_MANAGEMENT)
+                return clinic.clinic_id
+        except Exception as e:
+            logger.error(f"Error querying clinic for phone {phone_number}: {e}", LogCategory.CLINIC_MANAGEMENT, exception=e)
+            return None
+        
+        logger.warning(f"No clinic found for phone {phone_number}", LogCategory.CLINIC_MANAGEMENT)
+        return None
+    
+    async def update_clinic(self, clinic_id: str, updates: ClinicUpdateRequest) -> Optional[Clinic]:
         """
         Update clinic information.
         
@@ -124,7 +169,7 @@ class ClinicManagementService:
         Returns:
             Updated clinic instance or None if not found
         """
-        clinic = self.get_clinic(clinic_id)
+        clinic = await self.get_clinic(clinic_id)
         if not clinic:
             return None
         
@@ -146,18 +191,18 @@ class ClinicManagementService:
         clinic.updated_at = datetime.now(AST)
         
         # Log the update
-        self._log_audit("clinics", clinic_id, "UPDATE", old_values, update_data)
+        await self._log_audit("clinics", clinic_id, "UPDATE", old_values, update_data)
         
         # Commit with error handling
         try:
-            self.db.commit()
+            await self.db.commit()
         except Exception as commit_error:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to commit clinic update: {str(commit_error)}")
         
         return clinic
     
-    def list_clinics(self, search: ClinicSearchRequest) -> List[Clinic]:
+    async def list_clinics(self, search: ClinicSearchRequest) -> List[Clinic]:
         """
         List clinics with optional filtering and pagination.
         
@@ -167,27 +212,28 @@ class ClinicManagementService:
         Returns:
             List of matching clinics
         """
-        query = self.db.query(Clinic).filter(Clinic.is_deleted == 'no')
+        stmt = select(Clinic).where(Clinic.is_deleted == 'no')
         
         # Apply filters
         if search.clinic_name:
-            query = query.filter(Clinic.clinic_name.ilike(f"%{search.clinic_name}%"))
+            stmt = stmt.where(Clinic.clinic_name.ilike(f"%{search.clinic_name}%"))
         
         if search.phone_number:
-            query = query.filter(Clinic.phone_number == search.phone_number)
+            stmt = stmt.where(Clinic.phone_number == search.phone_number)
         
         if search.subscription_tier:
-            query = query.filter(Clinic.subscription_tier == search.subscription_tier.value)
+            stmt = stmt.where(Clinic.subscription_tier == search.subscription_tier.value)
         
         if search.is_active:
-            query = query.filter(Clinic.is_active == search.is_active.value)
+            stmt = stmt.where(Clinic.is_active == search.is_active.value)
         
         # Apply pagination
-        query = query.offset(search.offset).limit(search.limit)
+        stmt = stmt.offset(search.offset).limit(search.limit)
         
-        return query.all()
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
     
-    def deactivate_clinic(self, clinic_id: str) -> bool:
+    async def deactivate_clinic(self, clinic_id: str) -> bool:
         """
         Deactivate a clinic (soft delete).
         
@@ -197,7 +243,7 @@ class ClinicManagementService:
         Returns:
             True if successful, False if clinic not found
         """
-        clinic = self.get_clinic(clinic_id)
+        clinic = await self.get_clinic(clinic_id)
         if not clinic:
             return False
         
@@ -206,22 +252,23 @@ class ClinicManagementService:
         clinic.updated_at = datetime.now(AST)
         
         # Log the deactivation
-        self._log_audit("clinics", clinic_id, "DEACTIVATE", old_values, {"is_active": "no"})
+        await self._log_audit("clinics", clinic_id, "DEACTIVATE", old_values, {"is_active": "no"})
         
         # Commit with error handling
         try:
-            self.db.commit()
+            await self.db.commit()
         except Exception as commit_error:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to commit clinic deactivation: {str(commit_error)}")
         
         return True
     
-    def get_clinic_license(self, clinic_id: str) -> Optional[ClinicLicense]:
+    async def get_clinic_license(self, clinic_id: str) -> Optional[ClinicLicense]:
         """Get clinic license information."""
-        return self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
+        result = await self.db.execute(select(ClinicLicense).where(ClinicLicense.clinic_id == clinic_id))
+        return result.scalar_one_or_none()
     
-    def update_clinic_license(self, clinic_id: str, tier: str) -> bool:
+    async def update_clinic_license(self, clinic_id: str, tier: str) -> bool:
         """
         Update clinic subscription tier and license.
         
@@ -234,10 +281,13 @@ class ClinicManagementService:
         """
         try:
             # Use row-level locking to prevent race conditions
-            from sqlalchemy.orm import with_for_update
+            clinic_stmt = select(Clinic).where(Clinic.clinic_id == clinic_id).with_for_update()
+            clinic_result = await self.db.execute(clinic_stmt)
+            clinic = clinic_result.scalar_one_or_none()
             
-            clinic = self.db.query(Clinic).filter_by(clinic_id=clinic_id).with_for_update().first()
-            license = self.db.query(ClinicLicense).filter_by(clinic_id=clinic_id).with_for_update().first()
+            license_stmt = select(ClinicLicense).where(ClinicLicense.clinic_id == clinic_id).with_for_update()
+            license_result = await self.db.execute(license_stmt)
+            license = license_result.scalar_one_or_none()
             
             if not clinic or not license:
                 return False
@@ -265,17 +315,17 @@ class ClinicManagementService:
             license.updated_at = datetime.now(AST)
             
             # Log the changes
-            self._log_audit("clinics", clinic_id, "UPDATE_TIER", 
+            await self._log_audit("clinics", clinic_id, "UPDATE_TIER", 
                            {"subscription_tier": old_clinic_tier}, 
                            {"subscription_tier": tier})
-            self._log_audit("clinic_licenses", license.license_id, "UPDATE", 
+            await self._log_audit("clinic_licenses", license.license_id, "UPDATE", 
                            old_license_values, license_data)
             
             # Commit with error handling
             try:
-                self.db.commit()
+                await self.db.commit()
             except Exception as commit_error:
-                self.db.rollback()
+                await self.db.rollback()
                 raise ValueError(f"Failed to commit license update: {str(commit_error)}")
             
             return True
@@ -283,20 +333,24 @@ class ClinicManagementService:
             # Re-raise ValueError as-is
             raise
         except Exception as e:
-            self.db.rollback()
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to update clinic license for {clinic_id}: {e}")
+            await self.db.rollback()
+            from services.structured_logging import get_logger, LogCategory
+            logger = get_logger("clinic_management")
+            logger.error(
+                f"Failed to update clinic license for {clinic_id}: {e}",
+                LogCategory.CLINIC_MANAGEMENT,
+                exception=e
+            )
             raise ValueError(f"Failed to update clinic license: {str(e)}")
     
-    def get_clinic_config(self, clinic_id: str, config_key: str) -> Optional[str]:
+    async def get_clinic_config(self, clinic_id: str, config_key: str) -> Optional[str]:
         """Get a specific configuration value for a clinic."""
-        config = self.db.query(SystemConfig).filter_by(
-            config_key=f"{config_key}_{clinic_id}"
-        ).first()
-        return config.config_value if config else None
+        full_key = f"{config_key}_{clinic_id}"
+        result = await self.db.execute(select(SystemConfig).where(SystemConfig.config_key == full_key))
+        config = result.scalar_one_or_none()
+        return config.config_value if config is not None else None
     
-    def set_clinic_config(self, clinic_id: str, config_key: str, config_value: str, description: str = None) -> bool:
+    async def set_clinic_config(self, clinic_id: str, config_key: str, config_value: str, description: str = None) -> bool:
         """
         Set a configuration value for a clinic.
         
@@ -312,7 +366,8 @@ class ClinicManagementService:
         full_config_key = f"{config_key}_{clinic_id}"
         
         # Check if config exists
-        existing_config = self.db.query(SystemConfig).filter_by(config_key=full_config_key).first()
+        result = await self.db.execute(select(SystemConfig).where(SystemConfig.config_key == full_config_key))
+        existing_config = result.scalar_one_or_none()
         
         if existing_config:
             # Update existing
@@ -321,7 +376,7 @@ class ClinicManagementService:
             existing_config.description = description or existing_config.description
             existing_config.updated_at = datetime.now(AST)
             
-            self._log_audit("system_config", existing_config.config_id, "UPDATE",
+            await self._log_audit("system_config", existing_config.config_id, "UPDATE",
                            {"config_value": old_value}, {"config_value": config_value})
         else:
             # Create new
@@ -333,7 +388,7 @@ class ClinicManagementService:
             )
             self.db.add(config)
             
-            self._log_audit("system_config", config.config_id, "CREATE", None, {
+            await self._log_audit("system_config", config.config_id, "CREATE", None, {
                 "config_key": config.config_key,
                 "config_value": config.config_value,
                 "description": config.description
@@ -341,9 +396,9 @@ class ClinicManagementService:
         
         # Commit with error handling
         try:
-            self.db.commit()
+            await self.db.commit()
         except Exception as commit_error:
-            self.db.rollback()
+            await self.db.rollback()
             raise ValueError(f"Failed to commit system config update: {str(commit_error)}")
         
         return True
@@ -351,37 +406,42 @@ class ClinicManagementService:
     def _generate_clinic_id(self, phone_number: str) -> str:
         """Generate unique clinic ID from phone number."""
         # Use a hash of the phone number to ensure uniqueness
-        import hashlib
         phone_hash = hashlib.md5(phone_number.encode()).hexdigest()[:8]
         unique_token = make_ulid_token('CLINIC')[:8]
         return f"CLINIC_{phone_hash}_{unique_token}"
     
     def _get_license_config(self, tier: str) -> Dict[str, Any]:
         """Get license configuration based on tier."""
-        configs = {
-            'basic': {
-                'tier': 'basic',
-                'max_calls_per_month': 500,
-                'max_concurrent_calls': 5,
-                'max_providers': 5,
-                'monthly_fee_usd': 199.0
-            },
-            'professional': {
-                'tier': 'professional',
-                'max_calls_per_month': 2000,
-                'max_concurrent_calls': 15,
-                'max_providers': 20,
-                'monthly_fee_usd': 599.0
-            },
-            'enterprise': {
-                'tier': 'enterprise',
-                'max_calls_per_month': None,  # unlimited
-                'max_concurrent_calls': 50,
-                'max_providers': None,  # unlimited
-                'monthly_fee_usd': 1499.0
+        # Import from centralized config
+        try:
+            from clinic_config import get_tier_limits
+            return get_tier_limits(tier)
+        except ImportError:
+            # Fallback to hardcoded config if clinic_config not available
+            configs = {
+                'basic': {
+                    'tier': 'basic',
+                    'max_calls_per_month': 500,
+                    'max_concurrent_calls': 5,
+                    'max_providers': 5,
+                    'monthly_fee_usd': 199.0
+                },
+                'professional': {
+                    'tier': 'professional',
+                    'max_calls_per_month': 2000,
+                    'max_concurrent_calls': 15,
+                    'max_providers': 20,
+                    'monthly_fee_usd': 599.0
+                },
+                'enterprise': {
+                    'tier': 'enterprise',
+                    'max_calls_per_month': None,  # unlimited
+                    'max_concurrent_calls': 50,
+                    'max_providers': None,  # unlimited
+                    'monthly_fee_usd': 1499.0
+                }
             }
-        }
-        return configs.get(tier, configs['basic'])
+            return configs.get(tier, configs['basic'])
     
     def _get_billing_cycle_start(self, now: Optional[datetime] = None) -> datetime:
         """Get start of current billing cycle, optionally using a specific time to avoid race conditions."""
@@ -399,15 +459,15 @@ class ClinicManagementService:
         else:
             return start.replace(month=start.month + 1) - timedelta(days=1)
     
-    def _get_next_billing_date(self) -> datetime:
-        """Get next billing date."""
-        start = self._get_billing_cycle_start()
+    def _get_next_billing_date(self, now: Optional[datetime] = None) -> datetime:
+        """Get next billing date, optionally using a specific time to avoid race conditions."""
+        start = self._get_billing_cycle_start(now)
         if start.month == 12:
             return start.replace(year=start.year + 1, month=1)
         else:
             return start.replace(month=start.month + 1)
     
-    def _create_initial_configs(self, clinic_id: str, clinic_data: ClinicCreateRequest):
+    async def _create_initial_configs(self, clinic_id: str, clinic_data: ClinicCreateRequest):
         """Create initial system configurations for a new clinic."""
         initial_configs = [
             {
@@ -438,31 +498,22 @@ class ClinicManagementService:
         ]
         
         for config in initial_configs:
-            self.set_clinic_config(
+            await self.set_clinic_config(
                 clinic_id=clinic_id,
                 config_key=config["key"],
                 config_value=config["value"],
                 description=config["description"]
             )
     
-    def _log_audit(self, table_name: str, record_id: str, action_type: str, 
+    async def _log_audit(self, table_name: str, record_id: str, action_type: str, 
                    old_values: Optional[Dict], new_values: Optional[Dict]):
         """Log audit trail for changes."""
-        details = ""
-        if old_values:
-            details += f"Old values: {old_values}. "
-        if new_values:
-            details += f"New values: {new_values}"
-        
-        ctx = get_request_context()
-        audit_log = AuditLog(
-            log_id=make_unique_audit_log_id(),
+        await log_audit_trail(
+            self.db,
             table_name=table_name,
             record_id=record_id,
             action_type=action_type,
-            details=details,
-            user_id=ctx.user_id,
-            ip_address=ctx.ip_address,
-            user_agent="ClinicManagementService"
+            old_values=old_values,
+            new_values=new_values,
+            service_name="ClinicManagementService"
         )
-        self.db.add(audit_log)

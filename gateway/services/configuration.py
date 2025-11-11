@@ -307,8 +307,8 @@ class AzureCommunicationConfig(BaseSettings):
     @classmethod
     def validate_callback_url(cls, v):
         """Validate callback URL format."""
-        if not v or not v.startswith('https://'):
-            raise ValueError("Callback URL must be a valid HTTPS URL")
+        if not v or not (v.startswith('https://') or v.startswith('http://')):
+            raise ValueError("Callback URL must be a valid HTTP or HTTPS URL")
         return v
     
     model_config = SettingsConfigDict(

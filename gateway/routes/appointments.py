@@ -4,18 +4,26 @@ REST endpoints for appointment operations including booking, scheduling, and Goo
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any, Tuple
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import List, Optional
 from datetime import datetime, timedelta, timezone
-import os
-import html
-import re
+from sqlalchemy import select, func
 
-from services.database import get_db
+from services.database import get_async_db
 from services.appointment_service import AppointmentService
-from services.google_calendar_service import GoogleCalendarIntegrationService, GoogleCalendarConfig
+from services.google_calendar_service import (
+    GoogleCalendarIntegrationService, 
+    GoogleCalendarConfig,
+    GoogleCalendarService
+)
 from services.configuration import get_settings
-from services.structured_logging import get_logger
+from services.structured_logging import get_logger, LogCategory
+from models.schemas import (
+    AppointmentCreateRequest, AppointmentUpdateRequest, AppointmentResponse,
+    AppointmentSearchRequest, SuccessResponse,
+    AppointmentCreateResponse
+)
+from models.models import Appointment
 
 # Get configuration
 settings = get_settings()
@@ -23,22 +31,38 @@ settings = get_settings()
 # Initialize logger
 logger = get_logger("appointments")
 
-def sanitize_input(text: str) -> str:
-    """Sanitize user input to prevent XSS and injection attacks."""
-    if not text:
-        return text
-    # Remove HTML tags and escape special characters
-    text = re.sub(r'<[^>]+>', '', text)
-    text = html.escape(text)
-    # Remove potential SQL injection patterns
-    text = re.sub(r'[;\'"\\]', '', text)
-    return text.strip()
-from models.schemas import (
-    AppointmentCreateRequest, AppointmentUpdateRequest, AppointmentResponse,
-    AppointmentSearchRequest, SuccessResponse, ErrorResponse,
-    AppointmentCreateResponse, AppointmentUpdateResponse, 
-    NextAvailableSlotResponse, AppointmentStatisticsResponse
-)
+
+async def _get_google_calendar_service(db: AsyncSession) -> Optional[GoogleCalendarIntegrationService]:
+    """
+    Initialize Google Calendar service if credentials are available.
+    
+    Args:
+        db: Database session
+        
+    Returns:
+        GoogleCalendarIntegrationService instance or None if not available
+    """
+    try:
+        client_id = settings.google_calendar.client_id
+        client_secret = settings.google_calendar.client_secret.get_secret_value()
+        redirect_uri = settings.google_calendar.redirect_uri
+        
+        if client_id and client_secret:
+            config = GoogleCalendarConfig(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri
+            )
+            calendar_service = GoogleCalendarService(config, db)
+            return GoogleCalendarIntegrationService(calendar_service)
+    except (ImportError, Exception) as e:
+        logger.warning(
+            f"Failed to initialize Google Calendar service: {e}",
+            LogCategory.API,
+            extra_data={"error": str(e)}
+        )
+    
+    return None
 
 router = APIRouter(prefix="/appointments", tags=["appointment-management"])
 
@@ -47,7 +71,7 @@ router = APIRouter(prefix="/appointments", tags=["appointment-management"])
 async def create_appointment(
     appointment_data: AppointmentCreateRequest,
     patient_name: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Create a new appointment and sync to Google Calendar.
@@ -62,30 +86,20 @@ async def create_appointment(
     Returns both appointment details and Google Calendar event ID.
     """
     try:
-        # Initialize Google Calendar service (if available)
-        google_calendar_service = None
-        try:
-            # Get credentials from environment variables
-            client_id = settings.google_calendar.client_id
-            client_secret = settings.google_calendar.client_secret.get_secret_value()
-            redirect_uri = settings.google_calendar.redirect_uri
-            
-            if client_id and client_secret:
-                config = GoogleCalendarConfig(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri
-                )
-                google_calendar_service = GoogleCalendarIntegrationService(
-                    GoogleCalendarService(config, db)
-                )
-        except (ImportError, Exception) as e:
-            # Google Calendar API not available or initialization failed
-            logger.warning(f"Failed to initialize Google Calendar service: {e}")
-            google_calendar_service = None
-        
+        google_calendar_service = await _get_google_calendar_service(db)
         service = AppointmentService(db, google_calendar_service)
         appointment, google_event_id = await service.create_appointment(appointment_data, patient_name)
+        
+        logger.info(
+            f"Appointment created: {appointment.appointment_id}",
+            LogCategory.API,
+            extra_data={
+                "appointment_id": appointment.appointment_id,
+                "provider_id": appointment.provider_id,
+                "patient_id": appointment.patient_id,
+                "google_event_id": google_event_id
+            }
+        )
         
         return AppointmentCreateResponse(
             appointment=AppointmentResponse.model_validate(appointment),
@@ -93,12 +107,22 @@ async def create_appointment(
             message="Appointment created successfully"
         )
     except ValueError as e:
+        logger.warning(
+            f"Validation error creating appointment: {e}",
+            LogCategory.API,
+            extra_data={"error": str(e), "appointment_data": appointment_data.model_dump() if hasattr(appointment_data, 'model_dump') else str(appointment_data)}
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Failed to create appointment: {e}")
+        logger.error(
+            f"Failed to create appointment: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"appointment_data": appointment_data.model_dump() if hasattr(appointment_data, 'model_dump') else str(appointment_data)}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create appointment. Please try again later."
@@ -106,9 +130,9 @@ async def create_appointment(
 
 
 @router.get("/", response_model=List[AppointmentResponse])
-def list_appointments(
+async def list_appointments(
     search: AppointmentSearchRequest = Depends(),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     List appointments with optional filtering and pagination.
@@ -124,10 +148,30 @@ def list_appointments(
     """
     try:
         service = AppointmentService(db)
-        appointments = service.list_appointments(search)
+        appointments = await service.list_appointments(search)
+        
+        logger.info(
+            f"Listed {len(appointments)} appointments",
+            LogCategory.API,
+            extra_data={
+                "count": len(appointments),
+                "filters": {
+                    "clinic_id": search.clinic_id,
+                    "patient_id": search.patient_id,
+                    "provider_id": search.provider_id,
+                    "status": search.status
+                }
+            }
+        )
+        
         return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
-        logger.error(f"Failed to list appointments: {e}")
+        logger.error(
+            f"Failed to list appointments: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"search": search.model_dump() if hasattr(search, 'model_dump') else str(search)}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve appointments. Please try again later."
@@ -135,9 +179,9 @@ def list_appointments(
 
 
 @router.get("/{appointment_id}", response_model=AppointmentResponse)
-def get_appointment(
+async def get_appointment(
     appointment_id: str,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Get a specific appointment by ID.
@@ -150,9 +194,14 @@ def get_appointment(
     """
     try:
         service = AppointmentService(db)
-        appointment = service.get_appointment(appointment_id)
+        appointment = await service.get_appointment(appointment_id)
         
         if not appointment:
+            logger.warning(
+                f"Appointment not found: {appointment_id}",
+                LogCategory.API,
+                extra_data={"appointment_id": appointment_id}
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Appointment {appointment_id} not found"
@@ -162,6 +211,12 @@ def get_appointment(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            f"Failed to get appointment {appointment_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"appointment_id": appointment_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get appointment: {str(e)}"
@@ -169,11 +224,11 @@ def get_appointment(
 
 
 @router.put("/{appointment_id}", response_model=dict)
-def update_appointment(
+async def update_appointment(
     appointment_id: str,
     updates: AppointmentUpdateRequest,
     patient_name: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Update an appointment and sync changes to Google Calendar.
@@ -188,36 +243,32 @@ def update_appointment(
     Returns updated appointment and Google Calendar sync status.
     """
     try:
-        # Initialize Google Calendar service (if available)
-        google_calendar_service = None
-        try:
-            # Get credentials from environment variables
-            client_id = settings.google_calendar.client_id
-            client_secret = settings.google_calendar.client_secret.get_secret_value()
-            redirect_uri = settings.google_calendar.redirect_uri
-            
-            if client_id and client_secret:
-                config = GoogleCalendarConfig(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri
-                )
-                google_calendar_service = GoogleCalendarIntegrationService(
-                    GoogleCalendarService(config, db)
-                )
-        except ImportError:
-            pass
-        
+        google_calendar_service = await _get_google_calendar_service(db)
         service = AppointmentService(db, google_calendar_service)
-        appointment, google_calendar_updated = service.update_appointment(
+        appointment, google_calendar_updated = await service.update_appointment(
             appointment_id, updates, patient_name
         )
         
         if not appointment:
+            logger.warning(
+                f"Appointment not found for update: {appointment_id}",
+                LogCategory.API,
+                extra_data={"appointment_id": appointment_id}
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Appointment {appointment_id} not found"
             )
+        
+        logger.info(
+            f"Appointment updated: {appointment_id}",
+            LogCategory.API,
+            extra_data={
+                "appointment_id": appointment_id,
+                "google_calendar_updated": google_calendar_updated,
+                "updates": updates.model_dump() if hasattr(updates, 'model_dump') else str(updates)
+            }
+        )
         
         response_data = {
             "appointment": AppointmentResponse.model_validate(appointment),
@@ -229,11 +280,22 @@ def update_appointment(
     except HTTPException:
         raise
     except ValueError as e:
+        logger.warning(
+            f"Validation error updating appointment {appointment_id}: {e}",
+            LogCategory.API,
+            extra_data={"appointment_id": appointment_id, "error": str(e)}
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
+        logger.error(
+            f"Failed to update appointment {appointment_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"appointment_id": appointment_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update appointment: {str(e)}"
@@ -241,9 +303,9 @@ def update_appointment(
 
 
 @router.delete("/{appointment_id}", response_model=SuccessResponse)
-def cancel_appointment(
+async def cancel_appointment(
     appointment_id: str,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Cancel an appointment and remove from Google Calendar.
@@ -255,34 +317,26 @@ def cancel_appointment(
     - Logs the cancellation in audit trail
     """
     try:
-        # Initialize Google Calendar service (if available)
-        google_calendar_service = None
-        try:
-            # Get credentials from environment variables
-            client_id = settings.google_calendar.client_id
-            client_secret = settings.google_calendar.client_secret.get_secret_value()
-            redirect_uri = settings.google_calendar.redirect_uri
-            
-            if client_id and client_secret:
-                config = GoogleCalendarConfig(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri
-                )
-                google_calendar_service = GoogleCalendarIntegrationService(
-                    GoogleCalendarService(config, db)
-                )
-        except ImportError:
-            pass
-        
+        google_calendar_service = await _get_google_calendar_service(db)
         service = AppointmentService(db, google_calendar_service)
-        success = service.cancel_appointment(appointment_id)
+        success = await service.cancel_appointment(appointment_id)
         
         if not success:
+            logger.warning(
+                f"Appointment not found for cancellation: {appointment_id}",
+                LogCategory.API,
+                extra_data={"appointment_id": appointment_id}
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Appointment {appointment_id} not found"
             )
+        
+        logger.info(
+            f"Appointment cancelled: {appointment_id}",
+            LogCategory.API,
+            extra_data={"appointment_id": appointment_id}
+        )
         
         return SuccessResponse(
             message=f"Appointment {appointment_id} cancelled successfully"
@@ -290,6 +344,12 @@ def cancel_appointment(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            f"Failed to cancel appointment {appointment_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"appointment_id": appointment_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to cancel appointment: {str(e)}"
@@ -297,11 +357,11 @@ def cancel_appointment(
 
 
 @router.get("/providers/{provider_id}/available", response_model=List[dict])
-def get_available_slots(
+async def get_available_slots(
     provider_id: str,
     start_date: datetime,
     end_date: datetime,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Get available appointment slots for a provider.
@@ -311,7 +371,18 @@ def get_available_slots(
     """
     try:
         service = AppointmentService(db)
-        slots = service.get_available_slots(provider_id, start_date, end_date)
+        slots = await service.get_available_slots(provider_id, start_date, end_date)
+        
+        logger.info(
+            f"Retrieved {len(slots)} available slots for provider {provider_id}",
+            LogCategory.API,
+            extra_data={
+                "provider_id": provider_id,
+                "slot_count": len(slots),
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat()
+            }
+        )
         
         return [
             {
@@ -323,6 +394,12 @@ def get_available_slots(
             for slot in slots
         ]
     except Exception as e:
+        logger.error(
+            f"Failed to get available slots for provider {provider_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"provider_id": provider_id, "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get available slots: {str(e)}"
@@ -330,11 +407,11 @@ def get_available_slots(
 
 
 @router.get("/providers/{provider_id}/next-available", response_model=dict)
-def find_next_available_slot(
+async def find_next_available_slot(
     provider_id: str,
     preferred_date: Optional[datetime] = None,
     duration_minutes: int = 60,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Find the next available appointment slot for a provider.
@@ -344,13 +421,28 @@ def find_next_available_slot(
     """
     try:
         service = AppointmentService(db)
-        next_slot = service.find_next_available_slot(provider_id, preferred_date, duration_minutes)
+        next_slot = await service.find_next_available_slot(provider_id, preferred_date, duration_minutes)
         
         if not next_slot:
+            logger.info(
+                f"No available slots found for provider {provider_id}",
+                LogCategory.API,
+                extra_data={
+                    "provider_id": provider_id,
+                    "preferred_date": preferred_date.isoformat() if preferred_date else None,
+                    "duration_minutes": duration_minutes
+                }
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"No available slots found for provider {provider_id}"
             )
+        
+        logger.info(
+            f"Found next available slot for provider {provider_id}",
+            LogCategory.API,
+            extra_data={"provider_id": provider_id, "next_slot": next_slot}
+        )
         
         return {
             "provider_id": provider_id,
@@ -360,6 +452,12 @@ def find_next_available_slot(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(
+            f"Failed to find next available slot for provider {provider_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"provider_id": provider_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to find next available slot: {str(e)}"
@@ -367,11 +465,11 @@ def find_next_available_slot(
 
 
 @router.get("/patients/{patient_id}/history", response_model=List[AppointmentResponse])
-def get_patient_appointment_history(
+async def get_patient_appointment_history(
     patient_id: str,
     limit: int = 50,
     offset: int = 0,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Get appointment history for a specific patient.
@@ -389,9 +487,27 @@ def get_patient_appointment_history(
             offset=offset
         )
         
-        appointments = service.list_appointments(search)
+        appointments = await service.list_appointments(search)
+        
+        logger.info(
+            f"Retrieved appointment history for patient {patient_id}",
+            LogCategory.API,
+            extra_data={
+                "patient_id": patient_id,
+                "count": len(appointments),
+                "limit": limit,
+                "offset": offset
+            }
+        )
+        
         return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
+        logger.error(
+            f"Failed to get patient appointment history for {patient_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"patient_id": patient_id}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get patient appointment history: {str(e)}"
@@ -399,11 +515,11 @@ def get_patient_appointment_history(
 
 
 @router.get("/providers/{provider_id}/schedule", response_model=List[AppointmentResponse])
-def get_provider_schedule(
+async def get_provider_schedule(
     provider_id: str,
     start_date: datetime,
     end_date: datetime,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Get provider's appointment schedule for a date range.
@@ -422,9 +538,27 @@ def get_provider_schedule(
             limit=1000  # Large limit for schedule view
         )
         
-        appointments = service.list_appointments(search)
+        appointments = await service.list_appointments(search)
+        
+        logger.info(
+            f"Retrieved schedule for provider {provider_id}",
+            LogCategory.API,
+            extra_data={
+                "provider_id": provider_id,
+                "count": len(appointments),
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat()
+            }
+        )
+        
         return [AppointmentResponse.model_validate(appointment) for appointment in appointments]
     except Exception as e:
+        logger.error(
+            f"Failed to get provider schedule for {provider_id}: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"provider_id": provider_id, "start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get provider schedule: {str(e)}"
@@ -432,11 +566,11 @@ def get_provider_schedule(
 
 
 @router.get("/stats", response_model=dict)
-def get_appointment_statistics(
+async def get_appointment_statistics(
     clinic_id: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_async_db)
 ):
     """
     Get appointment statistics and analytics.
@@ -448,37 +582,59 @@ def get_appointment_statistics(
     - Date range analytics
     """
     try:
-        service = AppointmentService(db)
-        
         # Set default date range if not provided
         if not start_date:
             start_date = datetime.now(timezone.utc) - timedelta(days=30)
         if not end_date:
             end_date = datetime.now(timezone.utc) + timedelta(days=30)
         
-        # Create search request
-        search = AppointmentSearchRequest(
-            clinic_id=clinic_id,
-            start_date=start_date,
-            end_date=end_date,
-            limit=10000  # Large limit for statistics
+        # Use database aggregation for efficient statistics calculation
+        stmt = select(
+            func.count(Appointment.appointment_id).label('total_appointments'),
+            Appointment.status,
+            Appointment.provider_id
+        ).where(
+            Appointment.appointment_date >= start_date,
+            Appointment.appointment_date <= end_date
         )
         
-        appointments = service.list_appointments(search)
+        if clinic_id:
+            # Join with providers to filter by clinic
+            from models.models import Provider, provider_clinics
+            stmt = stmt.join(Provider).join(provider_clinics).where(
+                provider_clinics.c.clinic_id == clinic_id
+            )
         
-        # Calculate statistics
-        total_appointments = len(appointments)
+        # Group by status and provider for aggregation
+        stmt = stmt.group_by(Appointment.status, Appointment.provider_id)
+        
+        result = await db.execute(stmt)
+        rows = result.all()
+        
+        # Aggregate results
+        total_appointments = sum(row.total_appointments for row in rows)
         status_counts = {}
         provider_counts = {}
         
-        for appointment in appointments:
+        for row in rows:
             # Count by status
-            status = appointment.status
-            status_counts[status] = status_counts.get(status, 0) + 1
+            status = row.status
+            status_counts[status] = status_counts.get(status, 0) + row.total_appointments
             
             # Count by provider
-            provider_id = appointment.provider_id
-            provider_counts[provider_id] = provider_counts.get(provider_id, 0) + 1
+            provider_id = row.provider_id
+            provider_counts[provider_id] = provider_counts.get(provider_id, 0) + row.total_appointments
+        
+        logger.info(
+            f"Retrieved appointment statistics",
+            LogCategory.API,
+            extra_data={
+                "clinic_id": clinic_id,
+                "total_appointments": total_appointments,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat()
+            }
+        )
         
         return {
             "date_range": {
@@ -494,6 +650,12 @@ def get_appointment_statistics(
             "generated_at": datetime.now(timezone.utc)
         }
     except Exception as e:
+        logger.error(
+            f"Failed to get appointment statistics: {e}",
+            LogCategory.API,
+            exception=e,
+            extra_data={"clinic_id": clinic_id, "start_date": start_date.isoformat() if start_date else None, "end_date": end_date.isoformat() if end_date else None}
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get appointment statistics: {str(e)}"

@@ -35,32 +35,14 @@ from services.exceptions import (
 )
 from models.models import Call, Clinic, ClinicLicense, Mapping
 from models.enums import CallStatus
-from services.database import get_db_session
+from services.database import get_async_db_session
 from services.crypto import make_hmac_token, normalize_phone, encrypt_str
+# Import call_orchestrator inside __init__ to avoid circular import
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import func
+from sqlalchemy import func, select
 
 
 logger = get_logger("azure_communication_service")
-
-
-class CallState:
-    """Represents the state of an active call."""
-    
-    def __init__(self, call_id: str, clinic_id: str, caller_phone: str):
-        self.call_id = call_id
-        self.clinic_id = clinic_id
-        self.caller_phone = caller_phone
-        self.acs_call_id: Optional[str] = None
-        self.status = CallStatus.INITIATED.value
-        self.start_time = datetime.now(AST)
-        self.end_time: Optional[datetime] = None
-        self.websocket_connected = False
-        self.audio_stream_active = False
-        self.language_detected: Optional[str] = None
-        self.language_locked = False
-        self.conversation_history: List[Dict[str, str]] = []
-        self.metadata: Dict[str, Any] = {}
 
 
 class AzureCommunicationService:
@@ -73,8 +55,9 @@ class AzureCommunicationService:
     def __init__(self):
         self.settings = get_settings()
         self.logger = logger
-        self.active_calls: Dict[str, CallState] = {}
-        self._calls_lock = asyncio.Lock()  # ADD LOCK FOR THREAD SAFETY
+        # Import here to avoid circular import with call_orchestrator
+        from services.call_orchestrator import get_call_orchestrator
+        self.call_orchestrator = get_call_orchestrator()
         self.http_client = httpx.AsyncClient(timeout=30.0)
         self._closed = False
         
@@ -86,9 +69,38 @@ class AzureCommunicationService:
         
         # Extract endpoint and access key from connection string
         self._parse_connection_string()
+        
+        # Note: _pending_call_metadata removed - use orchestrator metadata instead
+    
+    async def _get_acs_metadata(self, call_id: str) -> Dict[str, Any]:
+        """Get ACS-specific metadata from CallContext (thread-safe async version)."""
+        # Use atomic method from orchestrator that holds lock
+        return await self.call_orchestrator.get_call_metadata(call_id)
+    
+    async def _set_acs_metadata(self, call_id: str, key: str, value: Any):
+        """Set ACS-specific metadata in CallContext (thread-safe async version)."""
+        # Use atomic method from orchestrator that holds lock during update
+        await self.call_orchestrator.update_call_metadata(call_id, key, value)
+    
+    async def _get_acs_call_id(self, call_id: str) -> Optional[str]:
+        """Get ACS call ID from CallContext metadata (thread-safe async version)."""
+        metadata = await self._get_acs_metadata(call_id)
+        return metadata.get('acs_call_id')
+    
+    async def _set_acs_call_id(self, call_id: str, acs_call_id: str):
+        """Set ACS call ID in CallContext metadata (thread-safe async version)."""
+        await self._set_acs_metadata(call_id, 'acs_call_id', acs_call_id)
     
     def _parse_connection_string(self):
         """Parse ACS connection string to extract endpoint and access key."""
+        # Issue 6.1: Validate connection string format on initialization
+        if not self.connection_string:
+            raise ValidationError(
+                "connection_string",
+                None,
+                "Azure Communication Services connection string is required"
+            )
+        
         try:
             parts = self.connection_string.split(';')
             self.endpoint = None
@@ -100,17 +112,39 @@ class AzureCommunicationService:
                 elif part.startswith('accesskey='):
                     self.access_key = part.split('=', 1)[1]
             
+            # Issue 6.1: Validate connection string format
             if not self.endpoint or not self.access_key:
-                raise ValueError("Invalid ACS connection string format")
-                
+                raise ValidationError(
+                    "connection_string",
+                    self.connection_string[:50] + "..." if len(self.connection_string) > 50 else self.connection_string,
+                    "Invalid connection string format: missing endpoint or access key. "
+                    "Expected format: 'endpoint=https://...;accesskey=...'"
+                )
+            
+            # Issue 6.1: Validate endpoint URL format
+            if not self.endpoint.startswith('https://'):
+                raise ValidationError(
+                    "connection_string",
+                    self.endpoint,
+                    f"Invalid endpoint URL format: must start with 'https://'. Got: {self.endpoint}"
+                )
+            
             # Ensure endpoint ends with /
             if not self.endpoint.endswith('/'):
                 self.endpoint += '/'
+            
+            self.logger.info("Successfully parsed and validated ACS connection string")
                 
+        except ValidationError:
+            raise
         except Exception as e:
             # Don't log the full exception (may contain connection string)
             self.logger.error("Failed to parse ACS connection string: Invalid format")
-            raise AzureCommunicationError("connection_parsing", "Invalid connection string format")
+            raise ValidationError(
+                "connection_string",
+                None,
+                f"Failed to parse connection string: {str(e)}"
+            ) from e
     
     def _get_auth_headers(self) -> Dict[str, str]:
         """Generate authentication headers for ACS API calls."""
@@ -120,253 +154,32 @@ class AzureCommunicationService:
             "User-Agent": "CallCenterAI/1.0"
         }
     
-    @log_performance("acs_call_initiation")
-    async def initialize_call(self, phone_number: str, clinic_id: str, 
-                            call_type: str = "inbound") -> Tuple[str, str]:
-        """
-        Initialize a new call with Azure Communication Services.
+    async def answer_incoming_call(
+        self, 
+        incoming_call_context: str, 
+        callback_url: str,
+        cognitive_services_endpoint: Optional[str] = None
+    ) -> Dict[str, Any]:
         
-        Args:
-            phone_number: Phone number to call (for outbound) or caller's number (for inbound)
-            clinic_id: ID of the clinic handling the call
-            call_type: Type of call ("inbound" or "outbound")
-            
-        Returns:
-            Tuple of (call_id, acs_call_id)
-            
-        Raises:
-            AzureCommunicationError: If call initialization fails
-            ValidationError: If input validation fails
-        """
-        try:
-            # Validate inputs
-            if not phone_number or not phone_number.startswith('+'):
-                raise ValidationError("phone_number", phone_number, "Phone number must include country code")
-            
-            if not clinic_id:
-                raise ValidationError("clinic_id", clinic_id, "Clinic ID is required")
-            
-            # Generate unique call ID
-            call_id = f"CALL_{datetime.now(AST).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8].upper()}"
-            
-            # Check clinic capacity
-            await self._check_clinic_capacity(clinic_id)
-            
-            # Prepare ACS call request BEFORE creating call state
-            if call_type == "outbound":
-                acs_call_id = await self._initiate_outbound_call(phone_number, call_id)
-            else:
-                # For inbound calls, ACS will provide the call ID via webhook
-                acs_call_id = None
-            
-            # Create call state and update status BEFORE releasing lock
-            call_state = CallState(call_id, clinic_id, phone_number)
-            call_state.status = CallStatus.ACTIVE.value
-            call_state.acs_call_id = acs_call_id
-            
-            # Add to active calls dict with complete state
-            async with self._calls_lock:
-                self.active_calls[call_id] = call_state
-            
-            # Store call in database
-            await self._store_call_record(call_id, phone_number, clinic_id, call_type)
-            
-            self.logger.info(
-                f"Call initialized successfully: {call_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={
-                    "call_id": call_id,
-                    "acs_call_id": acs_call_id,
-                    "clinic_id": clinic_id,
-                    "call_type": call_type,
-                    "phone_number": phone_number[:3] + "***" + phone_number[-4:]  # Masked for privacy
-                }
-            )
-            
-            return call_id, acs_call_id or "pending"
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to initialize call: {e}",
-                LogCategory.AZURE_COMMUNICATION,
-                exception=e,
-                extra_data={
-                    "phone_number": phone_number[:3] + "***" + phone_number[-4:] if phone_number else None,
-                    "clinic_id": clinic_id,
-                    "call_type": call_type
-                }
-            )
-            
-            if isinstance(e, (ValidationError, AzureCommunicationError)):
-                raise
-            else:
-                raise AzureCommunicationError("call_initialization", str(e))
-    
-    async def _initiate_outbound_call(self, phone_number: str, call_id: str) -> str:
-        """Initiate an outbound call via ACS."""
-        try:
-            # Prepare call request payload
-            payload = {
-                "source": {
-                    "phoneNumber": self.phone_number
-                },
-                "target": {
-                    "phoneNumber": phone_number
-                },
-                "callbackUri": f"{self.callback_url}?call_id={call_id}",
-                "mediaStreamingConfiguration": {
-                    "transportUrl": f"{self.callback_url.replace('/webhooks/events', '/ws/audio')}/{call_id}",
-                    "transportType": "websocket",
-                    "audioChannelType": "mixed"
-                }
-            }
-            
-            # Make API call to ACS
-            url = f"{self.endpoint}calling/callConnections"
-            headers = self._get_auth_headers()
-            
-            async with self.http_client.post(url, json=payload, headers=headers) as response:
-                if response.status_code not in [200, 201]:
-                    error_text = await response.aread()
-                    raise AzureCommunicationError(
-                        "outbound_call_failed",
-                        f"ACS API returned {response.status_code}: {error_text.decode()}"
-                    )
-                
-                result = response.json()
-                acs_call_id = result.get("callConnectionId")
-                
-                if not acs_call_id:
-                    raise AzureCommunicationError("outbound_call_failed", "No call ID returned from ACS")
-                
-                return acs_call_id
-                
-        except httpx.RequestError as e:
-            raise ExternalServiceUnavailableError("Azure Communication Services", str(e))
-        except Exception as e:
-            if isinstance(e, AzureCommunicationError):
-                raise
-            raise AzureCommunicationError("outbound_call_failed", str(e))
-    
-    async def _check_clinic_capacity(self, clinic_id: str):
-        """Check if clinic has capacity for new calls."""
-        try:
-            # Issue 54: Use context manager instead of next()
-            with get_db_session() as db:
-                # Get clinic license
-                license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
-                if not license_record:
-                    raise AzureCommunicationError("clinic_not_found", f"Clinic {clinic_id} not found")
-                
-                # Check if license is active
-                if license_record.license_status != "active":
-                    raise AzureCommunicationError(
-                        "license_suspended",
-                        f"Clinic {clinic_id} license is {license_record.license_status}"
-                    )
-                
-                # Check concurrent call limit
-                if license_record.current_concurrent_calls >= license_record.max_concurrent_calls:
-                    raise AzureCommunicationError(
-                        "capacity_exceeded",
-                        f"Clinic {clinic_id} at capacity ({license_record.current_concurrent_calls}/{license_record.max_concurrent_calls})"
-                    )
-                
-                # Increment concurrent call count
-                license_record.current_concurrent_calls += 1
-                try:
-                    db.commit()
-                except Exception as commit_error:
-                    db.rollback()
-                    # Issue 75: Decrement counter if commit fails
-                    license_record.current_concurrent_calls -= 1
-                    raise AzureCommunicationError("capacity_update_failed", f"Failed to update clinic capacity: {commit_error}")
-                
-        except Exception as e:
-            if isinstance(e, AzureCommunicationError):
-                raise
-            raise AzureCommunicationError("capacity_check_failed", str(e))
-    
-    async def _store_call_record(self, call_id: str, phone_number: str, clinic_id: str, call_type: str):
-        """Store call record in database with tokenized phone number."""
-        try:
-            with get_db_session() as db:
-                # Tokenize phone number for HIPAA compliance
-                normalized_phone = normalize_phone(phone_number)
-                phone_token = make_hmac_token("PHONE", normalized_phone)
-                
-                # Store encrypted phone in mappings table
-                nonce, ct = encrypt_str(normalized_phone)
-                
-                stmt = insert(Mapping).values({
-                    'token': phone_token,
-                    'value_nonce': nonce,
-                    'value_ciphertext': ct,
-                    'value_type': 'PHONE',
-                    'call_id': call_id
-                })
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=['token'],
-                    set_={'last_used_at': func.now()}
-                )
-                db.execute(stmt)
-                
-                # Issue 119: Check for existing call records before creating new ones
-                from models.models import Call
-                existing_call = db.query(Call).filter_by(call_id=call_id).first()
-                if existing_call:
-                    # Issue 119: Call record already exists - update it instead of creating duplicate
-                    self.logger.info(f"Call record already exists for {call_id}, updating instead of creating duplicate")
-                    existing_call.caller_phone_token = phone_token
-                    existing_call.status = CallStatus.ACTIVE.value
-                    existing_call.started_at = datetime.now(AST)
-                    existing_call.clinic_id = clinic_id
-                    call_record = existing_call
-                else:
-                    # Create call record with tokenized phone
-                    call_record = Call(
-                        call_sid=call_id,  # Using our call_id as call_sid for now
-                        call_id=call_id,
-                        caller_phone_token=phone_token,  # Now properly tokenized
-                        status=CallStatus.ACTIVE.value,
-                        started_at=datetime.now(AST),
-                        clinic_id=clinic_id
-                    )
-                    db.add(call_record)
-                
-                try:
-                    db.commit()
-                except Exception as commit_error:
-                    # Issue 119: Handle duplicate key errors gracefully
-                    if "duplicate" in str(commit_error).lower() or "unique" in str(commit_error).lower():
-                        self.logger.warning(f"Duplicate call record for {call_id}, skipping creation")
-                        db.rollback()
-                    else:
-                        db.rollback()
-                        self.logger.error(f"Failed to commit call record: {commit_error}")
-                        # Don't raise here as the call is already active
-                
-        except Exception as e:
-            self.logger.error(f"Failed to store call record: {e}")
-            # Don't raise here as the call is already active
-    
-    async def answer_incoming_call(self, incoming_call_context: str, callback_url: str) -> Dict[str, Any]:
-        """
-        Answer an incoming call using Call Automation SDK.
-        This is used when receiving IncomingCall event from Event Grid.
-        
-        Args:
-            incoming_call_context: The incoming call context from Event Grid
-            callback_url: The callback URL for Call Automation events
-            
-        Returns:
-            Dict containing call connection details
-            
-        Raises:
-            AzureCommunicationError: If answering fails
-        """
         try:
             from azure.communication.callautomation import CallAutomationClient
+            
+            # Get cognitive services endpoint from settings if not provided
+            if not cognitive_services_endpoint:
+                # Construct from Azure Speech Service region
+                # Format: https://{region}.cognitiveservices.azure.com
+                speech_region = self.settings.azure.speech.speech_region
+                if speech_region:
+                    cognitive_services_endpoint = f"https://{speech_region}.cognitiveservices.azure.com"
+                    self.logger.info(
+                        f"Constructed cognitive services endpoint from region: {cognitive_services_endpoint}",
+                        LogCategory.AZURE_COMMUNICATION
+                    )
+                else:
+                    self.logger.warning(
+                        "Azure Speech region not configured, cognitive services endpoint not set",
+                        LogCategory.AZURE_COMMUNICATION
+                    )
             
             # Create Call Automation client
             call_automation_client = CallAutomationClient.from_connection_string(
@@ -374,28 +187,58 @@ class AzureCommunicationService:
             )
             
             # Answer the call using proper SDK method
+            # Try AnswerCallOptions first, then fallback to keyword arguments
+            answer_call_result = None
             try:
-                # Try keyword arguments first
-                answer_call_result = call_automation_client.answer_call(
+                # Try using AnswerCallOptions if available in SDK
+                from azure.communication.callautomation import AnswerCallOptions
+                
+                answer_options = AnswerCallOptions(
                     incoming_call_context=incoming_call_context,
-                    callback_url=callback_url
+                    callback_uri=callback_url
                 )
-                self.logger.info("Call answered successfully with keyword arguments")
-            except Exception as e1:
-                self.logger.warning(f"Keyword arguments failed: {e1}")
+                # Add cognitive_services_endpoint if available and supported
+                if cognitive_services_endpoint and hasattr(answer_options, 'cognitive_services_endpoint'):
+                    answer_options.cognitive_services_endpoint = cognitive_services_endpoint
+                
+                answer_call_result = call_automation_client.answer_call(answer_options)
+                self.logger.info(
+                    "Call answered successfully using AnswerCallOptions",
+                    LogCategory.AZURE_COMMUNICATION,
+                    extra_data={"callback_url": callback_url}
+                )
+            except (ImportError, Exception) as e:
+                # AnswerCallOptions not available or failed, try keyword arguments
+                self.logger.info(f"AnswerCallOptions not available or failed: {e}, trying keyword arguments", LogCategory.AZURE_COMMUNICATION)
                 try:
-                    # Try positional arguments
-                    answer_call_result = call_automation_client.answer_call(
-                        incoming_call_context,
-                        callback_url
-                    )
-                    self.logger.info("Call answered successfully with positional arguments")
+                    # Try keyword arguments with cognitive_services_endpoint if provided
+                    if cognitive_services_endpoint:
+                        answer_call_result = call_automation_client.answer_call(
+                            incoming_call_context=incoming_call_context,
+                            cognitive_services_endpoint=cognitive_services_endpoint,
+                            callback_url=callback_url
+                        )
+                    else:
+                        answer_call_result = call_automation_client.answer_call(
+                            incoming_call_context=incoming_call_context,
+                            callback_url=callback_url
+                        )
+                    self.logger.info("Call answered successfully with keyword arguments", LogCategory.AZURE_COMMUNICATION)
                 except Exception as e2:
-                    self.logger.error(f"All answer_call attempts failed: {e1}, {e2}")
-                    raise AzureCommunicationError(
-                        "answer_failed", 
-                        f"Failed to answer incoming call: {e1}"
-                    )
+                    # Final fallback: try positional arguments
+                    self.logger.warning(f"Keyword arguments failed: {e2}, trying positional arguments", LogCategory.AZURE_COMMUNICATION)
+                    try:
+                        answer_call_result = call_automation_client.answer_call(
+                            incoming_call_context,
+                            callback_url
+                        )
+                        self.logger.info("Call answered successfully with positional arguments", LogCategory.AZURE_COMMUNICATION)
+                    except Exception as e3:
+                        self.logger.error(f"All answer_call attempts failed: {e}, {e2}, {e3}", LogCategory.AZURE_COMMUNICATION)
+                        raise AzureCommunicationError(
+                            "answer_failed", 
+                            f"Failed to answer incoming call: {str(e)}"
+                        )
             
             self.logger.info(
                 f"Call answered successfully via Call Automation SDK",
@@ -446,180 +289,47 @@ class AzureCommunicationService:
             )
             raise AzureCommunicationError("answer_failed", f"Failed to answer incoming call: {str(e)}")
 
-    async def register_incoming_call(self, call_id: str, caller_phone: str, clinic_id: str, acs_call_id: str) -> bool:
-        """
-        Register an incoming call in the active calls dictionary.
-        
-        Args:
-            call_id: Internal call ID
-            caller_phone: Caller's phone number
-            clinic_id: Clinic ID
-            acs_call_id: ACS call connection ID
-            
-        Returns:
-            True if call was registered successfully
-        """
-        try:
-            # Issue 110: Check for existing calls before creating new one
-            async with self._calls_lock:
-                # Check if call with same call_id already exists
-                if call_id in self.active_calls:
-                    existing_call = self.active_calls[call_id]
-                    # Issue 110: If call exists with same acs_call_id, return success (idempotent)
-                    if existing_call.acs_call_id == acs_call_id:
-                        logger.info(f"Call {call_id} already registered with ACS call ID {acs_call_id}")
-                        return True
-                    else:
-                        # Different acs_call_id for same call_id - this is an error
-                        raise AzureCommunicationError(
-                            "duplicate_call_id",
-                            f"Call {call_id} already exists with different ACS call ID"
-                        )
-                
-                # Issue 110: Check if acs_call_id is already associated with another call
-                for existing_call_id, existing_state in self.active_calls.items():
-                    if existing_state.acs_call_id == acs_call_id:
-                        # Same ACS call ID but different call_id - this might be a duplicate
-                        logger.warning(
-                            f"ACS call ID {acs_call_id} already associated with call {existing_call_id}, "
-                            f"attempting to register as {call_id}"
-                        )
-                        # Return the existing call state (idempotent behavior)
-                        return True
-            
-            # Check rate limit before registering call
-            from services.rate_limiter import get_rate_limiter
-            rate_limiter = get_rate_limiter()
-            if not await rate_limiter.check_acs_call_limit(clinic_id):
-                logger.warning(f"Rate limit exceeded for clinic {clinic_id}")
-                raise AzureCommunicationError(
-                    "rate_limit_exceeded",
-                    f"Clinic {clinic_id} has exceeded call rate limit"
-                )
-            
-            # Create call state for incoming call
-            call_state = CallState(call_id, clinic_id, caller_phone)
-            call_state.status = "incoming"
-            call_state.acs_call_id = acs_call_id
-            
-            async with self._calls_lock:
-                self.active_calls[call_id] = call_state
-            
-            logger.info(f"Registered incoming call {call_id} with ACS call ID {acs_call_id}")
-            return True
-            
-        except Exception as e:
-            if isinstance(e, AzureCommunicationError):
-                raise
-            logger.error(f"Failed to register incoming call {call_id}: {e}")
-            raise AzureCommunicationError("register_failed", f"Failed to register incoming call: {str(e)}")
-
-    async def store_call_id_mapping(self, call_id: str, acs_call_id: str) -> None:
-        """
-        Store mapping between internal call_id and ACS call_id for event correlation.
-        
-        Args:
-            call_id: Internal call ID
-            acs_call_id: ACS call connection ID
-        """
-        try:
-            async with self._calls_lock:
-                if call_id in self.active_calls:
-                    self.active_calls[call_id].acs_call_id = acs_call_id
-                    logger.debug(f"Stored call ID mapping: {call_id} -> {acs_call_id}")
-        except Exception as e:
-            logger.error(f"Failed to store call ID mapping: {e}")
+    # Note: register_incoming_call() removed - logic moved to orchestrator.start_call()
+    # Note: store_call_id_mapping() / get_call_id_from_mapping() removed - use orchestrator metadata directly
     
-    async def get_call_id_from_mapping(self, acs_call_id: str) -> Optional[str]:
+    # Note: store_pending_call_metadata() / get_pending_call_metadata() / remove_pending_call_metadata() removed
+    # Use orchestrator metadata directly - metadata is stored in CallContext.metadata when start_call() is called
+
+    async def hangup_call(self, acs_call_id: str) -> bool:
         """
-        Get internal call_id from ACS call_id mapping.
+        Hang up a call via ACS API.
         
         Args:
             acs_call_id: ACS call connection ID
             
         Returns:
-            Internal call_id if found, None otherwise
+            True if hangup succeeded
         """
         try:
-            async with self._calls_lock:
-                # Search for call_id by acs_call_id
-                for call_id, call_state in self.active_calls.items():
-                    if call_state.acs_call_id == acs_call_id:
-                        return call_id
-                return None
-        except Exception as e:
-            logger.error(f"Failed to get call ID from mapping: {e}")
-            return None
-
-    async def answer_call(self, call_id: str) -> bool:
-        """
-        Answer an inbound call.
-        
-        Args:
-            call_id: ID of the call to answer
-            
-        Returns:
-            True if call was answered successfully
-            
-        Raises:
-            CallNotFoundError: If call is not found
-            AzureCommunicationError: If answering fails
-        """
-        try:
-            async with self._calls_lock:
-                call_state = self.active_calls.get(call_id)
-            if not call_state:
-                raise CallNotFoundError(call_id)
-            
-            if not call_state.acs_call_id:
-                raise AzureCommunicationError("no_acs_call_id", "ACS call ID not available")
-            
-            # Answer the call via ACS API
-            url = f"{self.endpoint}calling/callConnections/{call_state.acs_call_id}:answer"
+            url = f"{self.endpoint}calling/callConnections/{acs_call_id}:hangup"
             headers = self._get_auth_headers()
             
-            payload = {
-                "callbackUri": f"{self.callback_url}?call_id={call_id}",
-                "mediaStreamingConfiguration": {
-                    "transportUrl": f"{self.callback_url.replace('/webhooks/events', '/ws/audio')}/{call_id}",
-                    "transportType": "websocket",
-                    "audioChannelType": "mixed"
-                }
-            }
-            
-            async with self.http_client.post(url, json=payload, headers=headers) as response:
+            async with self.http_client.post(url, json={}, headers=headers) as response:
                 if response.status_code not in [200, 202]:
                     error_text = await response.aread()
-                    raise AzureCommunicationError(
-                        "answer_call_failed",
-                        f"ACS API returned {response.status_code}: {error_text.decode()}"
+                    self.logger.warning(
+                        f"ACS hangup API returned {response.status_code}: {error_text.decode()}",
+                        LogCategory.AZURE_COMMUNICATION,
+                        extra_data={"acs_call_id": acs_call_id}
                     )
-            
-            call_state.status = CallStatus.ANSWERED.value
-            
-            self.logger.info(
-                f"Call answered successfully: {call_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={"call_id": call_id, "acs_call_id": call_state.acs_call_id}
-            )
-            
-            return True
-            
+                    return False
+                return True
         except Exception as e:
             self.logger.error(
-                f"Failed to answer call {call_id}: {e}",
+                f"Failed to hangup ACS call {acs_call_id}: {e}",
                 LogCategory.AZURE_COMMUNICATION,
                 exception=e
             )
-            
-            if isinstance(e, (CallNotFoundError, AzureCommunicationError)):
-                raise
-            else:
-                raise AzureCommunicationError("answer_call_failed", str(e))
-    
+            return False
+
     async def end_call(self, call_id: str, reason: str = "completed") -> bool:
         """
-        End a call.
+        End a call (delegates to orchestrator).
         
         Args:
             call_id: ID of the call to end
@@ -629,57 +339,9 @@ class AzureCommunicationService:
             True if call was ended successfully
         """
         try:
-            async with self._calls_lock:
-                call_state = self.active_calls.get(call_id)
-            if not call_state:
-                self.logger.warning(f"Attempted to end non-existent call: {call_id}")
-                return False
-            
-            if call_state.acs_call_id:
-                # End call via ACS API
-                url = f"{self.endpoint}calling/callConnections/{call_state.acs_call_id}:hangup"
-                headers = self._get_auth_headers()
-                
-                async with self.http_client.post(url, json={}, headers=headers) as response:
-                    if response.status_code not in [200, 202]:
-                        error_text = await response.aread()
-                        self.logger.warning(
-                            f"ACS hangup API returned {response.status_code}: {error_text.decode()}"
-                        )
-            
-            # Update call state
-            call_state.status = "ended"
-            call_state.end_time = datetime.now(AST)
-            
-            # Update database
-            await self._update_call_record(call_id, "completed", call_state.end_time)
-            
-            # Decrement clinic capacity
-            await self._decrement_clinic_capacity(call_state.clinic_id)
-            
-            # Release provider capacity
-            provider_id = call_state.metadata.get('provider_id')
-            if provider_id:
-                from services.call_router import get_call_router
-                call_router = get_call_router()
-                await call_router.release_provider_capacity(provider_id)
-            
-            # Remove from active calls
-            async with self._calls_lock:
-                del self.active_calls[call_id]
-            
-            self.logger.info(
-                f"Call ended successfully: {call_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={
-                    "call_id": call_id,
-                    "reason": reason,
-                    "duration_seconds": (call_state.end_time - call_state.start_time).total_seconds()
-                }
-            )
-            
+            # Delegate to orchestrator (handles ACS hangup, DB update, capacity release)
+            await self.call_orchestrator.end_call(call_id, reason)
             return True
-            
         except Exception as e:
             self.logger.error(
                 f"Failed to end call {call_id}: {e}",
@@ -688,112 +350,7 @@ class AzureCommunicationService:
             )
             return False
     
-    async def _update_call_record(self, call_id: str, status: str, end_time: datetime):
-        """Update call record in database."""
-        try:
-            # Issue 55: Use context manager instead of next()
-            with get_db_session() as db:
-                call_record = db.query(Call).filter_by(call_id=call_id).first()
-                if call_record:
-                    call_record.status = status
-                    call_record.ended_at = end_time
-                    try:
-                        db.commit()
-                    except Exception as commit_error:
-                        db.rollback()
-                        self.logger.error(f"Failed to commit call record update: {commit_error}")
-                        raise
-        except Exception as e:
-            self.logger.error(f"Failed to update call record: {e}")
-    
-    async def _decrement_clinic_capacity(self, clinic_id: str):
-        """Decrement clinic's concurrent call count."""
-        try:
-            # Issue 55: Use context manager instead of next()
-            with get_db_session() as db:
-                license_record = db.query(ClinicLicense).filter_by(clinic_id=clinic_id).first()
-                if license_record and license_record.current_concurrent_calls > 0:
-                    license_record.current_concurrent_calls -= 1
-                    try:
-                        db.commit()
-                    except Exception as commit_error:
-                        db.rollback()
-                        self.logger.error(f"Failed to commit clinic capacity decrement: {commit_error}")
-                        raise
-        except Exception as e:
-            self.logger.error(f"Failed to decrement clinic capacity: {e}")
-    
-    async def start_audio_stream(self, call_id: str) -> bool:
-        """
-        Start audio streaming for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            True if audio streaming started successfully
-        """
-        try:
-            async with self._calls_lock:
-                call_state = self.active_calls.get(call_id)
-            if not call_state:
-                raise CallNotFoundError(call_id)
-            
-            call_state.audio_stream_active = True
-            
-            self.logger.info(
-                f"Audio streaming started for call: {call_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={"call_id": call_id}
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to start audio stream for call {call_id}: {e}",
-                LogCategory.AZURE_COMMUNICATION,
-                exception=e
-            )
-            return False
-    
-    async def send_audio_chunk(self, call_id: str, audio_data: bytes) -> bool:
-        """
-        Send audio chunk to ACS for TTS playback.
-        
-        Args:
-            call_id: ID of the call
-            audio_data: Audio data to send
-            
-        Returns:
-            True if audio was sent successfully
-        """
-        try:
-            async with self._calls_lock:
-                call_state = self.active_calls.get(call_id)
-            if not call_state or not call_state.acs_call_id:
-                return False
-            
-            # In a real implementation, this would send audio via WebSocket
-            # For now, we'll just log the action
-            self.logger.debug(
-                f"Audio chunk sent for call: {call_id}",
-                LogCategory.AZURE_COMMUNICATION,
-                extra_data={
-                    "call_id": call_id,
-                    "audio_size_bytes": len(audio_data)
-                }
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to send audio chunk for call {call_id}: {e}",
-                LogCategory.AZURE_COMMUNICATION,
-                exception=e
-            )
-            return False
+    # Note: start_audio_stream() removed - handled by orchestrator.connect_audio_stream()
     
     async def play_scripted_text(self, call_connection_id: str, text: str, language: str = "en-US") -> bool:
         """Play text using ACS TextSource (fast, no TTS processing)."""
@@ -911,7 +468,7 @@ class AzureCommunicationService:
     
     async def handle_webhook_event(self, request: Request, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Handle webhook events from ACS.
+        Handle webhook events from ACS (delegates to orchestrator).
         
         Args:
             request: FastAPI request object
@@ -933,29 +490,8 @@ class AzureCommunicationService:
                 }
             )
             
-            # Find call by ACS call ID (with lock)
-            call_state = None
-            async with self._calls_lock:
-                for state in self.active_calls.values():
-                    if state.acs_call_id == call_connection_id:
-                        call_state = state
-                        break
-            
-            if not call_state:
-                self.logger.warning(f"No active call found for ACS call ID: {call_connection_id}")
-                return {"status": "ignored", "reason": "call_not_found"}
-            
-            # Handle different event types
-            if event_type == "CallConnectionStateChanged":
-                await self._handle_call_state_change(call_state, payload)
-            elif event_type == "MediaStreamingStarted":
-                await self._handle_media_streaming_started(call_state, payload)
-            elif event_type == "MediaStreamingStopped":
-                await self._handle_media_streaming_stopped(call_state, payload)
-            else:
-                self.logger.info(f"Unhandled webhook event type: {event_type}")
-            
-            return {"status": "processed", "call_id": call_state.call_id}
+            # Delegate to orchestrator
+            return await self.call_orchestrator.handle_acs_event(event_type, payload)
             
         except Exception as e:
             self.logger.error(
@@ -965,27 +501,123 @@ class AzureCommunicationService:
             )
             return {"status": "error", "message": str(e)}
     
-    async def _handle_call_state_change(self, call_state: CallState, payload: Dict[str, Any]):
-        """Handle call state change events."""
-        new_state = payload.get("state")
-        call_state.status = new_state.lower()
+    async def make_outbound_call(
+        self,
+        to_phone: str,
+        from_phone: Optional[str] = None,
+        audio_content: Optional[bytes] = None,
+        call_context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Make an outbound call using Azure Communication Services.
         
-        if new_state == "Disconnected":
-            await self.end_call(call_state.call_id, "disconnected")
-    
-    async def _handle_media_streaming_started(self, call_state: CallState, payload: Dict[str, Any]):
-        """Handle media streaming started events."""
-        call_state.websocket_connected = True
-        call_state.audio_stream_active = True
-    
-    async def _handle_media_streaming_stopped(self, call_state: CallState, payload: Dict[str, Any]):
-        """Handle media streaming stopped events."""
-        call_state.websocket_connected = False
-        call_state.audio_stream_active = False
+        Args:
+            to_phone: Phone number to call (E.164 format, e.g., +1234567890)
+            from_phone: Phone number to call from (defaults to configured phone number)
+            audio_content: Optional audio bytes to play when call connects
+            call_context: Optional context data to attach to the call
+            
+        Returns:
+            Dict with call result: {'success': bool, 'call_id': str, 'error_code': str, 'error_message': str}
+        """
+        try:
+            from azure.communication.callautomation import CallAutomationClient, PhoneNumberIdentifier
+            from azure.communication.callautomation.models import CallInvite, FileSource
+            
+            # Validate inputs
+            if not to_phone:
+                raise ValidationError("to_phone", to_phone, "Phone number cannot be empty")
+            
+            # Normalize phone number
+            to_phone = normalize_phone(to_phone)
+            from_phone = from_phone or self.phone_number
+            from_phone = normalize_phone(from_phone)
+            
+            # Create Call Automation client
+            call_automation_client = CallAutomationClient.from_connection_string(
+                self.connection_string
+            )
+            
+            # Create call invite
+            target = PhoneNumberIdentifier(phone_number=to_phone)
+            call_invite = CallInvite(target=target, source_caller_id_number=PhoneNumberIdentifier(phone_number=from_phone))
+            
+            # Prepare callback URL with context if provided
+            callback_url = self.callback_url
+            if call_context:
+                # Encode context in callback URL
+                context_str = json.dumps(call_context)
+                callback_url = f"{self.callback_url}?context={context_str}"
+            
+            # Make the outbound call
+            call_connection_properties = call_automation_client.create_call(
+                call_invite=call_invite,
+                callback_url=callback_url
+            )
+            
+            call_connection_id = call_connection_properties.call_connection_id
+            
+            self.logger.info(
+                f"Outbound call initiated: {call_connection_id} from {from_phone} to {to_phone}",
+                LogCategory.AZURE_COMMUNICATION,
+                extra_data={
+                    "call_connection_id": call_connection_id,
+                    "from_phone": from_phone,
+                    "to_phone": to_phone,
+                    "call_context": call_context
+                }
+            )
+            
+            # If audio content provided, play it when call connects
+            if audio_content:
+                try:
+                    # Convert audio to base64 data URI
+                    import base64
+                    audio_base64 = base64.b64encode(audio_content).decode('utf-8')
+                    audio_uri = f"data:audio/wav;base64,{audio_base64}"
+                    
+                    # Play audio using FileSource
+                    play_source = FileSource(url=audio_uri)
+                    call_connection = call_automation_client.get_call_connection(call_connection_id)
+                    call_connection.play_media(play_source=play_source)
+                    
+                    self.logger.info(
+                        f"Audio playback started for outbound call {call_connection_id}",
+                        LogCategory.AZURE_COMMUNICATION
+                    )
+                except Exception as audio_error:
+                    self.logger.warning(
+                        f"Failed to play audio for outbound call {call_connection_id}: {audio_error}",
+                        LogCategory.AZURE_COMMUNICATION,
+                        exception=audio_error
+                    )
+                    # Continue - audio failure shouldn't fail the call
+            
+            return {
+                "success": True,
+                "call_id": call_connection_id,
+                "call_connection_id": call_connection_id,
+                "from_phone": from_phone,
+                "to_phone": to_phone
+            }
+            
+        except Exception as e:
+            self.logger.error(
+                f"Failed to make outbound call to {to_phone}: {e}",
+                LogCategory.AZURE_COMMUNICATION,
+                exception=e
+            )
+            return {
+                "success": False,
+                "call_id": None,
+                "error_code": "call_failed",
+                "error_message": str(e),
+                "to_phone": to_phone
+            }
     
     async def get_call_status(self, call_id: str) -> Optional[Dict[str, Any]]:
         """
-        Get status of a call.
+        Get status of a call (queries orchestrator).
         
         Args:
             call_id: ID of the call
@@ -993,55 +625,25 @@ class AzureCommunicationService:
         Returns:
             Call status information or None if not found
         """
-        async with self._calls_lock:
-            call_state = self.active_calls.get(call_id)
-        if not call_state:
+        call_context = await self.call_orchestrator.get_call_context(call_id)
+        if not call_context:
             return None
         
+        metadata = await self.call_orchestrator.get_call_metadata(call_id)
+        
         return {
-            "call_id": call_state.call_id,
-            "acs_call_id": call_state.acs_call_id,
-            "clinic_id": call_state.clinic_id,
-            "status": call_state.status,
-            "start_time": call_state.start_time.isoformat(),
-            "end_time": call_state.end_time.isoformat() if call_state.end_time else None,
-            "websocket_connected": call_state.websocket_connected,
-            "audio_stream_active": call_state.audio_stream_active,
-            "language_detected": call_state.language_detected,
-            "language_locked": call_state.language_locked
+            "call_id": call_context.call_id,
+            "acs_call_id": metadata.get('acs_call_id'),
+            "clinic_id": call_context.clinic_id,
+            "status": metadata.get('acs_status', 'unknown'),
+            "start_time": call_context.start_time.isoformat() if call_context.start_time else None,
+            "end_time": metadata.get('end_time').isoformat() if metadata.get('end_time') else None,
+            "websocket_connected": metadata.get('websocket_connected', False),
+            "audio_stream_active": metadata.get('audio_stream_active', False),
+            "language_detected": call_context.language.value if call_context.language else None,
+            "language_locked": metadata.get('language_locked', False)
         }
     
-    async def get_active_calls_count(self) -> int:
-        """Get count of active calls."""
-        async with self._calls_lock:
-            return len(self.active_calls)
-    
-    async def get_clinic_active_calls_count(self, clinic_id: str) -> int:
-        """Get count of active calls for a specific clinic."""
-        async with self._calls_lock:
-            return sum(1 for call_state in self.active_calls.values() 
-                      if call_state.clinic_id == clinic_id and call_state.status == CallStatus.ACTIVE.value)
-    
-    async def cleanup_expired_calls(self):
-        """Clean up calls that have exceeded maximum duration."""
-        try:
-            max_duration = timedelta(minutes=self.settings.azure.communication.max_call_duration_minutes)
-            current_time = datetime.now(AST)
-            
-            expired_calls = []
-            async with self._calls_lock:
-                for call_id, call_state in list(self.active_calls.items()):
-                    if current_time - call_state.start_time > max_duration:
-                        expired_calls.append(call_id)
-            
-            for call_id in expired_calls:
-                await self.end_call(call_id, "timeout")
-                self.logger.info(f"Cleaned up expired call: {call_id}")
-                
-        except Exception as e:
-            self.logger.error(f"Failed to cleanup expired calls: {e}")
-
-
     async def close(self):
         """Clean up resources."""
         if not self._closed and self.http_client:

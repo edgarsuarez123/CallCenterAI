@@ -2,7 +2,7 @@
 Azure Text-to-Speech service for real-time audio synthesis.
 
 This service provides:
-- Text-to-speech synthesis with streaming
+- Text-to-speech synthesis
 - Bilingual voice support (English/Spanish)
 - SSML support for natural-sounding speech
 - Voice selection based on detected language
@@ -10,13 +10,11 @@ This service provides:
 """
 
 import asyncio
-import io
-import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Callable, Union
-from dataclasses import dataclass, field
+from typing import Dict, Optional, Any, Callable
+from dataclasses import dataclass
 from enum import Enum
 
 import azure.cognitiveservices.speech as speechsdk
@@ -35,7 +33,6 @@ from services.exceptions import (
     ValidationError,
     AzureCommunicationError
 )
-from services.audio_stream_handler import get_audio_stream_handler
 
 
 logger = get_logger("azure_speech_tts")
@@ -45,7 +42,6 @@ class SynthesisStatus(Enum):
     """Status of TTS synthesis process."""
     IDLE = "idle"
     SYNTHESIZING = "synthesizing"
-    STREAMING = "streaming"
     COMPLETED = "completed"
     ERROR = "error"
 
@@ -111,14 +107,9 @@ class TextToSpeechService:
             )
         }
         
-        # Active synthesis sessions by call ID
-        self.active_sessions: Dict[str, Dict[str, Any]] = {}
+        # Active synthesis status by call ID
         self.synthesis_status: Dict[str, SynthesisStatus] = {}
         self.synthesis_callbacks: Dict[str, Callable] = {}
-        
-        # Audio streaming
-        self.audio_buffer_size = 4096
-        self.streaming_chunk_size = 1024
         
         # Performance tracking
         self.synthesis_stats: Dict[str, Dict[str, Any]] = {}
@@ -192,15 +183,33 @@ class TextToSpeechService:
             # Create synthesis result ID
             result_id = f"tts_{int(time.time() * 1000)}"
             
-            # Issue 163: Queue synthesis requests or cancel previous requests for same call
+            # Issue 49, 163: Queue synthesis requests or cancel previous requests for same call
             if call_id:
                 async with self._synthesis_lock:
-                    # Issue 163: Check if synthesis is already in progress for this call
+                    # Issue 49: Check if synthesis is already in progress for this call
                     if call_id in self.synthesis_status and self.synthesis_status[call_id] == SynthesisStatus.SYNTHESIZING:
-                        self.logger.warning(f"Synthesis already in progress for call {call_id}, queuing new request")
-                        # In production, you might want to queue this request or cancel the previous one
-                        # For now, we'll proceed but log a warning
+                        # Issue 49: Since synthesis is synchronous, we can't cancel it mid-execution
+                        # Instead, we'll skip the new request and log a warning
+                        self.logger.warning(
+                            f"Synthesis already in progress for call {call_id}, skipping new request",
+                            LogCategory.AZURE_SPEECH,
+                            extra_data={"call_id": call_id, "text_length": len(text)}
+                        )
+                        # Return a result indicating the request was skipped
+                        return SynthesisResult(
+                            audio_data=b'',
+                            duration_ms=0,
+                            voice="",
+                            language=language,
+                            text=text,
+                            ssml=None,
+                            timestamp=datetime.now(timezone.utc),
+                            result_id=f"tts_skipped_{int(time.time() * 1000)}",
+                            success=False,
+                            error_message="Synthesis already in progress for this call"
+                        )
                     
+                    # Issue 49: Mark synthesis as in progress
                     self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
                     if synthesis_callback:
                         self.synthesis_callbacks[call_id] = synthesis_callback
@@ -208,8 +217,20 @@ class TextToSpeechService:
             # Create SSML
             ssml = self._create_ssml(text, voice_config)
             
-            # Synthesize speech
+            # Synthesize speech with latency measurement
+            synthesis_start = time.time()
             audio_data = await self._perform_synthesis(ssml, voice_config)
+            synthesis_latency_ms = (time.time() - synthesis_start) * 1000
+            
+            # Record TTS latency metric
+            try:
+                from services.metrics import get_metrics_service
+                metrics_service = get_metrics_service()
+                # Get clinic_id from call_id if available (call_id format may include clinic_id)
+                clinic_id = call_id.split('_')[0] if call_id and '_' in call_id else 'unknown'
+                metrics_service.record_tts_latency(clinic_id, synthesis_latency_ms)
+            except Exception as metrics_error:
+                self.logger.warning(f"Failed to record TTS latency metric: {metrics_error}")
             
             # Create result
             result = SynthesisResult(
@@ -227,13 +248,13 @@ class TextToSpeechService:
             # Update stats (with lock)
             if call_id:
                 self._update_synthesis_stats(call_id, result)
-                async with self._synthesis_lock:
-                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
-            
-            # Call callback if registered (with lock)
-            if call_id:
+                # Call callback if registered (with lock)
                 async with self._synthesis_lock:
                     callback = self.synthesis_callbacks.get(call_id)
+                    # Issue 49: Clear synthesis status and callback when complete
+                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
+                    if call_id in self.synthesis_callbacks:
+                        del self.synthesis_callbacks[call_id]
                 if callback:
                     try:
                         callback(result)
@@ -278,7 +299,10 @@ class TextToSpeechService:
             
             if call_id:
                 async with self._synthesis_lock:
+                    # Issue 49: Clear synthesis status and callback on error
                     self.synthesis_status[call_id] = SynthesisStatus.ERROR
+                    if call_id in self.synthesis_callbacks:
+                        del self.synthesis_callbacks[call_id]
             
             return result
     
@@ -358,330 +382,6 @@ class TextToSpeechService:
                 raise
             raise AzureCommunicationError("synthesis_error", str(e))
     
-    @log_performance("tts_stream_synthesis")
-    async def stream_synthesis(self, text: str, call_id: str, language: str = "en", 
-                             chunk_callback: Optional[Callable] = None) -> bool:
-        """
-        Stream text-to-speech synthesis in chunks.
-        
-        Args:
-            text: Text to synthesize
-            language: Language code (en/es)
-            call_id: ID of the call
-            chunk_callback: Callback for audio chunks
-            
-        Returns:
-            True if streaming started successfully
-        """
-        try:
-            # Validate inputs
-            if not text or not text.strip():
-                raise ValidationError("text", text, "Text cannot be empty")
-            
-            if language not in self.voice_configs:
-                raise ValidationError("language", language, f"Unsupported language: {language}")
-            
-            # Get voice configuration
-            voice_config = self.voice_configs[language]
-            
-            # Create SSML
-            ssml = self._create_ssml(text, voice_config)
-            
-            # Update status (with lock)
-            async with self._synthesis_lock:
-                self.synthesis_status[call_id] = SynthesisStatus.STREAMING
-            
-            # Store session info (with lock)
-            async with self._synthesis_lock:
-                self.active_sessions[call_id] = {
-                    "text": text,
-                    "language": language,
-                    "voice_config": voice_config,
-                    "ssml": ssml,
-                    "start_time": datetime.now(timezone.utc),
-                    "chunk_callback": chunk_callback
-                }
-            
-            # Start streaming synthesis
-            await self._perform_streaming_synthesis(call_id, ssml, voice_config)
-            
-            self.logger.info(
-                f"Streaming synthesis started for call: {call_id}",
-                LogCategory.AZURE_SPEECH,
-                extra_data={
-                    "call_id": call_id,
-                    "text_length": len(text),
-                    "language": language,
-                    "voice": voice_config.name
-                }
-            )
-            
-            return True
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to start streaming synthesis for call {call_id}: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            
-            async with self._synthesis_lock:
-                if call_id in self.synthesis_status:
-                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
-            
-            return False
-    
-    async def _perform_streaming_synthesis(self, call_id: str, ssml: str, voice_config: VoiceConfig):
-        """
-        Perform streaming synthesis with chunk delivery.
-        
-        Args:
-            call_id: ID of the call
-            ssml: SSML markup
-            voice_config: Voice configuration
-        """
-        try:
-            # Create audio output stream
-            audio_stream = speechsdk.audio.PushAudioOutputStream()
-            audio_config = AudioConfig(stream=audio_stream)
-            
-            # Create synthesizer
-            synthesizer = SpeechSynthesizer(
-                speech_config=self.speech_config,
-                audio_config=audio_config
-            )
-            
-            # Set up event handlers
-            def on_synthesizing(evt):
-                """Handle synthesizing events (partial audio)."""
-                try:
-                    # Get session with lock (sync lock for event handler)
-                    with self._sync_lock:
-                        session = self.active_sessions.get(call_id) if call_id in self.active_sessions else None
-                    
-                    if session:
-                        # Create synthesis result for chunk
-                        chunk_result = SynthesisResult(
-                            audio_data=bytes(evt.result.audio_data),
-                            duration_ms=len(evt.result.audio_data) // 32,
-                            voice=voice_config.name,
-                            language=voice_config.language,
-                            text=session["text"],
-                            ssml=ssml,
-                            timestamp=datetime.now(timezone.utc),
-                            result_id=f"chunk_{int(time.time() * 1000)}",
-                            success=True
-                        )
-                        
-                        # Call chunk callback if registered
-                        chunk_callback = session.get("chunk_callback")
-                        if chunk_callback:
-                            try:
-                                chunk_callback(chunk_result)
-                            except Exception as e:
-                                self.logger.error(f"Error in chunk callback: {e}")
-                        
-                        self.logger.debug(
-                            f"TTS chunk synthesized for call {call_id}",
-                            LogCategory.AZURE_SPEECH,
-                            extra_data={
-                                "call_id": call_id,
-                                "chunk_size": len(evt.result.audio_data)
-                            }
-                        )
-                        
-                except Exception as e:
-                    self.logger.error(f"Error processing TTS chunk: {e}")
-            
-            def on_synthesized(evt):
-                """Handle synthesized events (final audio)."""
-                try:
-                    # Get session with lock (sync lock for event handler)
-                    with self._sync_lock:
-                        session = self.active_sessions.get(call_id) if call_id in self.active_sessions else None
-                    
-                    if session:
-                        # Create final synthesis result
-                        final_result = SynthesisResult(
-                            audio_data=bytes(evt.result.audio_data),
-                            duration_ms=len(evt.result.audio_data) // 32,
-                            voice=voice_config.name,
-                            language=voice_config.language,
-                            text=session["text"],
-                            ssml=ssml,
-                            timestamp=datetime.now(timezone.utc),
-                            result_id=f"final_{int(time.time() * 1000)}",
-                            success=True
-                        )
-                        
-                        # Update stats
-                        self._update_synthesis_stats(call_id, final_result)
-                        
-                        # Call chunk callback if registered
-                        chunk_callback = session.get("chunk_callback")
-                        if chunk_callback:
-                            try:
-                                chunk_callback(final_result)
-                            except Exception as e:
-                                self.logger.error(f"Error in final chunk callback: {e}")
-                        
-                        self.logger.info(
-                            f"TTS synthesis completed for call {call_id}",
-                            LogCategory.AZURE_SPEECH,
-                            extra_data={
-                                "call_id": call_id,
-                                "final_audio_size": len(evt.result.audio_data),
-                                "total_duration_ms": final_result.duration_ms
-                            }
-                        )
-                        
-                except Exception as e:
-                    self.logger.error(f"Error processing final TTS result: {e}")
-            
-            def on_canceled(evt):
-                """Handle synthesis cancellation."""
-                self.logger.warning(
-                    f"TTS synthesis canceled for call {call_id}",
-                    LogCategory.AZURE_SPEECH,
-                    extra_data={
-                        "call_id": call_id,
-                        "reason": evt.result.cancellation_details.reason,
-                        "error": evt.result.cancellation_details.error_details
-                    }
-                )
-                with self._sync_lock:
-                    if call_id in self.synthesis_status:
-                        self.synthesis_status[call_id] = SynthesisStatus.ERROR
-            
-            # Register event handlers
-            synthesizer.synthesizing.connect(on_synthesizing)
-            synthesizer.synthesized.connect(on_synthesized)
-            synthesizer.canceled.connect(on_canceled)
-            
-            # Start synthesis
-            synthesizer.speak_ssml_async(ssml).get()
-            
-            # Clean up
-            try:
-                audio_stream.close()
-            except Exception as e:
-                self.logger.warning(f"Error closing audio stream: {e}")
-            
-            # Update status and remove session (with lock)
-            async with self._synthesis_lock:
-                if call_id in self.synthesis_status:
-                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
-                if call_id in self.active_sessions:
-                    del self.active_sessions[call_id]
-            
-        except Exception as e:
-            self.logger.error(
-                f"Error in streaming synthesis for call {call_id}: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            
-            async with self._synthesis_lock:
-                if call_id in self.synthesis_status:
-                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
-                if call_id in self.active_sessions:
-                    del self.active_sessions[call_id]
-    
-    async def synthesize_ssml(self, ssml: str, language: str = "en", 
-                            call_id: Optional[str] = None) -> SynthesisResult:
-        """
-        Synthesize speech from SSML markup.
-        
-        Args:
-            ssml: SSML markup to synthesize
-            language: Language code (en/es)
-            call_id: ID of the call
-            
-        Returns:
-            Synthesis result with audio data
-        """
-        try:
-            # Validate inputs
-            if not ssml or not ssml.strip():
-                raise ValidationError("ssml", ssml, "SSML cannot be empty")
-            
-            if language not in self.voice_configs:
-                raise ValidationError("language", language, f"Unsupported language: {language}")
-            
-            # Get voice configuration
-            voice_config = self.voice_configs[language]
-            
-            # Create synthesis result ID
-            result_id = f"ssml_{int(time.time() * 1000)}"
-            
-            # Update status (with lock)
-            if call_id:
-                async with self._synthesis_lock:
-                    self.synthesis_status[call_id] = SynthesisStatus.SYNTHESIZING
-            
-            # Perform synthesis
-            audio_data = await self._perform_synthesis(ssml, voice_config)
-            
-            # Create result
-            result = SynthesisResult(
-                audio_data=audio_data,
-                duration_ms=len(audio_data) // 32,  # Approximate duration
-                voice=voice_config.name,
-                language=voice_config.language,
-                text="",  # No plain text for SSML
-                ssml=ssml,
-                timestamp=datetime.now(timezone.utc),
-                result_id=result_id,
-                success=True
-            )
-            
-            # Update stats (with lock)
-            if call_id:
-                self._update_synthesis_stats(call_id, result)
-                async with self._synthesis_lock:
-                    self.synthesis_status[call_id] = SynthesisStatus.COMPLETED
-            
-            self.logger.info(
-                f"SSML synthesis completed: {result_id}",
-                LogCategory.AZURE_SPEECH,
-                extra_data={
-                    "result_id": result_id,
-                    "call_id": call_id,
-                    "ssml_length": len(ssml),
-                    "audio_size": len(audio_data),
-                    "voice": voice_config.name
-                }
-            )
-            
-            return result
-            
-        except Exception as e:
-            self.logger.error(
-                f"Failed to synthesize SSML: {e}",
-                LogCategory.AZURE_SPEECH,
-                exception=e
-            )
-            
-            # Create error result
-            result = SynthesisResult(
-                audio_data=b'',
-                duration_ms=0,
-                voice="",
-                language=language,
-                text="",
-                ssml=ssml,
-                timestamp=datetime.now(timezone.utc),
-                result_id=f"ssml_error_{int(time.time() * 1000)}",
-                success=False,
-                error_message=str(e)
-            )
-            
-            if call_id:
-                async with self._synthesis_lock:
-                    self.synthesis_status[call_id] = SynthesisStatus.ERROR
-            
-            return result
-    
     def _update_synthesis_stats(self, call_id: str, result: SynthesisResult):
         """Update synthesis statistics."""
         # Note: This is called from event handlers which are synchronous
@@ -707,59 +407,6 @@ class TextToSpeechService:
         except Exception as e:
             self.logger.error(f"Error updating synthesis stats: {e}")
     
-    def get_voice_for_language(self, language: str) -> Optional[VoiceConfig]:
-        """
-        Get voice configuration for a language.
-        
-        Args:
-            language: Language code (en/es)
-            
-        Returns:
-            Voice configuration or None
-        """
-        return self.voice_configs.get(language)
-    
-    def get_synthesis_status(self, call_id: str) -> Optional[SynthesisStatus]:
-        """
-        Get the current synthesis status for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Current synthesis status or None
-        """
-        async with self._synthesis_lock:
-            return self.synthesis_status.get(call_id)
-    
-    def get_synthesis_statistics(self, call_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get synthesis statistics for a call.
-        
-        Args:
-            call_id: ID of the call
-            
-        Returns:
-            Synthesis statistics or None
-        """
-        if call_id not in self.synthesis_stats:
-            return None
-        
-        stats = self.synthesis_stats[call_id].copy()
-        stats["duration_seconds"] = (datetime.now(timezone.utc) - stats["start_time"]).total_seconds()
-        
-        if stats["total_syntheses"] > 0:
-            stats["success_rate"] = stats["successful_syntheses"] / stats["total_syntheses"]
-        else:
-            stats["success_rate"] = 0.0
-        
-        return stats
-    
-    def get_active_sessions_count(self) -> int:
-        """Get count of active synthesis sessions."""
-        with self._sync_lock:
-            return len(self.active_sessions)
-    
     async def stop_synthesis(self, call_id: str) -> bool:
         """
         Stop synthesis for a call.
@@ -772,8 +419,6 @@ class TextToSpeechService:
         """
         try:
             async with self._synthesis_lock:
-                if call_id in self.active_sessions:
-                    del self.active_sessions[call_id]
                 if call_id in self.synthesis_status:
                     del self.synthesis_status[call_id]
                 if call_id in self.synthesis_callbacks:
