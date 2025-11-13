@@ -1,0 +1,25 @@
+# data/models/clinic.py
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, String, DateTime, Text
+from sqlalchemy.dialects.postgresql import UUID
+from Clinic_app.common.database import Base
+
+
+class Clinic(Base):
+    """
+    Represents a tenant container — one clinic = one deployed instance.
+    """
+    __tablename__ = "clinic"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    network_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    name = Column(Text, nullable=False)
+    tier = Column(String(50), nullable=False)  # basic/pro/enterprise
+    status = Column(String(50), nullable=False, default="active", index=True)  # active/suspended
+    license_token = Column(Text, nullable=False, unique=True)
+    license_expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<Clinic(id={self.id}, name={self.name}, status={self.status})>"
