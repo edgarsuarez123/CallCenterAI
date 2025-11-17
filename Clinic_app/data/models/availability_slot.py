@@ -1,7 +1,7 @@
 # Clinic_app/data/models/availability_slot.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, DateTime, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy import Enum as SQLEnum
@@ -29,6 +29,7 @@ class AvailabilitySlot(Base):
     __table_args__ = (
         UniqueConstraint('provider_id', 'slot_start', 'slot_end', name='uq_provider_slot_time'),
         Index('idx_clinic_status_start', 'clinic_id', 'status', 'slot_start'),  # For efficient "find free slots" queries
+        CheckConstraint('slot_end > slot_start', name='check_availability_slot_end_after_start'),
     )
 
     # Relationships
