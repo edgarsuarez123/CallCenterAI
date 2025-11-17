@@ -1,7 +1,7 @@
 # Clinic_app/data/models/booking.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Index
+from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Index, CheckConstraint
 from sqlalchemy.sql import text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -42,6 +42,7 @@ class Booking(Base):
             postgresql_where=text("status IN ('tentative', 'confirmed')")
         ),
         Index('idx_status_hold_expires', 'status', 'hold_expires_at'),  # For reaper efficiency
+        CheckConstraint('slot_end > slot_start', name='check_booking_slot_end_after_start'),
     )
 
     # Relationships

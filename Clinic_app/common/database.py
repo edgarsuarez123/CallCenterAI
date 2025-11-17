@@ -20,28 +20,42 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 # Build async connection string (uses asyncpg driver)
 DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# Log connection info (without password)
-logger.info(f"Initializing database connection to {DB_HOST}:{DB_PORT}/{DB_NAME}")
-
 # Create async engine with pool settings and SSL
-engine = create_async_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,  # Test connections before using
-    echo=False,  # Set to True for SQL query logging
-    future=True,
-    connect_args={
-        "ssl": True  # Require SSL for secure connections (Azure PostgreSQL)
-    }
-)
+# Only create engine if all required env vars are set and asyncpg is available
+# This allows imports to work even when env vars aren't configured (e.g., for migrations)
+engine = None
+if DB_HOST and DB_NAME and DB_USER and DB_PASSWORD:
+    try:
+        # Log connection info (without password)
+        logger.info(f"Initializing database connection to {DB_HOST}:{DB_PORT}/{DB_NAME}")
+        
+        engine = create_async_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,  # Test connections before using
+            echo=False,  # Set to True for SQL query logging
+            future=True,
+            connect_args={
+                "ssl": True  # Require SSL for secure connections (Azure PostgreSQL)
+            }
+        )
+        
+        logger.info("Database engine created successfully")
+    except Exception as e:
+        # If engine creation fails (e.g., asyncpg not installed), log warning but continue
+        # This allows imports to work for migrations even if asyncpg isn't available
+        logger.warning(f"Could not create database engine: {e}. This is OK for migration generation.")
+        engine = None
+else:
+    logger.debug("Database environment variables not set. Engine creation skipped (OK for migration generation).")
 
-logger.info("Database engine created successfully")
-
-# Create async session factory
-AsyncSessionLocal = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False
-)
+# Create async session factory (only if engine was created)
+AsyncSessionLocal = None
+if engine is not None:
+    AsyncSessionLocal = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
 
 # Base for models
 Base = declarative_base()
@@ -49,6 +63,8 @@ Base = declarative_base()
 # Async dependency for FastAPI
 async def get_db():
     """Dependency to get database session."""
+    if AsyncSessionLocal is None:
+        raise RuntimeError("Database engine not initialized. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables.")
     async with AsyncSessionLocal() as session:
         yield session
 
