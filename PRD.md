@@ -945,6 +945,12 @@ When creating/updating events, backend must set:
 - Identify our own events vs. manual/manual events
 - Track reminder status
 - Enable efficient lookup for reschedules/cancels
+- Store `booking_id` (exists before event creation) for recovery if `google_event_id` is NULL
+
+**Note on Failed Operations:**
+- If Google Calendar API fails after retries, booking proceeds with `google_event_id = NULL` (graceful degradation)
+- Failed sync operations queue deferred to Phase 2 (background worker to retry failed GCal operations)
+- Phase 1: Log failures for manual review; Phase 2: Automatic retry with database queue
 
 ---
 
