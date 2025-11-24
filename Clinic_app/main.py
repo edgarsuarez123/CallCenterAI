@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import logging
 from api.Routes.health import health_router
+from Clinic_app.Routes.admin import admin_router
+from Clinic_app.Routes.provider import provider_router
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +36,8 @@ def root():
 
 # Include routers
 app.include_router(health_router)
+app.include_router(admin_router)
+app.include_router(provider_router)
 
 # Error handler
 @app.exception_handler(Exception)
