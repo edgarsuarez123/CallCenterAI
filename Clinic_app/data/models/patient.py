@@ -10,7 +10,8 @@ from Clinic_app.common.database import Base
 class Patient(Base):
     """
     Stores tokenized patient identifiers and contact info.
-    PHI (name, DOB) is encrypted at rest.
+    All PHI (name, DOB, phone, email) is encrypted at rest.
+    Uses name_dob_hash for efficient lookup without decrypting all records.
     """
     __tablename__ = "patient"
 
@@ -18,16 +19,17 @@ class Patient(Base):
     clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)
     name_token = Column(BYTEA, nullable=False)  # Encrypted patient name (PHI)
     dob_token = Column(BYTEA, nullable=False)  # Encrypted date of birth (PHI)
-    phone_e164 = Column(String, nullable=False)  # Contact number for calls and reminders
-    email = Column(String, nullable=True)  # Email address for future notifications
+    phone_token = Column(BYTEA, nullable=False)  # Encrypted phone number (PHI)
+    email_token = Column(BYTEA, nullable=True)  # Encrypted email address (PHI, nullable)
+    name_dob_hash = Column(String(64), nullable=False)  # SHA-256 hash of normalized (name|dob) for efficient lookup (NOT PHI)
     language = Column(String(10), nullable=False, default="en")  # en/es for AI voice selection
     insurance_plan = Column(Text, nullable=True)  # Insurance plan information (nullable)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Composite index for efficient "find patient by phone within clinic" queries
+    # Composite index for efficient "find patient by name+DOB hash within clinic" queries
     __table_args__ = (
-        Index('idx_clinic_phone', 'clinic_id', 'phone_e164'),
+        Index('idx_clinic_name_dob_hash', 'clinic_id', 'name_dob_hash'),
     )
 
     # Relationships
@@ -35,5 +37,5 @@ class Patient(Base):
     # bookings relationship will be defined in booking model
 
     def __repr__(self):
-        return f"<Patient(id={self.id}, clinic_id={self.clinic_id}, phone_e164={self.phone_e164})>"
+        return f"<Patient(id={self.id}, clinic_id={self.clinic_id})>"
 
