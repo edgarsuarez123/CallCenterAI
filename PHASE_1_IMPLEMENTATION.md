@@ -4,16 +4,17 @@
 **Core Booking Functionality**: Enable inbound calls via Retell AI to successfully book, confirm, and cancel appointments with Google Calendar integration.
 
 ## Progress Summary
-**Overall: ~30% Complete**
+**Overall: ~60% Complete**
 
 - ✅ **Database Foundation** - 2/3 tasks (67%)
 - ✅ **Google Calendar Integration** - 9/9 tasks (100%) - COMPLETE
 - ❌ **Retell Integration** - 0/6 tasks (0%)
-- ❌ **Availability Engine** - 0/5 tasks (0%)
+- ✅ **Availability Engine** - 5/5 tasks (100%) - COMPLETE
 - ❌ **Booking State Machine** - 0/5 tasks (0%)
-- ❌ **Patient Management** - 0/3 tasks (0%)
-- ❌ **Error Handling** - 0/3 tasks (0%)
-- ❌ **Admin Endpoints** - 0/5 tasks (0%) - NEW
+- ✅ **Patient Management** - 3/3 tasks (100%) - COMPLETE
+- ⚠️ **Error Handling** - 2/3 tasks (67%) - Standardized responses & validation in admin/provider routes
+- ✅ **Admin Endpoints** - 6/6 tasks (100%) - COMPLETE (includes business hours)
+- ✅ **PHI Encryption** - 1/1 tasks (100%) - COMPLETE
 - ⚠️ **Infrastructure** - 1/3 tasks (33%)
 
 ---
@@ -47,12 +48,15 @@
 - [ ] **Webhook: `/retell/webhook/call_ended`** - Track call end (basic)
 - [ ] **Signature verification** - HMAC-SHA256 validation for Retell requests
 
-#### 4. Availability Engine
-- [ ] **Slot generation** - Generate 15-minute slots within time ranges
-- [ ] **AvailabilitySlot querying** - Check FREE/BLOCKED status
-- [ ] **Google Calendar conflict checking** - Count overlapping events
-- [ ] **Double-booking prevention** - Database constraints + application logic
-- [ ] **Capacity enforcement** - Respect provider.capacity limits
+#### 4. Availability Engine ✅ COMPLETE
+- [x] **Slot generation** - Generate candidate slots based on provider.booking_duration_mins
+- [x] **AvailabilitySlot querying** - Check FREE/BLOCKED status
+- [x] **Google Calendar conflict checking** - Detect patient appointments vs blocking events
+- [x] **Double-booking prevention** - Database constraints + application logic
+- [x] **Capacity enforcement** - Respect provider.capacity limits (patient appointments only)
+- [x] **Multiple search functions** - is_slot_available, get_available_slots, get_next_available_slots, find_slot_at_time, check_and_offer_alternatives
+- [x] **Business hours support** - Clinic-level business hours (business_hours_start, business_hours_end)
+- [x] **Keyword detection** - Detect patient appointments via keywords in English and Spanish
 
 #### 5. Booking State Machine
 - [ ] **Tentative booking creation** - With hold_token and hold_expires_at (5 min)
@@ -61,22 +65,32 @@
 - [ ] **Hold expiration reaper** - Background worker to expire tentative holds (every 5 min)
 - [ ] **BookingAudit logging** - Record all state changes
 
-#### 6. Patient Management
-- [ ] **Find patient by phone** - Within clinic scope
-- [ ] **Create patient** - With encrypted name_token (basic encryption for Phase 1)
-- [ ] **PHI encryption** - AES-256 encryption for name_token (can use env var key for Phase 1)
+#### 6. Patient Management ✅ COMPLETE
+- [x] **Find patient by name + DOB** - Within clinic scope using hash-based lookup
+- [x] **Create patient** - With encrypted name_token, dob_token, phone_token, email_token
+- [x] **PHI encryption** - AES-256-GCM encryption for all PHI (name, DOB, phone, email)
+- [x] **Hash-based lookup** - SHA-256 hash of normalized (name|dob) for efficient O(1) lookup
+- [x] **Patient model updated** - phone_e164 → phone_token (BYTEA), email → email_token (BYTEA), added name_dob_hash
+- [x] **Database migration** - Encrypt patient phone and email, add hash column
 
 #### 7. Basic Error Handling
-- [ ] **Standardized error responses** - Success/error format
-- [ ] **Input validation** - Pydantic models for all requests
-- [ ] **HTTP status codes** - Proper 400/404/409/500 responses
+- [x] **Standardized error responses** - Success/error format (implemented in admin.py and provider.py)
+- [x] **Input validation** - Pydantic models for all requests (implemented in admin.py and provider.py)
+- [x] **HTTP status codes** - Proper 400/404/409/500 responses (implemented in admin.py and provider.py)
 
-#### 8. Admin Endpoints (NEW - Required for Setup)
-- [ ] **Clinic setup endpoint** - `POST /admin/clinics/setup` - Create clinic + integration + license
-- [ ] **Provider management** - `POST /admin/clinics/{clinic_id}/providers` - Create provider
-- [ ] **Provider management** - `PUT /admin/providers/{provider_id}` - Update provider
-- [ ] **Provider management** - `GET /admin/clinics/{clinic_id}/providers` - List providers
-- [ ] **Google Calendar validation** - Validate calendar access on provider create/update
+#### 8. Admin Endpoints (NEW - Required for Setup) ✅ COMPLETE
+- [x] **Clinic setup endpoint** - `POST /admin/clinics/setup` - Create clinic + integration + license
+- [x] **Clinic CRUD endpoints** - `POST /admin/clinics`, `GET /admin/clinics/{id}`, `PUT /admin/clinics/{id}`, `GET /admin/clinics`
+- [x] **Integration endpoints** - `POST /admin/clinics/{id}/integration`, `GET /admin/clinics/{id}/integration`, `PUT /admin/clinics/{id}/integration`
+- [x] **License endpoints** - `POST /admin/clinics/{id}/license`, `GET /admin/clinics/{id}/license`, `PUT /admin/clinics/{id}/license`
+- [x] **Business hours endpoints** - `GET /admin/clinics/{id}/business-hours`, `PUT /admin/clinics/{id}/business-hours` - Manage clinic business hours
+- [x] **Provider management** - `POST /admin/clinics/{clinic_id}/providers` - Create provider
+- [x] **Provider management** - `GET /admin/providers/{provider_id}` - Get provider
+- [x] **Provider management** - `PUT /admin/providers/{provider_id}` - Update provider
+- [x] **Provider management** - `GET /admin/clinics/{clinic_id}/providers` - List providers
+- [x] **Provider time blocking** - `POST /admin/providers/{provider_id}/block-time` - Block time periods
+- [x] **Provider time unblocking** - `POST /admin/providers/{provider_id}/unblock-time` - Unblock time periods
+- [x] **Google Calendar validation** - Validate calendar access on provider create/update
 
 #### 9. Basic Infrastructure
 - [ ] **Environment configuration** - .env file for secrets
@@ -121,12 +135,13 @@
 
 ## Phase 1 Implementation Order
 
-### ✅ Week 1: Foundation (IN PROGRESS)
+### ✅ Week 1: Foundation (COMPLETE - Admin endpoints, PHI encryption, and patient service all done)
 
 1. **Database Setup** ✅ COMPLETE
    - [x] Create Alembic migration for all existing models
    - [x] All models exist: `clinic`, `clinic_integration`, `provider`, `patient`, `booking`, `availability_slot`, `booking_audit`, `call_log`, `license`, `phone_route`
    - [x] Run migrations on dev database
+   - [x] Migration for encrypting patient phone/email: `encrypt_patient_phone_email_add_hash.py` (adds phone_token, email_token, name_dob_hash)
    - [ ] Create seed script for test data
 
 2. **Google Calendar Client** ✅ COMPLETE
@@ -144,36 +159,71 @@
    - [x] Implement: Graceful degradation
    - [x] Unit tests: 28 tests, all passing
 
-3. **Admin Endpoints** (NEW - Required for Setup)
-   - [ ] Create `Clinic_app/Routes/admin.py`
-   - [ ] Implement: `POST /admin/clinics/setup` - Create clinic + integration + license
-   - [ ] Implement: `POST /admin/clinics/{clinic_id}/providers` - Create provider
-   - [ ] Implement: `PUT /admin/providers/{provider_id}` - Update provider
-   - [ ] Implement: `GET /admin/clinics/{clinic_id}/providers` - List providers
-   - [ ] Integrate Google Calendar validation on provider create/update
+3. **Admin Endpoints** ✅ COMPLETE
+   - [x] Create `Clinic_app/Routes/admin.py`
+   - [x] Implement: `POST /admin/clinics/setup` - Create clinic + integration + license
+   - [x] Implement: `POST /admin/clinics` - Create clinic only
+   - [x] Implement: `GET /admin/clinics/{clinic_id}` - Get clinic
+   - [x] Implement: `PUT /admin/clinics/{clinic_id}` - Update clinic
+   - [x] Implement: `GET /admin/clinics` - List clinics
+   - [x] Implement: `POST /admin/clinics/{clinic_id}/integration` - Create/update integration
+   - [x] Implement: `GET /admin/clinics/{clinic_id}/integration` - Get integration
+   - [x] Implement: `PUT /admin/clinics/{clinic_id}/integration` - Update integration
+   - [x] Implement: `POST /admin/clinics/{clinic_id}/license` - Create/update license
+   - [x] Implement: `GET /admin/clinics/{clinic_id}/license` - Get license
+   - [x] Implement: `PUT /admin/clinics/{clinic_id}/license` - Update license
+   - [x] Create `Clinic_app/Routes/provider.py`
+   - [x] Implement: `POST /admin/clinics/{clinic_id}/providers` - Create provider
+   - [x] Implement: `GET /admin/providers/{provider_id}` - Get provider
+   - [x] Implement: `PUT /admin/providers/{provider_id}` - Update provider
+   - [x] Implement: `GET /admin/clinics/{clinic_id}/providers` - List providers
+   - [x] Implement: `POST /admin/providers/{provider_id}/block-time` - Block time periods
+   - [x] Implement: `POST /admin/providers/{provider_id}/unblock-time` - Unblock time periods
+   - [x] Integrate Google Calendar validation on provider create/update
+   - [x] All routes include validation, error handling, and logging
+   - [x] Standardized APIResponse format across all endpoints
+   - [x] Comprehensive Pydantic models with field validators
+   - [x] Error helper functions (raise_not_found, raise_validation_error, raise_conflict_error)
+   - [x] Transaction handling with proper rollback on errors
+   - [x] Structured logging (info/warning/error levels, no PHI)
 
-4. **PHI Encryption Utilities**
-   - [ ] Create `Clinic_app/common/encryption.py`
-   - [ ] Implement: AES-256 encryption for PHI
-   - [ ] Implement: `encrypt_phi()` function
-   - [ ] Implement: `decrypt_phi()` function
-   - [ ] Use env var key for Phase 1
+4. **PHI Encryption Utilities** ✅ COMPLETE
+   - [x] Create `Clinic_app/common/encryption.py`
+   - [x] Implement: AES-256-GCM encryption for PHI
+   - [x] Implement: `encrypt_phi()` function
+   - [x] Implement: `decrypt_phi()` function
+   - [x] Use env var key for Phase 1
+   - [x] Custom exception classes (EncryptionError, EncryptionKeyError, DecryptionError, AuthenticationError)
+   - [x] Key validation and caching
+   - [x] Structured logging (no PHI in logs)
 
-5. **Basic Patient Service**
-   - [ ] Create `Clinic_app/services/patient.py`
-   - [ ] Implement: `find_or_create_patient()` - Find by phone, create if not exists
-   - [ ] Integrate PHI encryption for name_token and dob_token
+5. **Basic Patient Service** ✅ COMPLETE
+   - [x] Create `Clinic_app/services/patient.py`
+   - [x] Implement: `find_patient()` - Find by name + DOB hash within clinic scope
+   - [x] Implement: `create_patient()` - Create new patient with encrypted PHI
+   - [x] Compute `name_dob_hash` from normalized (name|dob) for efficient lookup
+   - [x] Query by `clinic_id` and `name_dob_hash` (O(1) lookup)
+   - [x] Decrypt `name_token` and `dob_token` to verify match (defense against hash collisions)
+   - [x] Encrypt all PHI (name, DOB, phone, email) using `encrypt_phi()` from encryption.py
+   - [x] Input validation (clinic_id, name, DOB format, phone E.164, email format, language)
+   - [x] Structured logging (no PHI in logs)
+   - [x] Error handling (ValueError, EncryptionError, DecryptionError)
 
 ### Week 2: Core Booking Logic
 
-6. **Availability Service**
-   - [ ] Create `Clinic_app/services/availability.py`
-   - [ ] Implement: `generate_slots()` - Generate 15-minute slots within time ranges
-   - [ ] Implement: `check_availability()` - Check AvailabilitySlot status (FREE/BLOCKED)
-   - [ ] Implement: `find_available_slot()` - Find first available slot for provider
-   - [ ] Integrate: Google Calendar conflict checking using `count_overlapping_events()`
-   - [ ] Implement: Capacity enforcement (respect provider.capacity limits)
-   - [ ] Implement: Double-booking prevention logic
+6. **Availability Service** ✅ COMPLETE
+   - [x] Create `Clinic_app/services/availability.py`
+   - [x] Implement: `_generate_candidate_slots()` - Generate slots based on provider.booking_duration_mins
+   - [x] Implement: `is_slot_available()` - Core availability check (BLOCKED, GCal events, DB bookings, capacity)
+   - [x] Implement: `get_available_slots()` - Get all available slots for a date with single GCal API call
+   - [x] Implement: `get_next_available_slots()` - Find next N available slots from today
+   - [x] Implement: `find_slot_at_time()` - Search specific time across multiple days
+   - [x] Implement: `check_and_offer_alternatives()` - Check specific slot, offer alternatives if unavailable
+   - [x] Implement: `_is_patient_appointment()` - Detect patient appointments via keywords (English + Spanish)
+   - [x] Implement: `_get_clinic_business_hours()` - Get clinic business hours with fallback defaults
+   - [x] Integrate: Google Calendar conflict checking via GoogleCalendarService.list_events()
+   - [x] Implement: Capacity enforcement (patient appointments count toward capacity, external events block)
+   - [x] Implement: Double-booking prevention logic
 
 7. **Booking Service**
    - [ ] Create `Clinic_app/services/booking.py`
@@ -196,7 +246,7 @@
 9. **Retell Tool Endpoints**
    - [ ] Create `Clinic_app/Routes/retell.py`
    - [ ] Implement: `POST /retell/schedule` - Book/reschedule/cancel appointments
-     - [ ] Call `PatientService.find_or_create_patient()`
+     - [ ] Call `find_patient()` then `create_patient()` if not found
      - [ ] Call `AvailabilityService.find_available_slot()`
      - [ ] Call `BookingService.create_tentative_booking()` or `cancel_booking()`
    - [ ] Implement: `POST /retell/confirm_booking` - Confirm tentative bookings
@@ -210,11 +260,12 @@
    - [ ] Implement: `POST /retell/webhook/call_ended` - Track call end
    - [ ] Create basic `CallLog` entries for usage tracking
 
-11. **Error Handling & Validation**
-   - [ ] Create Pydantic request/response models for all endpoints
-   - [ ] Standardize error responses (success/error format)
-   - [ ] Add input validation (date ranges, phone format, etc.)
-   - [ ] Implement proper HTTP status codes (400/404/409/500)
+11. **Error Handling & Validation** ⚠️ PARTIALLY COMPLETE
+   - [x] Create Pydantic request/response models for all endpoints (done in admin.py and provider.py)
+   - [x] Standardize error responses (success/error format) (done in admin.py and provider.py)
+   - [x] Add input validation (date ranges, phone format, timezone, etc.) (done in admin.py and provider.py)
+   - [x] Implement proper HTTP status codes (400/404/409/500) (done in admin.py and provider.py)
+   - [ ] Apply same patterns to Retell endpoints (when created)
 
 ### Week 4: Testing & Polish
 
@@ -281,19 +332,20 @@
 Clinic_app/
 ├── common/
 │   ├── database.py ✅ (exists)
-│   └── encryption.py (NEW - PHI encryption utilities)
+│   └── encryption.py ✅ (COMPLETE - PHI encryption utilities)
 ├── data/
 │   ├── enums.py ✅ (exists)
 │   └── models/ ✅ (exists, may need clinic_integration model)
 ├── services/
 │   ├── google_calendar.py ✅ (COMPLETE - 910 lines, fully tested)
-│   ├── patient.py (NEW)
-│   ├── availability.py (NEW)
+│   ├── patient.py ✅ (COMPLETE - Patient service with find_patient and create_patient)
+│   ├── availability.py ✅ (COMPLETE - Availability engine with multiple search functions)
 │   ├── booking.py (NEW)
 │   └── retell.py (NEW - Retell API client)
 ├── Routes/
 │   ├── health.py ✅ (exists)
-│   ├── admin.py (NEW - Admin endpoints for clinics/providers)
+│   ├── admin.py ✅ (COMPLETE - Clinic, integration, license endpoints)
+│   ├── provider.py ✅ (COMPLETE - Provider CRUD + time blocking)
 │   └── retell.py (NEW - Retell endpoints)
 ├── scripts/
 │   └── seed_data.py (NEW - Seed script for test data)
@@ -302,7 +354,8 @@ Clinic_app/
 ├── main.py ✅ (exists)
 ├── alembic/ ✅ (COMPLETE - migrations exist)
 │   ├── versions/
-│   │   └── 3f270d38367a_initial_models.py ✅ (exists)
+│   │   ├── 3f270d38367a_initial_models.py ✅ (exists)
+│   │   └── encrypt_patient_phone_email_add_hash.py ✅ (exists - encrypts phone/email, adds hash)
 │   ├── env.py ✅ (exists)
 │   └── alembic.ini ✅ (exists)
 └── tests/
@@ -400,20 +453,27 @@ Once Phase 1 is complete and tested:
 ## Next Steps (Priority Order)
 
 ### Immediate (Week 1 - Continue)
-1. **Admin Endpoints** - Create `Clinic_app/Routes/admin.py`
-   - Required to create clinics and providers before testing
-   - Priority: HIGH (blocks other development)
+1. **Admin Endpoints** ✅ COMPLETE
+   - [x] Created `Clinic_app/Routes/admin.py` with clinic, integration, license endpoints
+   - [x] Created `Clinic_app/Routes/provider.py` with provider CRUD + time blocking
+   - [x] All routes include validation, error handling, logging, and Google Calendar validation
 
 2. **PHI Encryption** - Create `Clinic_app/common/encryption.py`
    - Required for patient creation
    - Priority: HIGH (blocks patient service)
 
-3. **Patient Service** - Create `Clinic_app/services/patient.py`
-   - Required for booking flow
-   - Priority: HIGH (blocks booking service)
+3. **Patient Service** ✅ COMPLETE
+   - [x] Created `Clinic_app/services/patient.py` with find_patient() and create_patient()
+   - [x] Hash-based lookup using name+DOB
+   - [x] All PHI encrypted (name, DOB, phone, email)
+   - [x] Input validation and error handling
 
 ### Next (Week 2)
-4. **Availability Service** - Create `Clinic_app/services/availability.py`
+4. **Availability Service** ✅ COMPLETE
+   - [x] Created `Clinic_app/services/availability.py` with all search functions
+   - [x] Integrates with Google Calendar, Booking model, AvailabilitySlot
+   - [x] Supports clinic business hours
+   - [x] Detects patient appointments via keywords (English + Spanish)
 5. **Booking Service** - Create `Clinic_app/services/booking.py`
 6. **Tentative Booking Reaper** - Create `Clinic_app/workers/booking_reaper.py`
 

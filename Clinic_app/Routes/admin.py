@@ -824,3 +824,107 @@ async def update_license(
             }
         )
 
+
+# ============================================================================
+# BUSINESS HOURS ENDPOINTS
+# ============================================================================
+
+# Time format validation pattern (HH:MM)
+TIME_FORMAT_PATTERN = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
+
+
+def validate_time_format(time_str: str) -> bool:
+    """Validate HH:MM time format (00:00 - 23:59)."""
+    return bool(TIME_FORMAT_PATTERN.match(time_str))
+
+
+class BusinessHoursRequest(BaseModel):
+    """Request model for updating business hours."""
+    start: str
+    end: str
+    
+    @field_validator('start', 'end')
+    @classmethod
+    def validate_time(cls, v: str) -> str:
+        if not validate_time_format(v):
+            raise ValueError("Time must be in HH:MM format (00:00 - 23:59)")
+        return v
+
+
+class BusinessHoursResponse(BaseModel):
+    """Response model for business hours."""
+    start: str
+    end: str
+
+
+@admin_router.get("/clinics/{clinic_id}/business-hours", response_model=APIResponse)
+async def get_business_hours(
+    clinic_id: UUID,
+    db: AsyncSession = Depends(get_db)
+) -> APIResponse:
+    """Get business hours for a clinic."""
+    clinic = await db.get(Clinic, clinic_id)
+    if not clinic:
+        raise_not_found("Clinic", clinic_id)
+    
+    logger.info(f"Retrieved business hours for clinic {clinic_id}")
+    
+    return APIResponse(
+        success=True,
+        data={
+            "clinic_id": str(clinic_id),
+            "start": clinic.business_hours_start,
+            "end": clinic.business_hours_end
+        },
+        message="Business hours retrieved successfully"
+    )
+
+
+@admin_router.put("/clinics/{clinic_id}/business-hours", response_model=APIResponse)
+async def update_business_hours(
+    clinic_id: UUID,
+    request: BusinessHoursRequest,
+    db: AsyncSession = Depends(get_db)
+) -> APIResponse:
+    """Update business hours for a clinic."""
+    clinic = await db.get(Clinic, clinic_id)
+    if not clinic:
+        raise_not_found("Clinic", clinic_id)
+    
+    # Validate start is before end
+    start_parts = request.start.split(':')
+    end_parts = request.end.split(':')
+    start_minutes = int(start_parts[0]) * 60 + int(start_parts[1])
+    end_minutes = int(end_parts[0]) * 60 + int(end_parts[1])
+    
+    if start_minutes >= end_minutes:
+        raise_validation_error("Business hours start must be before end", "start")
+    
+    try:
+        clinic.business_hours_start = request.start
+        clinic.business_hours_end = request.end
+        await db.commit()
+        
+        logger.info(f"Updated business hours for clinic {clinic_id}: {request.start} - {request.end}")
+        
+        return APIResponse(
+            success=True,
+            data={
+                "clinic_id": str(clinic_id),
+                "start": clinic.business_hours_start,
+                "end": clinic.business_hours_end
+            },
+            message="Business hours updated successfully"
+        )
+        
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error updating business hours: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "INTERNAL_ERROR",
+                "message": "Failed to update business hours"
+            }
+        )
+

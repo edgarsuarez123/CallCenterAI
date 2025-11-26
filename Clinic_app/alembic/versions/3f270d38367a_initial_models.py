@@ -48,6 +48,8 @@ def upgrade() -> None:
         sa.Column('status', sa.String(length=50), nullable=False, server_default='active'),
         sa.Column('license_token', sa.Text(), nullable=False),
         sa.Column('license_expires_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('business_hours_start', sa.String(length=5), nullable=False, server_default='09:00'),
+        sa.Column('business_hours_end', sa.String(length=5), nullable=False, server_default='17:00'),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
     )
     op.create_index('ix_clinic_id', 'clinic', ['id'], unique=False)

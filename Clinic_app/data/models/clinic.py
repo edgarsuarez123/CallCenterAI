@@ -19,6 +19,8 @@ class Clinic(Base):
     status = Column(String(50), nullable=False, default="active", index=True)  # active/suspended
     license_token = Column(Text, nullable=False, unique=True)
     license_expires_at = Column(DateTime(timezone=True), nullable=True)
+    business_hours_start = Column(String(5), nullable=False, default="09:00")  # HH:MM format
+    business_hours_end = Column(String(5), nullable=False, default="17:00")  # HH:MM format
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     def __repr__(self):
