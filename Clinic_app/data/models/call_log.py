@@ -17,6 +17,7 @@ class CallLog(Base):
     clinic_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # No FK - PHI-free, clinic may be deleted
     call_type = Column(String, nullable=False)  # 'inbound', 'outbound_reminder', 'outbound_campaign'
     related_id = Column(UUID(as_uuid=True), nullable=True)  # Can reference booking.id or campaign_contact.id
+    tentative_booking_id = Column(UUID(as_uuid=True), nullable=True)  # For hold cleanup on call_ended
     duration_seconds = Column(Integer, nullable=True)  # Calculated from webhook events
     outcome = Column(String, nullable=True)  # 'answered', 'no_answer', 'busy', 'failed', 'voicemail'
     retell_call_id = Column(String, nullable=True, index=True)  # Retell's call identifier for webhook correlation
