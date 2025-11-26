@@ -108,9 +108,17 @@ clinic (
     status TEXT NOT NULL DEFAULT 'active',  -- active/suspended
     license_token TEXT NOT NULL UNIQUE,
     license_expires_at TIMESTAMPTZ,
+    business_hours_start TEXT NOT NULL DEFAULT '09:00',  -- HH:MM format
+    business_hours_end TEXT NOT NULL DEFAULT '17:00',  -- HH:MM format
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 ```
+
+**Business Hours:**
+- `business_hours_start` and `business_hours_end` define the clinic's operating hours
+- Used by availability service to generate candidate appointment slots
+- Can be managed via `GET/PUT /admin/clinics/{id}/business-hours` endpoints
+- Default: 09:00 - 17:00
 
 **Relationships:**
 - One-to-one with `license`
@@ -183,8 +191,9 @@ patient (
     clinic_id UUID NOT NULL REFERENCES clinic(id) ON DELETE CASCADE,
     name_token BYTEA NOT NULL,  -- Encrypted patient name (PHI)
     dob_token BYTEA NOT NULL,  -- Encrypted date of birth (PHI)
-    phone_e164 TEXT NOT NULL,  -- E.164 format contact number
-    email TEXT,  -- Email address (nullable)
+    phone_token BYTEA NOT NULL,  -- Encrypted phone number (PHI)
+    email_token BYTEA,  -- Encrypted email address (PHI, nullable)
+    name_dob_hash TEXT NOT NULL,  -- SHA-256 hash of normalized (name|dob) for efficient lookup (NOT PHI)
     language TEXT NOT NULL DEFAULT 'en',  -- en/es for AI voice selection
     insurance_plan TEXT,  -- Insurance plan information (nullable)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -193,12 +202,18 @@ patient (
 ```
 
 **Indexes:**
-- `idx_clinic_phone` on (clinic_id, phone_e164)  -- For efficient patient lookup
+- `idx_clinic_name_dob_hash` on (clinic_id, name_dob_hash)  -- For efficient patient lookup by name+DOB
 
 **Encryption:**
-- `name_token` and `dob_token` must be encrypted at rest using AES-256
-- Encryption key stored in Azure Key Vault (not in DB)
-- Decryption only happens in application layer when needed for calls
+- All PHI fields (`name_token`, `dob_token`, `phone_token`, `email_token`) must be encrypted at rest using AES-256-GCM
+- Encryption key stored in Azure Key Vault (Phase 2) or environment variable (Phase 1)
+- Decryption only happens in application layer when needed for calls or verification
+- `name_dob_hash` is NOT PHI (irreversible hash, safe to index and query)
+
+**Lookup Strategy:**
+- Patients are identified by name + DOB within clinic scope (not by phone, as patients may call from different numbers)
+- Hash-based lookup provides O(1) performance without decrypting all records
+- Hash collisions are detected by decrypting and verifying name+DOB match
 
 ### 3.6 AvailabilitySlot (Canonical Source)
 ```sql
@@ -465,8 +480,8 @@ All endpoints are FastAPI with async/await. All responses use the standard forma
 
 **Business Logic:**
 1. Validate clinic_id exists and is active
-2. Find or create patient by phone_e164 (within clinic)
-3. Encrypt patient name and store in `name_token`
+2. Find or create patient by name + DOB (within clinic) using hash-based lookup
+3. Encrypt all patient PHI (name, DOB, phone, email) and store in encrypted tokens
 4. If intent is "book":
    - Generate 15-minute slots within preferred_time_range
    - For each provider in clinic (or preferred provider):
@@ -952,6 +967,49 @@ When creating/updating events, backend must set:
 - Failed sync operations queue deferred to Phase 2 (background worker to retry failed GCal operations)
 - Phase 1: Log failures for manual review; Phase 2: Automatic retry with database queue
 
+### 5.5 Patient Appointment Detection
+
+The availability service detects patient appointments via:
+
+1. **Metadata Check**: Events with `extendedProperties.private.source = "callcenter_ai"` are our bookings
+2. **Keyword Detection**: Events with patient-related keywords in the title count toward capacity
+
+**Patient Keywords (English + Spanish):**
+```python
+PATIENT_KEYWORDS = [
+    # English
+    "patient", "pt", "appt", "appointment", "visit", "consult",
+    "checkup", "check-up", "follow-up", "followup", "new patient",
+    # Spanish
+    "paciente", "cita", "consulta", "visita", "seguimiento",
+    "nuevo paciente", "chequeo",
+]
+```
+
+**Capacity Logic:**
+- **Patient appointments** (detected via metadata or keywords): Count toward `provider.capacity`
+- **External events** (staff meetings, personal appointments, etc.): Block the slot entirely
+- Example: If `capacity = 2`, a slot with 1 patient appointment can accept 1 more booking. A slot with a "Staff Meeting" event is unavailable.
+
+### 5.6 Availability Service Functions
+
+The availability service (`Clinic_app/services/availability.py`) provides:
+
+| Function | Use Case | Description |
+|----------|----------|-------------|
+| `is_slot_available()` | Core check | Check if specific slot is available (BLOCKED, GCal, capacity) |
+| `get_available_slots()` | "What's available Thursday?" | Get all slots for a date using clinic business hours |
+| `get_next_available_slots()` | "I want to book an appointment" | Find next N slots from today |
+| `find_slot_at_time()` | "I need a 10am appointment" | Search specific time across multiple days |
+| `check_and_offer_alternatives()` | "I want Thursday at 3pm" | Check specific slot, offer alternatives if unavailable |
+
+**Integration Points:**
+- Uses `GoogleCalendarService.list_events()` for calendar events
+- Queries `Booking` table for TENTATIVE/CONFIRMED bookings
+- Queries `AvailabilitySlot` table for BLOCKED status
+- Uses `provider.capacity`, `provider.booking_duration_mins`, `provider.timezone`
+- Uses `clinic.business_hours_start`, `clinic.business_hours_end` for default time ranges
+
 ---
 
 ## 6. REMINDER CALLS (EXPLICIT)
@@ -1001,9 +1059,12 @@ async def process_reminders():
                 
                 patient = await get_patient(booking.patient_id)
                 
+                # Decrypt phone for calling (phone_token is encrypted)
+                phone = decrypt_phi(patient.phone_token)
+                
                 # Create outbound call via Retell
                 call = await retell.create_outbound_call(
-                    phone=patient.phone_e164,
+                    phone=phone,
                     agent_id=clinic.retell_agent_id,
                     metadata={
                         "booking_id": str(booking.id),
@@ -1178,13 +1239,20 @@ async def import_ehr_appointments(clinic_id: UUID, csv_file: File):
                 updated += 1
             else:
                 # Create new
-                # Find or create patient
-                patient = await find_or_create_patient(
+                # Find or create patient by name + DOB
+                patient = await find_patient(
                     clinic_id=clinic_id,
-                    phone_e164=row["phone"],
                     name=row["patient_name"],
-                    email=row.get("email")
+                    dob=row["dob"]
                 )
+                if not patient:
+                    patient = await create_patient(
+                        clinic_id=clinic_id,
+                        name=row["patient_name"],
+                        dob=row["dob"],
+                        phone=row["phone"],
+                        email=row.get("email")
+                    )
                 
                 # Create Google Calendar event
                 gcal_event = await create_gcal_event(
@@ -1386,24 +1454,24 @@ GROUP BY clinic_id, call_type
 ## 13. FULL MVP COMPLETION CHECKLIST
 
 ### Backend
-- [ ] FastAPI app scaffolding ✅ (exists)
-- [ ] DB migrations (Alembic) ✅ (models exist, migrations needed)
-- [ ] Google Calendar client (service account auth)
+- [x] FastAPI app scaffolding ✅ (exists)
+- [x] DB migrations (Alembic) ✅ (models exist, migrations complete)
+- [x] Google Calendar client (service account auth) ✅ (COMPLETE)
 - [ ] Retell webhook handler (call_started, call_ended)
 - [ ] Retell tool endpoints (schedule, confirm_booking, availability)
-- [ ] Double-booking engine (with AvailabilitySlot + GCal)
+- [x] Double-booking engine (with AvailabilitySlot + GCal) ✅ (availability service COMPLETE)
 - [ ] Tentative booking system (hold tokens, expiration reaper)
 - [ ] EHR CSV importer (with conflict resolution)
 - [ ] Campaign engine + workers (with rate limiting)
 - [ ] Reminder call engine (hourly scheduler)
 - [ ] Usage tracking (webhook-based)
-- [ ] PHI encryption/decryption (Azure Key Vault integration)
-- [ ] PHI-free logs (validation)
+- [x] PHI encryption/decryption ✅ (encryption.py COMPLETE, Key Vault in Phase 2)
+- [x] PHI-free logs (validation) ✅ (structured logging implemented)
 - [ ] Signature validation (Retell webhooks)
-- [ ] Multi-clinic logic (clinic_id isolation)
-- [ ] Provider calendar mapping (with timezone support)
-- [ ] Validation for every request (Pydantic models)
-- [ ] Error handling (standardized error responses)
+- [x] Multi-clinic logic (clinic_id isolation) ✅ (all models have clinic_id)
+- [x] Provider calendar mapping (with timezone support) ✅ (provider routes COMPLETE)
+- [x] Validation for every request (Pydantic models) ✅ (admin/provider routes COMPLETE)
+- [x] Error handling (standardized error responses) ✅ (admin/provider routes COMPLETE)
 - [ ] License enforcement (feature flags, concurrency limits)
 - [ ] Phone routing (DID → clinic mapping)
 
@@ -1423,11 +1491,11 @@ GROUP BY clinic_id, call_type
 - [ ] Event creation/update/delete tested
 
 ### Database
-- [ ] All models created (✅ exists)
-- [ ] Indexes created (✅ exists)
-- [ ] Constraints created (✅ exists)
-- [ ] Migrations tested (Alembic)
-- [ ] Encryption key management (Azure Key Vault)
+- [x] All models created ✅ (complete)
+- [x] Indexes created ✅ (complete)
+- [x] Constraints created ✅ (complete)
+- [x] Migrations created ✅ (initial_models.py, encrypt_patient_phone_email_add_hash.py)
+- [ ] Encryption key management (Azure Key Vault) - Phase 2, using env var for Phase 1
 
 ### Testing
 - [ ] Unit tests (models, business logic)
