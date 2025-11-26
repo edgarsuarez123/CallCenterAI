@@ -1,8 +1,7 @@
 # Clinic_app/data/models/booking.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, ForeignKey, Index, CheckConstraint
-from sqlalchemy.sql import text
+from sqlalchemy import Column, String, DateTime, ForeignKey, Index, CheckConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy import Enum as SQLEnum
@@ -13,7 +12,9 @@ from Clinic_app.data.enums import BookingStatus
 class Booking(Base):
     """
     Authoritative record of appointments.
-    Prevents double-booking through partial unique constraint.
+    
+    Capacity enforcement is done at the application level using SELECT FOR UPDATE
+    to support providers with capacity > 1 (multiple concurrent bookings per slot).
     """
     __tablename__ = "booking"
 
@@ -30,18 +31,12 @@ class Booking(Base):
     source = Column(String, nullable=True)  # Origin: call/reminder/hedis/manual
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
-    # Partial unique index: prevents double-booking for tentative/confirmed bookings
-    # Canceled bookings don't count, so slots can be reused
     __table_args__ = (
-        Index(
-            'idx_booking_unique_slot',
-            'provider_id',
-            'slot_start',
-            'slot_end',
-            unique=True,
-            postgresql_where=text("status IN ('tentative', 'confirmed')")
-        ),
-        Index('idx_status_hold_expires', 'status', 'hold_expires_at'),  # For reaper efficiency
+        # Non-unique index for slot lookups (capacity enforcement at application level)
+        Index('idx_booking_slot_lookup', 'provider_id', 'slot_start', 'slot_end', 'status'),
+        # Index for reaper efficiency (finding expired tentative holds)
+        Index('idx_status_hold_expires', 'status', 'hold_expires_at'),
+        # End must be after start
         CheckConstraint('slot_end > slot_start', name='check_booking_slot_end_after_start'),
     )
 

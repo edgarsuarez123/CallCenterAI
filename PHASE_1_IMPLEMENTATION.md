@@ -4,15 +4,15 @@
 **Core Booking Functionality**: Enable inbound calls via Retell AI to successfully book, confirm, and cancel appointments with Google Calendar integration.
 
 ## Progress Summary
-**Overall: ~60% Complete**
+**Overall: ~90% Complete**
 
 - ✅ **Database Foundation** - 2/3 tasks (67%)
 - ✅ **Google Calendar Integration** - 9/9 tasks (100%) - COMPLETE
-- ❌ **Retell Integration** - 0/6 tasks (0%)
+- ✅ **Retell Integration** - 6/6 tasks (100%) - COMPLETE
 - ✅ **Availability Engine** - 5/5 tasks (100%) - COMPLETE
-- ❌ **Booking State Machine** - 0/5 tasks (0%)
+- ✅ **Booking State Machine** - 5/5 tasks (100%) - COMPLETE
 - ✅ **Patient Management** - 3/3 tasks (100%) - COMPLETE
-- ⚠️ **Error Handling** - 2/3 tasks (67%) - Standardized responses & validation in admin/provider routes
+- ✅ **Error Handling** - 3/3 tasks (100%) - COMPLETE (admin, provider, retell routes)
 - ✅ **Admin Endpoints** - 6/6 tasks (100%) - COMPLETE (includes business hours)
 - ✅ **PHI Encryption** - 1/1 tasks (100%) - COMPLETE
 - ⚠️ **Infrastructure** - 1/3 tasks (33%)
@@ -40,13 +40,16 @@
 - [x] **Retry logic** - Exponential backoff, rate limit handling, graceful degradation
 - [x] **Unit tests** - 28 tests covering all operations
 
-#### 3. Core Retell Integration
-- [ ] **Tool endpoint: `/retell/schedule`** - Book/reschedule/cancel appointments
-- [ ] **Tool endpoint: `/retell/confirm_booking`** - Confirm tentative bookings
-- [ ] **Tool endpoint: `/retell/availability`** - Get available slots
-- [ ] **Webhook: `/retell/webhook/call_started`** - Track call start (basic)
-- [ ] **Webhook: `/retell/webhook/call_ended`** - Track call end (basic)
-- [ ] **Signature verification** - HMAC-SHA256 validation for Retell requests
+#### 3. Core Retell Integration ✅ COMPLETE
+- [x] **Tool endpoint: `/retell/schedule`** - Book/reschedule/cancel appointments with provider selection
+- [x] **Tool endpoint: `/retell/confirm_booking`** - Confirm tentative bookings
+- [x] **Tool endpoint: `/retell/availability`** - Get available slots
+- [x] **Webhook: `/retell/webhook/call_started`** - Track call start, identify clinic by agent_id
+- [x] **Webhook: `/retell/webhook/call_ended`** - Track call end, **release unconfirmed tentative bookings** (primary cleanup mechanism)
+- [x] **Signature verification** - HMAC-SHA256 validation for Retell requests
+- [x] **Provider selection logic** - Single/multiple match handling, fallback to alternatives
+- [x] **Load balancing** - Providers sorted by booking count (least busy first)
+- [x] **CallLog.tentative_booking_id** - Track holds for cleanup on call_ended
 
 #### 4. Availability Engine ✅ COMPLETE
 - [x] **Slot generation** - Generate candidate slots based on provider.booking_duration_mins
@@ -58,12 +61,15 @@
 - [x] **Business hours support** - Clinic-level business hours (business_hours_start, business_hours_end)
 - [x] **Keyword detection** - Detect patient appointments via keywords in English and Spanish
 
-#### 5. Booking State Machine
-- [ ] **Tentative booking creation** - With hold_token and hold_expires_at (5 min)
-- [ ] **Booking confirmation** - Convert tentative → confirmed
-- [ ] **Booking cancellation** - Update status to canceled
-- [ ] **Hold expiration reaper** - Background worker to expire tentative holds (every 5 min)
-- [ ] **BookingAudit logging** - Record all state changes
+#### 5. Booking State Machine ✅ COMPLETE
+- [x] **Tentative booking creation** - `create_tentative_booking()` with hold_token and 5-min expiration
+- [x] **Booking confirmation** - `confirm_booking()` converts tentative → confirmed, creates GCal event
+- [x] **Booking cancellation** - `cancel_booking()` updates status, deletes GCal event
+- [x] **Booking rescheduling** - `reschedule_booking()` cancels old, creates new tentative
+- [x] **BookingAudit logging** - All state changes logged (HOLD, CONFIRM, CANCEL, EXPIRE)
+- [x] **Capacity enforcement** - SELECT FOR UPDATE + count check (supports capacity > 1)
+- [x] **Query functions** - `get_booking_by_hold_token()`, `get_patient_bookings()`, `expire_booking()`
+- [x] **Database update** - Removed unique constraint, using application-level capacity check
 
 #### 6. Patient Management ✅ COMPLETE
 - [x] **Find patient by name + DOB** - Within clinic scope using hash-based lookup
@@ -73,10 +79,10 @@
 - [x] **Patient model updated** - phone_e164 → phone_token (BYTEA), email → email_token (BYTEA), added name_dob_hash
 - [x] **Database migration** - Encrypt patient phone and email, add hash column
 
-#### 7. Basic Error Handling
-- [x] **Standardized error responses** - Success/error format (implemented in admin.py and provider.py)
-- [x] **Input validation** - Pydantic models for all requests (implemented in admin.py and provider.py)
-- [x] **HTTP status codes** - Proper 400/404/409/500 responses (implemented in admin.py and provider.py)
+#### 7. Basic Error Handling ✅ COMPLETE
+- [x] **Standardized error responses** - Success/error format (implemented in admin.py, provider.py, retell.py)
+- [x] **Input validation** - Pydantic models for all requests (implemented in admin.py, provider.py, retell.py)
+- [x] **HTTP status codes** - Proper 400/404/409/500 responses (implemented in admin.py, provider.py, retell.py)
 
 #### 8. Admin Endpoints (NEW - Required for Setup) ✅ COMPLETE
 - [x] **Clinic setup endpoint** - `POST /admin/clinics/setup` - Create clinic + integration + license
@@ -225,47 +231,62 @@
    - [x] Implement: Capacity enforcement (patient appointments count toward capacity, external events block)
    - [x] Implement: Double-booking prevention logic
 
-7. **Booking Service**
-   - [ ] Create `Clinic_app/services/booking.py`
-   - [ ] Implement: `create_tentative_booking()` - Create booking with hold_token and hold_expires_at (5 min)
-   - [ ] Implement: `confirm_booking()` - Convert tentative → confirmed, create Google Calendar event
-   - [ ] Implement: `cancel_booking()` - Update status to canceled, delete Google Calendar event
-   - [ ] Implement: `reschedule_booking()` - Cancel old, create new tentative booking
-   - [ ] Implement: `BookingAudit` logging - Record all state changes
-   - [ ] Integrate: Google Calendar event creation/update/delete
+7. **Booking Service** ✅ COMPLETE
+   - [x] Create `Clinic_app/services/booking.py`
+   - [x] Implement: `create_tentative_booking()` - Create booking with hold_token and 5-min expiration
+   - [x] Implement: `confirm_booking()` - Convert tentative → confirmed, create Google Calendar event
+   - [x] Implement: `cancel_booking()` - Update status to canceled, delete Google Calendar event
+   - [x] Implement: `reschedule_booking()` - Cancel old, create new tentative booking
+   - [x] Implement: `BookingAudit` logging - `_create_audit_entry()` for all state changes
+   - [x] Implement: `_count_slot_bookings()` - SELECT FOR UPDATE for capacity enforcement
+   - [x] Implement: Query functions - `get_booking_by_hold_token()`, `get_patient_bookings()`, `get_booking_by_id()`
+   - [x] Implement: `expire_booking()` and `get_expired_tentative_bookings()` for reaper
+   - [x] Integrate: Google Calendar event creation/deletion with graceful degradation
+   - [x] Update: Removed unique constraint from Booking model, using application-level capacity check
+   - [x] Update: Migration updated to use non-unique `idx_booking_slot_lookup` index
 
-8. **Tentative Booking Reaper**
+8. **Tentative Booking Reaper** (Backup safety net)
    - [ ] Create `Clinic_app/workers/booking_reaper.py`
    - [ ] Implement: Background worker (asyncio task)
-   - [ ] Implement: Expire tentative bookings every 5 minutes
-   - [ ] Implement: Update AvailabilitySlot status back to FREE
+   - [ ] Implement: Call `get_expired_tentative_bookings()` and `expire_booking()` every 10-15 minutes
    - [ ] Integrate: Start worker on application startup
+   - **Note**: Primary cleanup happens in `call_ended` webhook. Reaper is backup for edge cases (webhook failures, network issues).
 
-### Week 3: Retell Integration
+### Week 3: Retell Integration ✅ COMPLETE
 
-9. **Retell Tool Endpoints**
-   - [ ] Create `Clinic_app/Routes/retell.py`
-   - [ ] Implement: `POST /retell/schedule` - Book/reschedule/cancel appointments
-     - [ ] Call `find_patient()` then `create_patient()` if not found
-     - [ ] Call `AvailabilityService.find_available_slot()`
-     - [ ] Call `BookingService.create_tentative_booking()` or `cancel_booking()`
-   - [ ] Implement: `POST /retell/confirm_booking` - Confirm tentative bookings
-     - [ ] Call `BookingService.confirm_booking()` (creates Google Calendar event)
-   - [ ] Implement: `GET /retell/availability` - Get available slots
-     - [ ] Call `AvailabilityService.generate_slots()` and `check_availability()`
-   - [ ] Add signature verification middleware (HMAC-SHA256)
+9. **Retell Tool Endpoints** ✅ COMPLETE
+   - [x] Create `Clinic_app/Routes/retell.py`
+   - [x] Implement: `POST /retell/schedule` - Book/reschedule/cancel appointments
+     - [x] Call `find_patient()` then `create_patient()` if not found
+     - [x] Call `AvailabilityService.get_available_slots()` or `get_next_available_slots()`
+     - [x] Call `BookingService.create_tentative_booking()` or `cancel_booking()`
+     - [x] Provider selection: Single match → book, Multiple matches → clarify
+     - [x] Load balancing: Providers sorted by booking count (least busy first)
+     - [x] Fallback: If preferred provider unavailable → offer other dates → offer other providers
+   - [x] Implement: `POST /retell/confirm_booking` - Confirm tentative bookings
+     - [x] Call `BookingService.confirm_booking()` (creates Google Calendar event)
+   - [x] Implement: `GET /retell/availability` - Get available slots
+     - [x] Call `AvailabilityService.get_available_slots()` or `get_next_available_slots()`
+   - [x] Add signature verification middleware (HMAC-SHA256)
+   - [x] Pydantic models: `ScheduleRequest`, `ScheduleResponse`, `ConfirmRequest`, `ConfirmResponse`, `AvailabilityRequest`, `AvailabilityResponse`
 
-10. **Retell Webhooks**
-   - [ ] Implement: `POST /retell/webhook/call_started` - Track call start
-   - [ ] Implement: `POST /retell/webhook/call_ended` - Track call end
-   - [ ] Create basic `CallLog` entries for usage tracking
+10. **Retell Webhooks** ✅ COMPLETE
+   - [x] Implement: `POST /retell/webhook/call_started` - Track call start
+     - [x] Lookup clinic by `agent_id` from `ClinicIntegration`
+     - [x] Create `CallLog` entry with `retell_call_id`
+   - [x] Implement: `POST /retell/webhook/call_ended` - Track call end
+     - [x] Update `CallLog` with duration and outcome
+     - [x] **Release unconfirmed holds**: Find any TENTATIVE bookings for this call and cancel them
+     - [x] This is the PRIMARY cleanup mechanism (reaper is backup)
+   - [x] Add `tentative_booking_id` field to `CallLog` to track which booking to cleanup
+   - [x] Pydantic models: `CallStartedWebhook`, `CallEndedWebhook`
 
-11. **Error Handling & Validation** ⚠️ PARTIALLY COMPLETE
-   - [x] Create Pydantic request/response models for all endpoints (done in admin.py and provider.py)
-   - [x] Standardize error responses (success/error format) (done in admin.py and provider.py)
-   - [x] Add input validation (date ranges, phone format, timezone, etc.) (done in admin.py and provider.py)
-   - [x] Implement proper HTTP status codes (400/404/409/500) (done in admin.py and provider.py)
-   - [ ] Apply same patterns to Retell endpoints (when created)
+11. **Error Handling & Validation** ✅ COMPLETE
+   - [x] Create Pydantic request/response models for all endpoints (admin.py, provider.py, retell.py)
+   - [x] Standardize error responses (success/error format) (admin.py, provider.py, retell.py)
+   - [x] Add input validation (date ranges, phone format, timezone, etc.) (admin.py, provider.py, retell.py)
+   - [x] Implement proper HTTP status codes (400/404/409/500) (admin.py, provider.py, retell.py)
+   - [x] Applied same patterns to Retell endpoints
 
 ### Week 4: Testing & Polish
 
@@ -340,13 +361,13 @@ Clinic_app/
 │   ├── google_calendar.py ✅ (COMPLETE - 910 lines, fully tested)
 │   ├── patient.py ✅ (COMPLETE - Patient service with find_patient and create_patient)
 │   ├── availability.py ✅ (COMPLETE - Availability engine with multiple search functions)
-│   ├── booking.py (NEW)
+│   ├── booking.py ✅ (COMPLETE - Booking state machine with capacity enforcement)
 │   └── retell.py (NEW - Retell API client)
 ├── Routes/
 │   ├── health.py ✅ (exists)
 │   ├── admin.py ✅ (COMPLETE - Clinic, integration, license endpoints)
 │   ├── provider.py ✅ (COMPLETE - Provider CRUD + time blocking)
-│   └── retell.py (NEW - Retell endpoints)
+│   └── retell.py ✅ (COMPLETE - Retell tool endpoints + webhooks)
 ├── scripts/
 │   └── seed_data.py (NEW - Seed script for test data)
 ├── workers/
@@ -474,13 +495,23 @@ Once Phase 1 is complete and tested:
    - [x] Integrates with Google Calendar, Booking model, AvailabilitySlot
    - [x] Supports clinic business hours
    - [x] Detects patient appointments via keywords (English + Spanish)
-5. **Booking Service** - Create `Clinic_app/services/booking.py`
+5. **Booking Service** ✅ COMPLETE
+   - [x] Created `Clinic_app/services/booking.py` with full booking lifecycle
+   - [x] Capacity enforcement via SELECT FOR UPDATE (supports capacity > 1)
+   - [x] Google Calendar integration (create on confirm, delete on cancel)
+   - [x] BookingAudit trail for HIPAA compliance
+   - [x] Updated migration to remove unique constraint
 6. **Tentative Booking Reaper** - Create `Clinic_app/workers/booking_reaper.py`
 
-### Then (Week 3)
-7. **Retell Endpoints** - Create `Clinic_app/Routes/retell.py`
-8. **Retell Webhooks** - Add to retell.py
-9. **Error Handling** - Pydantic models and validation
+### Then (Week 3) ✅ COMPLETE
+7. **Retell Endpoints** ✅ COMPLETE - Created `Clinic_app/Routes/retell.py`
+   - `POST /retell/schedule` - Book/reschedule/cancel with provider selection & load balancing
+   - `POST /retell/confirm_booking` - Confirm tentative bookings
+   - `GET /retell/availability` - Get available slots
+8. **Retell Webhooks** ✅ COMPLETE - Added to retell.py
+   - `POST /retell/webhook/call_started` - Track call start, identify clinic
+   - `POST /retell/webhook/call_ended` - Track call end, release unconfirmed holds
+9. **Error Handling** ✅ COMPLETE - Pydantic models and validation in all routes
 
 ### Finally (Week 4)
 10. **Testing** - Integration and error scenario tests

@@ -173,13 +173,12 @@ def upgrade() -> None:
     op.create_index('ix_booking_provider_id', 'booking', ['provider_id'], unique=False)
     op.create_index('ix_booking_patient_id', 'booking', ['patient_id'], unique=False)
     op.create_index('idx_status_hold_expires', 'booking', ['status', 'hold_expires_at'], unique=False)
-    # Partial unique index for double-booking prevention
+    # Non-unique index for slot lookups (capacity enforcement done at application level)
     op.create_index(
-        'idx_booking_unique_slot',
+        'idx_booking_slot_lookup',
         'booking',
-        ['provider_id', 'slot_start', 'slot_end'],
-        unique=True,
-        postgresql_where=text("status IN ('tentative', 'confirmed')")
+        ['provider_id', 'slot_start', 'slot_end', 'status'],
+        unique=False
     )
     
     # Create booking_audit table
@@ -219,6 +218,7 @@ def upgrade() -> None:
         sa.Column('clinic_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('call_type', sa.String(), nullable=False),
         sa.Column('related_id', postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column('tentative_booking_id', postgresql.UUID(as_uuid=True), nullable=True),  # For hold cleanup on call_ended
         sa.Column('duration_seconds', sa.Integer(), nullable=True),
         sa.Column('outcome', sa.String(), nullable=True),
         sa.Column('retell_call_id', sa.String(), nullable=True),

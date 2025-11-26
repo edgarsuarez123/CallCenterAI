@@ -261,18 +261,22 @@ booking (
 ```
 
 **Constraints:**
-- Partial unique index: `UNIQUE(provider_id, slot_start, slot_end) WHERE status IN ('tentative', 'confirmed')`
-  - Prevents double-booking for active bookings
-  - Canceled bookings don't count, so slots can be reused
-- `CHECK (slot_end > slot_start)`
+- `CHECK (slot_end > slot_start)` - End must be after start
 
 **Indexes:**
-- `idx_status_hold_expires` on (status, hold_expires_at)  -- For reaper efficiency (expiring tentative holds)
+- `idx_booking_slot_lookup` on (provider_id, slot_start, slot_end, status) - Non-unique, for slot lookups
+- `idx_status_hold_expires` on (status, hold_expires_at) - For reaper efficiency (expiring tentative holds)
+
+**Capacity Enforcement:**
+- Application-level enforcement using `SELECT FOR UPDATE` + count check
+- Supports `provider.capacity > 1` (multiple concurrent bookings per slot)
+- Race conditions prevented via row locking during capacity count
+- Booking service function: `_count_slot_bookings()` with FOR UPDATE lock
 
 **State Machine:**
-1. **TENTATIVE**: Temporary hold with `hold_token` and `hold_expires_at` (e.g., 5 minutes)
-2. **CONFIRMED**: Finalized booking (hold_token cleared, hold_expires_at cleared)
-3. **CANCELED**: Canceled appointment (slot becomes available again)
+1. **TENTATIVE**: Temporary hold with `hold_token` and `hold_expires_at` (5 minutes)
+2. **CONFIRMED**: Finalized booking (hold_token cleared, hold_expires_at cleared, GCal event created)
+3. **CANCELED**: Canceled appointment (hold_token cleared, GCal event deleted if exists)
 
 ### 3.8 BookingAudit (Immutable Event Log)
 ```sql
@@ -338,6 +342,7 @@ call_log (
         'inbound', 'outbound_reminder', 'outbound_campaign'
     )),
     related_id UUID,  -- booking_id or campaign_contact_id (nullable)
+    tentative_booking_id UUID,  -- For hold cleanup on call_ended (nullable)
     duration_seconds INT,  -- Calculated from webhook events
     outcome TEXT,  -- 'answered', 'no_answer', 'busy', 'failed', 'voicemail'
     retell_call_id TEXT,  -- Retell's call identifier
@@ -349,10 +354,16 @@ call_log (
 
 **Indexes:**
 - `idx_clinic_call_type_timestamp` on (clinic_id, call_type, created_at)  -- For usage reporting
+- `ix_call_log_retell_call_id` on (retell_call_id)  -- For webhook correlation
 
 **PHI-free requirement:**
 - No patient names, phone numbers, or other PHI in this table
 - Only IDs and aggregated metrics
+
+**Hold Cleanup:**
+- `tentative_booking_id` tracks any tentative booking created during the call
+- On `call_ended` webhook, if booking is still TENTATIVE, it is automatically canceled
+- This is the PRIMARY cleanup mechanism for abandoned calls
 
 ### 3.12 EHR Sync Mapping
 ```sql
@@ -425,8 +436,10 @@ All endpoints are FastAPI with async/await. All responses use the standard forma
 **Request JSON:**
 ```json
 {
+  "call_id": "retell_call_123",  // Retell call ID for tracking
   "clinic_id": "550e8400-e29b-41d4-a716-446655440000",
   "patient_name": "John Smith",
+  "patient_dob": "1990-05-15",  // YYYY-MM-DD
   "phone": "+17875550000",
   "email": "john@example.com",
   "intent": "book",  // or "reschedule" or "cancel"
@@ -441,64 +454,92 @@ All endpoints are FastAPI with async/await. All responses use the standard forma
 ```json
 {
   "success": true,
-  "data": {
-    "message": "Appointment booked",
-    "booking": {
-      "id": "660e8400-e29b-41d4-a716-446655440000",
-      "start_time": "2025-11-20T09:15:00-05:00",  // ISO 8601 with timezone
-      "end_time": "2025-11-20T09:30:00-05:00",
-      "provider_name": "Dr. Lopez",
-      "status": "tentative",  // or "confirmed"
-      "hold_token": "770e8400-e29b-41d4-a716-446655440000",  // Only if tentative
-      "hold_expires_at": "2025-11-19T14:20:00Z"  // Only if tentative
-    }
-  }
+  "message": "Appointment held with Dr. Lopez",
+  "booking": {
+    "id": "660e8400-e29b-41d4-a716-446655440000",
+    "start_time": "2025-11-20T09:15:00-05:00",
+    "end_time": "2025-11-20T09:30:00-05:00",
+    "provider_name": "Dr. Lopez",
+    "status": "tentative",
+    "date": "2025-11-20"
+  },
+  "hold_token": "770e8400-e29b-41d4-a716-446655440000",
+  "alternatives": [...]  // Other available slots
 }
 ```
 
-**Response JSON (Error - No Slots):**
+**Response JSON (Multiple Provider Match - Needs Clarification):**
 ```json
 {
   "success": false,
-  "error": {
-    "code": "NO_AVAILABLE_SLOTS",
-    "message": "No available appointments in the requested time range",
-    "details": {
-      "preferred_date": "2025-11-20",
-      "preferred_time_range": ["09:00", "12:00"],
-      "alternatives": [
-        {
-          "start_time": "2025-11-20T13:00:00-05:00",
-          "end_time": "2025-11-20T13:15:00-05:00",
-          "provider_name": "Dr. Lopez"
-        }
-      ]
-    }
-  }
+  "message": "Multiple providers match that name. Please specify which one.",
+  "needs_clarification": true,
+  "provider_options": ["Dr. Maria Lopez", "Dr. Juan Lopez"]
 }
 ```
+
+**Response JSON (Preferred Provider Unavailable - Alternatives Offered):**
+```json
+{
+  "success": false,
+  "message": "Dr. Lopez is unavailable on that date. Here are their next available times.",
+  "alternatives": [...],
+  "alternatives_same_provider": true
+}
+```
+
+**Response JSON (No Availability with Preferred - Other Provider Offered):**
+```json
+{
+  "success": false,
+  "message": "Dr. Lopez has no upcoming availability. Dr. Smith is available.",
+  "alternatives": [...],
+  "alternative_provider": "Dr. Smith"
+}
+```
+
+**Provider Selection Logic:**
+| Scenario | Behavior |
+|----------|----------|
+| Patient says "Dr. Lopez" (1 match) | Book with Dr. Lopez |
+| Patient says "Lopez" (2+ matches) | Return names for clarification ("Dr. Maria Lopez", "Dr. Juan Lopez") |
+| Dr. Lopez unavailable on date | Offer Dr. Lopez's other available dates |
+| Dr. Lopez fully booked | Offer other providers |
+| No preference | Load balance - pick least-busy provider first |
+
+**Load Balancing (No Provider Preference):**
+- Get all active providers sorted by upcoming CONFIRMED booking count (ascending)
+- Check availability starting with least-busy provider
+- Return first available slot (naturally balances workload across providers)
 
 **Business Logic:**
 1. Validate clinic_id exists and is active
 2. Find or create patient by name + DOB (within clinic) using hash-based lookup
 3. Encrypt all patient PHI (name, DOB, phone, email) and store in encrypted tokens
 4. If intent is "book":
-   - Generate 15-minute slots within preferred_time_range
-   - For each provider in clinic (or preferred provider):
-     - Fetch existing bookings (tentative + confirmed) for that time window
-     - Check AvailabilitySlot status for that time window
-     - Calculate available capacity
+   - **Provider Selection:**
+     - If `provider_preference` specified:
+       - Search providers by name (ILIKE match)
+       - If 0 matches: return error
+       - If 1 match: use that provider
+       - If 2+ matches: return `needs_clarification=true` with `provider_options`
+     - If no preference:
+       - Get providers sorted by workload (least busy first)
+   - **Availability Check:**
+     - Generate slots within preferred_time_range (or get next available)
+     - For each provider: check availability via Google Calendar + DB bookings
      - If slot available: create tentative booking with 5-minute hold
-   - Return first available slot (or alternatives if none)
+   - **Fallback Logic (if preferred provider unavailable):**
+     - First: offer other dates for same provider (`alternatives_same_provider=true`)
+     - Then: offer other providers (`alternative_provider=name`)
+   - **Hold Tracking:**
+     - Update `CallLog.tentative_booking_id` for cleanup on call_ended
 5. If intent is "reschedule":
-   - Find existing booking for patient
-   - Cancel old booking (status = 'canceled', create audit entry)
-   - Create new tentative booking (same as "book")
+   - Find existing booking for patient (or by booking_id)
+   - Cancel old booking, create new tentative for new slot
 6. If intent is "cancel":
-   - Find existing booking for patient
-   - Update status to 'canceled' (create audit entry)
-   - Update AvailabilitySlot status to 'free' if applicable
-   - Delete or update Google Calendar event
+   - Find patient's upcoming confirmed booking
+   - Update status to 'canceled', delete Google Calendar event
 
 **Validation Rules:**
 - `preferred_date` must be in the future
@@ -610,22 +651,20 @@ All endpoints are FastAPI with async/await. All responses use the standard forma
 **Response:** `200 OK` (acknowledge receipt)
 
 **Business Logic:**
-1. Route call to clinic via phone_route table (to_number → clinic_id)
+1. Route call to clinic via `ClinicIntegration.retell_agent_id` (agent_id → clinic_id)
 2. Create call_log entry:
-   - clinic_id (from routing)
+   - clinic_id (from integration lookup)
    - call_type: 'inbound' or 'outbound_reminder' or 'outbound_campaign'
    - retell_call_id: call_id
    - started_at: timestamp
-   - related_id: booking_id or campaign_contact_id (if known)
 3. Update campaign_contact if outbound_campaign (increment attempt_count)
 
 #### POST /retell/webhook/call_ended
-**Purpose:** Receive call end event from Retell.
+**Purpose:** Receive call end event from Retell. **Primary mechanism for releasing unconfirmed holds.**
 
 **Request JSON:**
 ```json
 {
-  "event": "call_ended",
   "call_id": "retell_call_123",
   "duration_seconds": 180,
   "outcome": "answered",  // or "no_answer", "busy", "failed", "voicemail"
@@ -639,10 +678,19 @@ All endpoints are FastAPI with async/await. All responses use the standard forma
    - duration_seconds: duration_seconds
    - outcome: outcome
    - ended_at: timestamp
-3. Update campaign_contact if outbound_campaign:
+3. **Release unconfirmed holds:**
+   - If `call_log.tentative_booking_id` exists:
+     - Get booking by ID
+     - If booking status is still TENTATIVE → cancel it (release the hold)
+     - Clear `call_log.tentative_booking_id`
+4. Update campaign_contact if outbound_campaign:
    - If outcome = "answered": status = 'called'
    - If attempt_count >= 3: status = 'unreachable'
    - Update last_attempt_at
+
+**Hold Cleanup Strategy:**
+- **Primary**: `call_ended` webhook cancels any unconfirmed tentative booking
+- **Backup**: Reaper worker runs every 10-15 minutes for edge cases (webhook failures, network issues)
 
 ### 4.3 Campaign CSV Upload
 
@@ -1009,6 +1057,46 @@ The availability service (`Clinic_app/services/availability.py`) provides:
 - Queries `AvailabilitySlot` table for BLOCKED status
 - Uses `provider.capacity`, `provider.booking_duration_mins`, `provider.timezone`
 - Uses `clinic.business_hours_start`, `clinic.business_hours_end` for default time ranges
+
+### 5.7 Booking Service Functions
+
+The booking service (`Clinic_app/services/booking.py`) manages the booking lifecycle:
+
+| Function | Purpose | Description |
+|----------|---------|-------------|
+| `create_tentative_booking()` | Create hold | Creates TENTATIVE booking with 5-min hold_token |
+| `confirm_booking()` | Finalize | Converts TENTATIVE → CONFIRMED, creates GCal event |
+| `cancel_booking()` | Cancel | Sets status to CANCELED, deletes GCal event |
+| `reschedule_booking()` | Reschedule | Cancels old booking, creates new tentative |
+| `expire_booking()` | Reaper | Expires tentative hold (status → CANCELED) |
+| `get_booking_by_hold_token()` | Query | Find booking by hold token |
+| `get_patient_bookings()` | Query | List patient's bookings |
+| `get_expired_tentative_bookings()` | Reaper | Find all expired holds for processing |
+
+**Capacity Enforcement Logic:**
+```python
+async def _count_slot_bookings(db, provider_id, slot_start, slot_end) -> int:
+    """Count bookings with row locking to prevent race conditions."""
+    result = await db.execute(
+        select(func.count(Booking.id))
+        .where(
+            and_(
+                Booking.provider_id == provider_id,
+                Booking.slot_start == slot_start,
+                Booking.slot_end == slot_end,
+                Booking.status.in_([BookingStatus.TENTATIVE, BookingStatus.CONFIRMED])
+            )
+        )
+        .with_for_update()  # Lock rows during count
+    )
+    return result.scalar() or 0
+```
+
+**Booking Flow:**
+1. **Search** → `get_available_slots()` returns options (no holds)
+2. **Select** → Patient picks time → `create_tentative_booking()` holds slot
+3. **Confirm** → `confirm_booking()` finalizes + creates GCal event
+4. **Race handling** → If slot taken, capacity check fails, offer alternatives
 
 ---
 
@@ -1457,31 +1545,31 @@ GROUP BY clinic_id, call_type
 - [x] FastAPI app scaffolding ✅ (exists)
 - [x] DB migrations (Alembic) ✅ (models exist, migrations complete)
 - [x] Google Calendar client (service account auth) ✅ (COMPLETE)
-- [ ] Retell webhook handler (call_started, call_ended)
-- [ ] Retell tool endpoints (schedule, confirm_booking, availability)
+- [x] Retell webhook handler (call_started, call_ended) ✅ (retell.py COMPLETE)
+- [x] Retell tool endpoints (schedule, confirm_booking, availability) ✅ (retell.py COMPLETE)
 - [x] Double-booking engine (with AvailabilitySlot + GCal) ✅ (availability service COMPLETE)
-- [ ] Tentative booking system (hold tokens, expiration reaper)
+- [x] Tentative booking system (hold tokens, booking service) ✅ (booking.py COMPLETE, reaper pending)
 - [ ] EHR CSV importer (with conflict resolution)
 - [ ] Campaign engine + workers (with rate limiting)
 - [ ] Reminder call engine (hourly scheduler)
 - [ ] Usage tracking (webhook-based)
 - [x] PHI encryption/decryption ✅ (encryption.py COMPLETE, Key Vault in Phase 2)
 - [x] PHI-free logs (validation) ✅ (structured logging implemented)
-- [ ] Signature validation (Retell webhooks)
+- [x] Signature validation (Retell webhooks) ✅ (verify_retell_signature in retell.py)
 - [x] Multi-clinic logic (clinic_id isolation) ✅ (all models have clinic_id)
 - [x] Provider calendar mapping (with timezone support) ✅ (provider routes COMPLETE)
-- [x] Validation for every request (Pydantic models) ✅ (admin/provider routes COMPLETE)
-- [x] Error handling (standardized error responses) ✅ (admin/provider routes COMPLETE)
+- [x] Validation for every request (Pydantic models) ✅ (admin/provider/retell routes COMPLETE)
+- [x] Error handling (standardized error responses) ✅ (admin/provider/retell routes COMPLETE)
 - [ ] License enforcement (feature flags, concurrency limits)
 - [ ] Phone routing (DID → clinic mapping)
 
 ### Retell
 - [ ] Per-clinic agents (one agent per clinic)
 - [ ] Per-clinic DID (phone number mapping)
-- [ ] Tools configured (schedule, confirm_booking, availability)
+- [x] Tools configured (schedule, confirm_booking, availability) ✅ (backend endpoints ready)
 - [ ] Outbound call templates (reminder, campaign)
 - [ ] English & Spanish prompts (multi-language support)
-- [ ] Webhook configuration (call_started, call_ended)
+- [x] Webhook configuration (call_started, call_ended) ✅ (backend endpoints ready)
 
 ### Google Calendar
 - [ ] Service account created (with BAA)
