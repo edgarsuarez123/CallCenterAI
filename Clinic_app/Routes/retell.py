@@ -6,16 +6,17 @@ and webhooks for call lifecycle events.
 """
 
 import os
+import json
 import hmac
 import hashlib
 import logging
-from datetime import datetime, date, timezone, timedelta
+from datetime import datetime, date, timezone
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, cast, String
 from pydantic import BaseModel
 
 from Clinic_app.common.database import get_db
@@ -28,8 +29,7 @@ from Clinic_app.data.enums import BookingStatus
 from Clinic_app.services.patient import find_patient, create_patient
 from Clinic_app.services.availability import (
     get_available_slots,
-    get_next_available_slots,
-    check_and_offer_alternatives
+    get_next_available_slots
 )
 from Clinic_app.services.booking import (
     create_tentative_booking,
@@ -92,14 +92,6 @@ class ConfirmResponse(BaseModel):
     success: bool
     message: str
     booking: Optional[Dict[str, Any]] = None
-
-
-class AvailabilityRequest(BaseModel):
-    """Request for availability check."""
-    clinic_id: UUID
-    date: Optional[str] = None  # YYYY-MM-DD
-    provider_id: Optional[UUID] = None
-    time_range: Optional[List[str]] = None  # ["09:00", "17:00"]
 
 
 class AvailabilityResponse(BaseModel):
@@ -212,7 +204,7 @@ async def _get_providers_by_workload(
         .where(
             and_(
                 Booking.clinic_id == clinic_id,
-                Booking.status == BookingStatus.CONFIRMED,
+                cast(Booking.status, String) == BookingStatus.CONFIRMED.value,
                 Booking.slot_start >= now
             )
         )
@@ -280,37 +272,71 @@ def _booking_to_dict(booking: Booking, provider_name: str) -> Dict[str, Any]:
 
 async def verify_retell_signature(
     request: Request,
-    x_retell_signature: Optional[str] = Header(None, alias="x-retell-signature")
+    body_bytes: bytes
 ) -> None:
     """
-    Verify Retell webhook signature using HMAC-SHA256.
+    Verify Retell signature using HMAC-SHA256.
     
     Args:
         request: FastAPI request object
-        x_retell_signature: Signature from Retell header
+        body_bytes: Raw request body bytes (already read)
         
     Raises:
         HTTPException: If signature is missing or invalid
     """
-    secret = os.environ.get("RETELL_WEBHOOK_SECRET", "")
+    # Check if this is a playground/test call (skip verification)
+    try:
+        if body_bytes:
+            body_json = json.loads(body_bytes.decode('utf-8'))
+            call_obj = body_json.get("call", {})
+            call_id = call_obj.get("call_id", "")
+            if call_id == "playground" or call_id.startswith("test_") or call_id.startswith("playground_"):
+                return
+    except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
+        pass
+    
+    # Get webhook secret
+    webhook_secret = os.environ.get("RETELL_WEBHOOK_SECRET", "")
     
     # Skip verification if no secret configured (development mode)
-    if not secret:
+    if not webhook_secret:
         logger.warning("RETELL_WEBHOOK_SECRET not configured - skipping signature verification")
         return
     
-    if not x_retell_signature:
+    # Extract signature header
+    x_retell_signature_raw = (
+        request.headers.get("x-retell-signature") or 
+        request.headers.get("X-Retell-Signature") or
+        request.headers.get("X-RETELL-SIGNATURE")
+    )
+    
+    if not x_retell_signature_raw:
         logger.warning("Missing x-retell-signature header")
         raise HTTPException(
             status_code=401,
             detail={"code": "MISSING_SIGNATURE", "message": "Missing signature header"}
         )
     
-    body = await request.body()
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    # Parse signature - Retell uses format: v=<timestamp>,d=<signature>
+    if x_retell_signature_raw.startswith("v=") and ",d=" in x_retell_signature_raw:
+        parts = x_retell_signature_raw.split(",d=", 1)
+        x_retell_signature = parts[1] if len(parts) == 2 else x_retell_signature_raw
+    else:
+        x_retell_signature = x_retell_signature_raw
     
+    # Format body for signature verification (Retell SDK format)
+    try:
+        body_json = json.loads(body_bytes.decode('utf-8'))
+        body_for_signature = json.dumps(body_json, separators=(",", ":"), ensure_ascii=False).encode('utf-8')
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        body_for_signature = body_bytes
+    
+    # Compute expected signature
+    expected = hmac.new(webhook_secret.encode(), body_for_signature, hashlib.sha256).hexdigest()
+    
+    # Verify signature
     if not hmac.compare_digest(expected, x_retell_signature):
-        logger.warning("Invalid Retell signature")
+        logger.error("Invalid Retell signature - verification failed")
         raise HTTPException(
             status_code=401,
             detail={"code": "INVALID_SIGNATURE", "message": "Invalid signature"}
@@ -723,23 +749,46 @@ async def confirm_booking_endpoint(
             message="An error occurred while confirming your appointment"
         )
 
-
-@retell_router.get("/availability", response_model=AvailabilityResponse)
-async def get_availability(
+#was a get changed to post because of retell functionality
+async def _get_availability_internal(
+    db: AsyncSession,
     clinic_id: UUID,
     date: Optional[str] = None,
     provider_id: Optional[UUID] = None,
-    db: AsyncSession = Depends(get_db)
+    provider_name: Optional[str] = None
 ) -> AvailabilityResponse:
     """
-    Get available appointment slots.
-    Called by Retell AI to offer available times to patients.
+    Internal function that contains the actual availability logic.
+    Called by both GET and POST endpoints.
     """
-    logger.info(f"Availability request: clinic={clinic_id}, date={date}, provider={provider_id}")
+    logger.info(f"Availability request: clinic={clinic_id}, date={date}, provider_id={provider_id}, provider_name={provider_name}")
     
     try:
         # Get provider(s)
-        if provider_id:
+        if provider_name:
+            # Look up provider by name (same logic as schedule endpoint)
+            matching_providers = await _find_providers_by_name(db, clinic_id, provider_name)
+            
+            if len(matching_providers) == 0:
+                return AvailabilityResponse(
+                    success=False,
+                    message=f"No provider found matching '{provider_name}'",
+                    slots=[]
+                )
+            
+            if len(matching_providers) > 1:
+                # Multiple matches - need clarification
+                provider_names = [p.display_name for p in matching_providers]
+                return AvailabilityResponse(
+                    success=False,
+                    message=f"Multiple providers match '{provider_name}'. Please specify which one: {', '.join(provider_names)}",
+                    slots=[]
+                )
+            
+            # Single match - use this provider
+            providers = matching_providers
+            
+        elif provider_id:
             provider = await db.get(Provider, provider_id)
             if not provider or provider.clinic_id != clinic_id:
                 return AvailabilityResponse(
@@ -784,7 +833,7 @@ async def get_availability(
         all_slots.sort(key=lambda s: s.get("start_time", ""))
         
         # Limit to reasonable number
-        all_slots = all_slots[:20]
+        all_slots = all_slots[:50]
         
         return AvailabilityResponse(
             success=True,
@@ -801,13 +850,86 @@ async def get_availability(
         )
 
 
+@retell_router.get("/availability", response_model=AvailabilityResponse)
+async def get_availability(
+    clinic_id: UUID,
+    date: Optional[str] = None,
+    provider_id: Optional[UUID] = None,
+    provider_name: Optional[str] = None,
+    db: AsyncSession = Depends(get_db)
+) -> AvailabilityResponse:
+    """
+    Get available appointment slots (GET - for RESTful API).
+    Called by Retell AI to offer available times to patients.
+    """
+    return await _get_availability_internal(db, clinic_id, date, provider_id, provider_name)
+
+
+@retell_router.post("/availability", response_model=AvailabilityResponse)
+async def get_availability_post(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+) -> AvailabilityResponse:
+    """
+    Get available appointment slots (POST - for Retell AI).
+    Extracts clinic_id from agent_id and parameters from args.
+    """
+    # Read body once
+    body_bytes = await request.body()
+    
+    # Verify Retell signature using the body bytes
+    await verify_retell_signature(request, body_bytes)
+    
+    # Parse JSON from the same body bytes
+    body = json.loads(body_bytes.decode('utf-8'))
+    call_obj = body.get("call", {})
+    args = body.get("args", {})
+    
+    # Extract agent_id from call object and look up clinic_id
+    agent_id = call_obj.get("agent_id")
+    if not agent_id:
+        logger.warning("Missing agent_id in Retell request")
+        return AvailabilityResponse(
+            success=False,
+            message="Missing agent_id in request",
+            slots=[]
+        )
+    
+    try:
+        clinic_id = await _get_clinic_by_agent_id(db, agent_id)
+    except ValueError as e:
+        logger.error(f"Clinic lookup failed for agent_id {agent_id}: {str(e)}")
+        return AvailabilityResponse(
+            success=False,
+            message="Clinic not found for this agent",
+            slots=[]
+        )
+    
+    # Extract other parameters from args
+    date = args.get("date")
+    provider_name = args.get("provider_name")
+    provider_id = None
+    if args.get("provider_id"):
+        try:
+            provider_id = UUID(args.get("provider_id"))
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid provider_id format: {args.get('provider_id')}")
+    
+    logger.info(
+        f"Availability POST request: agent_id={agent_id}, clinic_id={clinic_id}, "
+        f"date={date}, provider_id={provider_id}, provider_name={provider_name}"
+    )
+    
+    # Call the shared logic
+    return await _get_availability_internal(db, clinic_id, date, provider_id, provider_name)
+
+
 # ============================================================================
 # WEBHOOK ENDPOINTS
 # ============================================================================
 
 @retell_router.post("/webhook/call_started")
 async def webhook_call_started(
-    webhook: CallStartedWebhook,
     request: Request,
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, str]:
@@ -815,8 +937,15 @@ async def webhook_call_started(
     Webhook for call started event.
     Creates CallLog entry and identifies clinic.
     """
-    # Verify signature (optional in dev)
-    await verify_retell_signature(request)
+    # Read body once
+    body_bytes = await request.body()
+    
+    # Verify signature using the body bytes
+    await verify_retell_signature(request, body_bytes)
+    
+    # Parse JSON from the same body bytes
+    body = json.loads(body_bytes.decode('utf-8'))
+    webhook = CallStartedWebhook(**body)
     
     logger.info(f"Call started: call_id={webhook.call_id}, agent_id={webhook.agent_id}")
     
@@ -860,7 +989,6 @@ async def webhook_call_started(
 
 @retell_router.post("/webhook/call_ended")
 async def webhook_call_ended(
-    webhook: CallEndedWebhook,
     request: Request,
     db: AsyncSession = Depends(get_db)
 ) -> Dict[str, str]:
@@ -868,8 +996,15 @@ async def webhook_call_ended(
     Webhook for call ended event.
     Updates CallLog and releases any unconfirmed tentative bookings.
     """
-    # Verify signature (optional in dev)
-    await verify_retell_signature(request)
+    # Read body once
+    body_bytes = await request.body()
+    
+    # Verify signature using the body bytes
+    await verify_retell_signature(request, body_bytes)
+    
+    # Parse JSON from the same body bytes
+    body = json.loads(body_bytes.decode('utf-8'))
+    webhook = CallEndedWebhook(**body)
     
     logger.info(f"Call ended: call_id={webhook.call_id}, outcome={webhook.outcome}")
     
