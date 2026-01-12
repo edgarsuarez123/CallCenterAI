@@ -8,11 +8,11 @@ proper capacity enforcement using SELECT FOR UPDATE and Google Calendar integrat
 import uuid
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_, func, cast, String
 
 from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.models.booking_audit import BookingAudit
@@ -20,6 +20,7 @@ from Clinic_app.data.models.provider import Provider
 from Clinic_app.data.models.patient import Patient
 from Clinic_app.data.enums import BookingStatus, BookingAction
 from Clinic_app.services.google_calendar import GoogleCalendarService
+from Clinic_app.common.encryption import decrypt_phi, DecryptionError
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ async def _create_audit_entry(
     db: AsyncSession,
     clinic_id: UUID,
     booking_id: UUID,
-    action: BookingAction,
+    action: Union[BookingAction, str],  # Accepts enum member or string value
     actor: str
 ) -> BookingAudit:
     """
@@ -61,8 +62,10 @@ async def _create_audit_entry(
     db.add(audit)
     await db.flush()
     
+    # Handle both enum and string values for logging
+    action_str = action.value if hasattr(action, 'value') else action
     logger.info(
-        f"Audit entry created: booking_id={booking_id}, action={action.value}, actor={actor}"
+        f"Audit entry created: booking_id={booking_id}, action={action_str}, actor={actor}"
     )
     
     return audit
@@ -75,10 +78,10 @@ async def _count_slot_bookings(
     slot_end: datetime
 ) -> int:
     """
-    Count TENTATIVE/CONFIRMED bookings for a slot with row locking.
+    Count TENTATIVE/CONFIRMED bookings that overlap with a slot.
     
-    Uses SELECT FOR UPDATE to prevent race conditions when multiple
-    requests try to book the same slot simultaneously.
+    Uses overlap logic (consistent with availability service) to count
+    all bookings that overlap with the requested slot time range.
     
     Args:
         db: Database session
@@ -87,19 +90,18 @@ async def _count_slot_bookings(
         slot_end: Slot end datetime
         
     Returns:
-        Count of existing bookings for the slot
+        Count of existing bookings that overlap with the slot
     """
     result = await db.execute(
         select(func.count(Booking.id))
         .where(
             and_(
                 Booking.provider_id == provider_id,
-                Booking.slot_start == slot_start,
-                Booking.slot_end == slot_end,
-                Booking.status.in_([BookingStatus.TENTATIVE, BookingStatus.CONFIRMED])
+                Booking.slot_start < slot_end,
+                Booking.slot_end > slot_start,
+                cast(Booking.status, String).in_([BookingStatus.TENTATIVE.value, BookingStatus.CONFIRMED.value])
             )
         )
-        .with_for_update()  # Lock rows during count to prevent race conditions
     )
     return result.scalar() or 0
 
@@ -154,7 +156,7 @@ async def create_tentative_booking(
     Create a tentative booking with a 5-minute hold.
     
     This reserves a slot temporarily while the patient confirms their details.
-    Uses SELECT FOR UPDATE to prevent race conditions with capacity checking.
+    Capacity checking is performed before creating the booking.
     
     Args:
         db: Database session
@@ -200,7 +202,7 @@ async def create_tentative_booking(
         patient_id=patient_id,
         slot_start=slot_start,
         slot_end=slot_end,
-        status=BookingStatus.TENTATIVE,
+        status=BookingStatus.TENTATIVE.value,
         hold_token=hold_token,
         hold_expires_at=hold_expires_at,
         source=source
@@ -213,7 +215,7 @@ async def create_tentative_booking(
         db=db,
         clinic_id=clinic_id,
         booking_id=booking.id,
-        action=BookingAction.HOLD,
+        action=BookingAction.HOLD.value,
         actor=source
     )
     
@@ -269,7 +271,7 @@ async def confirm_booking(
         raise ValueError("Hold has expired")
     
     # 4. Update booking status
-    booking.status = BookingStatus.CONFIRMED
+    booking.status = BookingStatus.CONFIRMED.value
     booking.hold_token = None
     booking.hold_expires_at = None
     
@@ -279,6 +281,13 @@ async def confirm_booking(
     
     if provider and provider.google_calendar_id:
         try:
+            # Decrypt patient name for calendar event
+            try:
+                patient_name = decrypt_phi(patient.name_token)
+            except DecryptionError as e:
+                logger.warning(f"Failed to decrypt patient name for calendar event: {str(e)}")
+                patient_name = "Patient"  # Fallback if decryption fails
+            
             # Build event metadata
             extended_properties = {
                 "private": {
@@ -289,15 +298,15 @@ async def confirm_booking(
                 }
             }
             
-            # Create event summary (avoid PHI in title)
-            summary = f"Patient Appointment - {provider.display_name}"
+            # Create event summary with patient name
+            summary = f"Appointment: {patient_name} - {provider.display_name}"
             
             gcal_event = await GoogleCalendarService.create_event(
                 calendar_id=provider.google_calendar_id,
                 start=booking.slot_start,
                 end=booking.slot_end,
                 summary=summary,
-                description=None,  # Avoid PHI in description
+                description=None,  # Avoid additional PHI in description
                 extended_properties=extended_properties,
                 clinic_id=clinic_id,
                 db=db
@@ -320,7 +329,7 @@ async def confirm_booking(
         db=db,
         clinic_id=clinic_id,
         booking_id=booking.id,
-        action=BookingAction.CONFIRM,
+        action=BookingAction.CONFIRM.value,
         actor="patient"
     )
     
@@ -390,7 +399,7 @@ async def cancel_booking(
                 logger.error(f"Failed to delete Google Calendar event: {str(e)}")
     
     # 4. Update booking status
-    booking.status = BookingStatus.CANCELED
+    booking.status = BookingStatus.CANCELED.value
     booking.hold_token = None
     booking.hold_expires_at = None
     
@@ -399,7 +408,7 @@ async def cancel_booking(
         db=db,
         clinic_id=clinic_id,
         booking_id=booking.id,
-        action=BookingAction.CANCEL,
+        action=BookingAction.CANCEL.value,
         actor=actor
     )
     
@@ -533,7 +542,9 @@ async def get_patient_bookings(
     )
     
     if status_filter:
-        query = query.where(Booking.status.in_(status_filter))
+        # Use cast for enum comparison to handle PostgreSQL ENUM types correctly
+        status_values = [s.value if hasattr(s, 'value') else s for s in status_filter]
+        query = query.where(cast(Booking.status, String).in_(status_values))
     
     # Order by slot_start descending (most recent first)
     query = query.order_by(Booking.slot_start.desc())
@@ -597,7 +608,7 @@ async def expire_booking(
         raise ValueError(f"Booking is not tentative (status: {booking.status.value})")
     
     # Update status
-    booking.status = BookingStatus.CANCELED
+    booking.status = BookingStatus.CANCELED.value
     booking.hold_token = None
     booking.hold_expires_at = None
     
@@ -606,7 +617,7 @@ async def expire_booking(
         db=db,
         clinic_id=booking.clinic_id,
         booking_id=booking.id,
-        action=BookingAction.EXPIRE,
+        action=BookingAction.EXPIRE.value,
         actor="system"
     )
     
@@ -615,6 +626,76 @@ async def expire_booking(
     logger.info(f"Tentative booking expired: booking_id={booking_id}")
     
     return booking
+
+
+async def list_bookings(
+    db: AsyncSession,
+    clinic_id: UUID,
+    provider_id: Optional[UUID] = None,
+    patient_id: Optional[UUID] = None,
+    status_filter: Optional[List[BookingStatus]] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    limit: int = 100,
+    offset: int = 0
+) -> Tuple[List[Booking], int]:
+    """
+    List bookings with optional filters.
+    
+    Args:
+        db: Database session
+        clinic_id: Clinic UUID (required)
+        provider_id: Optional provider filter
+        patient_id: Optional patient filter
+        status_filter: Optional list of statuses to filter by
+        start_date: Optional start date filter (bookings on or after)
+        end_date: Optional end date filter (bookings on or before)
+        limit: Maximum number of results
+        offset: Offset for pagination
+        
+    Returns:
+        Tuple of (list of bookings, total count)
+    """
+    # Build query
+    query = select(Booking).where(Booking.clinic_id == clinic_id)
+    count_query = select(func.count(Booking.id)).where(Booking.clinic_id == clinic_id)
+    
+    # Apply filters
+    if provider_id:
+        query = query.where(Booking.provider_id == provider_id)
+        count_query = count_query.where(Booking.provider_id == provider_id)
+    
+    if patient_id:
+        query = query.where(Booking.patient_id == patient_id)
+        count_query = count_query.where(Booking.patient_id == patient_id)
+    
+    if status_filter:
+        status_values = [s.value if hasattr(s, 'value') else s for s in status_filter]
+        query = query.where(cast(Booking.status, String).in_(status_values))
+        count_query = count_query.where(cast(Booking.status, String).in_(status_values))
+    
+    if start_date:
+        query = query.where(Booking.slot_start >= start_date)
+        count_query = count_query.where(Booking.slot_start >= start_date)
+    
+    if end_date:
+        query = query.where(Booking.slot_start <= end_date)
+        count_query = count_query.where(Booking.slot_start <= end_date)
+    
+    # Order by slot_start descending (most recent first)
+    query = query.order_by(Booking.slot_start.desc())
+    
+    # Apply pagination
+    query = query.limit(limit).offset(offset)
+    
+    # Execute queries
+    result = await db.execute(query)
+    bookings = list(result.scalars().all())
+    
+    count_result = await db.execute(count_query)
+    total = count_result.scalar_one()
+    
+    return bookings, total
 
 
 async def get_expired_tentative_bookings(
@@ -637,7 +718,7 @@ async def get_expired_tentative_bookings(
         select(Booking)
         .where(
             and_(
-                Booking.status == BookingStatus.TENTATIVE,
+                cast(Booking.status, String) == BookingStatus.TENTATIVE.value,
                 Booking.hold_expires_at < now
             )
         )

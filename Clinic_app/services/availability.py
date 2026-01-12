@@ -9,11 +9,11 @@ patient appointment detection (English/Spanish), and capacity enforcement.
 import logging
 import pytz
 from datetime import datetime, date, time, timedelta
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Set
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, cast, String
 
 from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.provider import Provider
@@ -43,6 +43,38 @@ FALLBACK_END = "17:00"
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+async def _get_existing_booking_ids(
+    db: AsyncSession,
+    provider_id: UUID,
+    booking_ids: Set[UUID]
+) -> Set[UUID]:
+    """
+    Check which booking_ids exist in DB as TENTATIVE or CONFIRMED.
+    
+    Args:
+        db: Database session
+        provider_id: Provider UUID
+        booking_ids: Set of booking UUIDs to check
+        
+    Returns:
+        Set of booking_ids that exist in DB as TENTATIVE or CONFIRMED
+    """
+    if not booking_ids:
+        return set()
+    
+    result = await db.execute(
+        select(Booking.id).where(
+            and_(
+                Booking.provider_id == provider_id,
+                Booking.id.in_(booking_ids),
+                cast(Booking.status, String).in_([BookingStatus.TENTATIVE.value, BookingStatus.CONFIRMED.value])
+            )
+        )
+    )
+    existing_ids = {row[0] for row in result.all()}
+    return existing_ids
+
 
 def _is_patient_appointment(event: Dict) -> bool:
     """
@@ -83,16 +115,36 @@ def _events_overlap(
     """
     Check if two time ranges overlap.
     
+    Normalizes all datetimes to UTC for comparison to ensure timezone-aware
+    datetimes are compared correctly regardless of their original timezone.
+    
     Args:
-        event_start: Event start time
-        event_end: Event end time
-        slot_start: Slot start time
-        slot_end: Slot end time
+        event_start: Event start time (timezone-aware)
+        event_end: Event end time (timezone-aware)
+        slot_start: Slot start time (timezone-aware)
+        slot_end: Slot end time (timezone-aware)
         
     Returns:
         True if ranges overlap, False otherwise
     """
-    return event_start < slot_end and event_end > slot_start
+    # Normalize all datetimes to UTC for consistent comparison
+    if event_start.tzinfo is None:
+        raise ValueError("event_start must be timezone-aware")
+    if event_end.tzinfo is None:
+        raise ValueError("event_end must be timezone-aware")
+    if slot_start.tzinfo is None:
+        raise ValueError("slot_start must be timezone-aware")
+    if slot_end.tzinfo is None:
+        raise ValueError("slot_end must be timezone-aware")
+    
+    # Convert to UTC for comparison
+    event_start_utc = event_start.astimezone(pytz.UTC)
+    event_end_utc = event_end.astimezone(pytz.UTC)
+    slot_start_utc = slot_start.astimezone(pytz.UTC)
+    slot_end_utc = slot_end.astimezone(pytz.UTC)
+    
+    # Check overlap: ranges overlap if event_start < slot_end AND event_end > slot_start
+    return event_start_utc < slot_end_utc and event_end_utc > slot_start_utc
 
 
 def _parse_time(time_str: str) -> time:
@@ -221,7 +273,7 @@ async def is_slot_available(
                 AvailabilitySlot.provider_id == provider.id,
                 AvailabilitySlot.slot_start < slot_end,
                 AvailabilitySlot.slot_end > slot_start,
-                AvailabilitySlot.status == SlotStatus.BLOCKED
+                cast(AvailabilitySlot.status, String) == SlotStatus.BLOCKED.value
             )
         )
     )
@@ -245,7 +297,38 @@ async def is_slot_available(
     else:
         gcal_events = []
     
-    # 3. Check each event - patient appointments count, others block
+    # 3. Count our database bookings (TENTATIVE/CONFIRMED) - authoritative source
+    booking_result = await db.execute(
+        select(Booking).where(
+            and_(
+                Booking.provider_id == provider.id,
+                Booking.slot_start < slot_end,
+                Booking.slot_end > slot_start,
+                cast(Booking.status, String).in_([BookingStatus.TENTATIVE.value, BookingStatus.CONFIRMED.value])
+            )
+        )
+    )
+    db_bookings = booking_result.scalars().all()
+    booking_count = len(db_bookings)
+    
+    # 4. Extract booking_ids from GCal events to check for duplicates
+    gcal_booking_ids = set()
+    for event in gcal_events:
+        if _is_patient_appointment(event):
+            # Extract booking_id from extended properties
+            metadata = GoogleCalendarService.parse_extended_properties(event)
+            if metadata and metadata.get("source") == "callcenter_ai":
+                booking_id_str = metadata.get("booking_id")
+                if booking_id_str:
+                    try:
+                        gcal_booking_ids.add(UUID(booking_id_str))
+                    except (ValueError, TypeError):
+                        pass  # Invalid UUID, skip
+    
+    # 5. Check which GCal booking_ids exist in DB (to avoid double-counting)
+    existing_booking_ids = await _get_existing_booking_ids(db, provider.id, gcal_booking_ids)
+    
+    # 6. Count GCal events that DON'T have matching DB bookings (orphaned/manual events)
     patient_count_gcal = 0
     for event in gcal_events:
         # Parse event times
@@ -264,28 +347,32 @@ async def is_slot_available(
         # Check if overlaps
         if _events_overlap(event_start, event_end, slot_start, slot_end):
             if _is_patient_appointment(event):
-                patient_count_gcal += 1
+                # Check if this event has a booking_id that exists in DB
+                metadata = GoogleCalendarService.parse_extended_properties(event)
+                if metadata and metadata.get("source") == "callcenter_ai":
+                    booking_id_str = metadata.get("booking_id")
+                    if booking_id_str:
+                        try:
+                            event_booking_id = UUID(booking_id_str)
+                            # Only count if booking doesn't exist in DB (orphaned event)
+                            if event_booking_id not in existing_booking_ids:
+                                patient_count_gcal += 1
+                        except (ValueError, TypeError):
+                            # Invalid UUID, count it (manual event)
+                            patient_count_gcal += 1
+                    else:
+                        # No booking_id, count it (manual event)
+                        patient_count_gcal += 1
+                else:
+                    # Manual event (not from callcenter_ai), count it
+                    patient_count_gcal += 1
             else:
                 # External event (meeting, personal, etc.) blocks the slot entirely
                 logger.debug(f"Slot {slot_start} blocked by external event for provider {provider.id}")
                 return False
     
-    # 4. Count our database bookings (TENTATIVE/CONFIRMED)
-    booking_result = await db.execute(
-        select(Booking).where(
-            and_(
-                Booking.provider_id == provider.id,
-                Booking.slot_start < slot_end,
-                Booking.slot_end > slot_start,
-                Booking.status.in_([BookingStatus.TENTATIVE, BookingStatus.CONFIRMED])
-            )
-        )
-    )
-    db_bookings = booking_result.scalars().all()
-    booking_count = len(db_bookings)
-    
-    # 5. Capacity check: patient appointments (GCal + DB) must be < capacity
-    total_patient_appointments = patient_count_gcal + booking_count
+    # 7. Capacity check: patient appointments (DB + orphaned GCal) must be < capacity
+    total_patient_appointments = booking_count + patient_count_gcal
     available = total_patient_appointments < provider.capacity
     
     logger.debug(
@@ -378,11 +465,42 @@ async def get_available_slots(
                 Booking.provider_id == provider.id,
                 Booking.slot_start < window_end,
                 Booking.slot_end > window_start,
-                Booking.status.in_([BookingStatus.TENTATIVE, BookingStatus.CONFIRMED])
+                cast(Booking.status, String).in_([BookingStatus.TENTATIVE.value, BookingStatus.CONFIRMED.value])
             )
         )
     )
     db_bookings = booking_result.scalars().all()
+    
+    # Log what bookings were found
+    logger.info(
+        f"Found {len(db_bookings)} bookings in window for provider {provider.id} on {target_date}. "
+        f"Window: {window_start} (tzinfo={window_start.tzinfo}) to {window_end} (tzinfo={window_end.tzinfo})"
+    )
+    for b in db_bookings:
+        logger.info(
+            f"Booking {b.id}: slot_start={b.slot_start} (tzinfo={b.slot_start.tzinfo}), "
+            f"slot_end={b.slot_end} (tzinfo={b.slot_end.tzinfo}), status={b.status}"
+        )
+    
+    # Extract booking_ids from GCal events to check for duplicates
+    gcal_booking_ids = set()
+    for event in gcal_events:
+        if _is_patient_appointment(event):
+            metadata = GoogleCalendarService.parse_extended_properties(event)
+            if metadata and metadata.get("source") == "callcenter_ai":
+                booking_id_str = metadata.get("booking_id")
+                if booking_id_str:
+                    try:
+                        gcal_booking_ids.add(UUID(booking_id_str))
+                    except (ValueError, TypeError):
+                        pass  # Invalid UUID, skip
+    
+    # Check which GCal booking_ids exist in DB (to avoid double-counting)
+    # Also get all DB booking IDs in the window to check against GCal events
+    existing_booking_ids = await _get_existing_booking_ids(db, provider.id, gcal_booking_ids)
+    
+    # Get all DB booking IDs in the window (not just from GCal events) for comprehensive matching
+    all_db_booking_ids_in_window = {b.id for b in db_bookings}
     
     # Single DB query for blocked slots
     blocked_result = await db.execute(
@@ -391,7 +509,7 @@ async def get_available_slots(
                 AvailabilitySlot.provider_id == provider.id,
                 AvailabilitySlot.slot_start < window_end,
                 AvailabilitySlot.slot_end > window_start,
-                AvailabilitySlot.status == SlotStatus.BLOCKED
+                cast(AvailabilitySlot.status, String) == SlotStatus.BLOCKED.value
             )
         )
     )
@@ -408,10 +526,51 @@ async def get_available_slots(
         if is_blocked:
             continue
         
-        # Check Google Calendar events
-        patient_count_gcal = 0
+        # First, check for external blocking events (non-patient appointments that block the slot)
         slot_blocked_by_external = False
+        for event in gcal_events:
+            event_start_str = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+            event_end_str = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
+            
+            if not event_start_str or not event_end_str:
+                continue
+            
+            try:
+                event_start = _parse_gcal_datetime(event_start_str)
+                event_end = _parse_gcal_datetime(event_end_str)
+            except (ValueError, AttributeError):
+                continue
+            
+            if _events_overlap(event_start, event_end, slot_start, slot_end):
+                if not _is_patient_appointment(event):
+                    slot_blocked_by_external = True
+                    break
         
+        if slot_blocked_by_external:
+            continue
+        
+        # Count DB bookings for this slot first
+        booking_count = 0
+        overlapping_booking_ids = set()  # Track which booking_ids overlap with this slot
+        overlapping_bookings = []  # Track booking objects that overlap with this slot (for time comparison)
+        for b in db_bookings:
+            # Log the comparison
+            logger.info(
+                f"Comparing slot {slot_start} (tzinfo={slot_start.tzinfo}) to {slot_end} (tzinfo={slot_end.tzinfo}) "
+                f"with booking {b.id} slot_start={b.slot_start} (tzinfo={b.slot_start.tzinfo}) "
+                f"slot_end={b.slot_end} (tzinfo={b.slot_end.tzinfo})"
+            )
+            overlaps = _events_overlap(b.slot_start, b.slot_end, slot_start, slot_end)
+            logger.info(f"Overlap result for booking {b.id}: {overlaps}")
+            if overlaps:
+                booking_count += 1
+                overlapping_booking_ids.add(b.id)  # Track this booking_id
+                overlapping_bookings.append(b)  # Track booking object for time comparison
+                logger.info(f"Booking {b.id} overlaps with slot {slot_start} - count={booking_count}")
+        
+        # Count Google Calendar patient appointments for this slot
+        # Exclude events that correspond to DB bookings we already counted (prevents double-counting)
+        patient_count_gcal = 0
         for event in gcal_events:
             event_start_str = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
             event_end_str = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
@@ -427,22 +586,89 @@ async def get_available_slots(
             
             if _events_overlap(event_start, event_end, slot_start, slot_end):
                 if _is_patient_appointment(event):
-                    patient_count_gcal += 1
-                else:
-                    slot_blocked_by_external = True
-                    break
+                    # Check if this event corresponds to a DB booking we already counted for this slot
+                    metadata = GoogleCalendarService.parse_extended_properties(event)
+                    logger.info(
+                        f"GCal event for slot {slot_start}: metadata={metadata}, "
+                        f"overlapping_booking_ids={list(overlapping_booking_ids)}"
+                    )
+                    if metadata and metadata.get("source") == "callcenter_ai":
+                        booking_id_str = metadata.get("booking_id")
+                        if booking_id_str:
+                            try:
+                                event_booking_id = UUID(booking_id_str)
+                                # Don't count if this booking_id is already counted in DB bookings for this slot
+                                if event_booking_id in overlapping_booking_ids:
+                                    logger.info(
+                                        f"Skipping GCal event for booking {event_booking_id} - already counted in DB bookings for slot {slot_start}"
+                                    )
+                                    continue
+                                # Also check if booking exists in DB at all (orphaned event check)
+                                # Check both existing_booking_ids (from GCal events) and all_db_booking_ids_in_window
+                                if event_booking_id not in existing_booking_ids and event_booking_id not in all_db_booking_ids_in_window:
+                                    logger.info(
+                                        f"Counting orphaned GCal event for booking {event_booking_id} (not in DB) for slot {slot_start}"
+                                    )
+                                    patient_count_gcal += 1
+                                else:
+                                    logger.info(
+                                        f"Skipping GCal event for booking {event_booking_id} - exists in DB (in existing_booking_ids={event_booking_id in existing_booking_ids} or all_db_booking_ids_in_window={event_booking_id in all_db_booking_ids_in_window}) for slot {slot_start}"
+                                    )
+                            except (ValueError, TypeError) as e:
+                                # Invalid UUID, count it (manual event)
+                                logger.info(
+                                    f"GCal event has invalid booking_id UUID '{booking_id_str}': {e} - counting as manual event for slot {slot_start}"
+                                )
+                                patient_count_gcal += 1
+                        else:
+                            # No booking_id, count it (manual event)
+                            logger.info(
+                                f"GCal event has no booking_id in metadata - counting as manual event for slot {slot_start}"
+                            )
+                            patient_count_gcal += 1
+                    else:
+                        # Manual event (not from callcenter_ai) or no metadata
+                        # Check if this GCal event corresponds to a DB booking by comparing event IDs
+                        # If booking.google_event_id matches this event's ID, they're the same appointment
+                        event_id = event.get("id")
+                        is_same_as_db_booking = False
+                        if event_id:
+                            # First check overlapping bookings (most common case)
+                            for b in overlapping_bookings:
+                                if b.google_event_id == event_id:
+                                    is_same_as_db_booking = True
+                                    logger.info(
+                                        f"Skipping GCal event (no metadata) - matches DB booking {b.id} "
+                                        f"via google_event_id={event_id} for slot {slot_start}"
+                                    )
+                                    break
+                            
+                            # Also check all DB bookings in window (in case booking doesn't overlap this slot but event does)
+                            if not is_same_as_db_booking:
+                                for b in db_bookings:
+                                    if b.google_event_id == event_id:
+                                        is_same_as_db_booking = True
+                                        logger.info(
+                                            f"Skipping GCal event (no metadata) - matches DB booking {b.id} "
+                                            f"via google_event_id={event_id} (booking doesn't overlap slot but event does) for slot {slot_start}"
+                                        )
+                                        break
+                        
+                        if not is_same_as_db_booking:
+                            # Manual event (not from callcenter_ai) or different event, count it
+                            logger.info(
+                                f"GCal event is not from callcenter_ai (source={metadata.get('source') if metadata else 'None'}) "
+                                f"and doesn't match any DB booking google_event_id - counting for slot {slot_start}"
+                            )
+                            patient_count_gcal += 1
         
-        if slot_blocked_by_external:
-            continue
-        
-        # Count DB bookings for this slot
-        booking_count = sum(
-            1 for b in db_bookings
-            if _events_overlap(b.slot_start, b.slot_end, slot_start, slot_end)
+        # Capacity check: DB bookings + orphaned GCal events (excluding those already counted in DB)
+        total = booking_count + patient_count_gcal
+        logger.info(
+            f"Slot {slot_start} capacity check: gcal_patients={patient_count_gcal}, "
+            f"db_bookings={booking_count}, total={total}, capacity={provider.capacity}, "
+            f"available={total < provider.capacity}, remaining_capacity={provider.capacity - total if total < provider.capacity else 0}"
         )
-        
-        # Capacity check
-        total = patient_count_gcal + booking_count
         if total < provider.capacity:
             available_slots.append({
                 "start_time": slot_start.isoformat(),
@@ -452,8 +678,15 @@ async def get_available_slots(
                 "date": target_date.isoformat(),
                 "remaining_capacity": provider.capacity - total
             })
+        else:
+            logger.info(
+                f"Slot {slot_start} filtered out: at capacity (total={total}, capacity={provider.capacity})"
+            )
     
-    logger.info(f"Found {len(available_slots)} available slots for provider {provider.id} on {target_date}")
+    logger.info(
+        f"Found {len(available_slots)} available slots for provider {provider.id} on {target_date}. "
+        f"Total candidates: {len(candidates)}, Total bookings in window: {len(db_bookings)}"
+    )
     return available_slots
 
 
