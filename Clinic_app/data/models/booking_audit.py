@@ -1,12 +1,32 @@
 # Clinic_app/data/models/booking_audit.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, DateTime, ForeignKey, Index, TypeDecorator
+from sqlalchemy.dialects.postgresql import UUID, ENUM as PG_ENUM
 from sqlalchemy.orm import relationship
-from sqlalchemy import Enum as SQLEnum
 from Clinic_app.common.database import Base
 from Clinic_app.data.enums import BookingAction
+
+
+class BookingActionEnum(TypeDecorator):
+    """Type decorator to ensure BookingAction enum values are used (not names)."""
+    impl = PG_ENUM
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=False)
+    
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, BookingAction):
+            return value.value  # Use enum value, not name
+        return value
+    
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return BookingAction(value)
 
 
 class BookingAudit(Base):
@@ -19,7 +39,7 @@ class BookingAudit(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)
     booking_id = Column(UUID(as_uuid=True), ForeignKey("booking.id", ondelete="RESTRICT"), nullable=False, index=True)
-    action = Column(SQLEnum(BookingAction), nullable=False)  # hold/confirm/cancel/expire
+    action = Column(BookingActionEnum(), nullable=False)  # hold/confirm/cancel/expire
     actor = Column(String, nullable=False)  # System or user identifier
     timestamp = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 

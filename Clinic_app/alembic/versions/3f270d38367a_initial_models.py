@@ -28,11 +28,13 @@ def upgrade() -> None:
     
     # Create ENUM types for PostgreSQL
     # Note: Using native PostgreSQL ENUMs for better type safety
-    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=True)
-    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=True)
-    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=True)
-    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=True)
+    # Set create_type=False since we explicitly create them below
+    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=False)
+    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=False)
+    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=False)
+    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=False)
     
+    # Explicitly create the types first
     booking_status_enum.create(op.get_bind(), checkfirst=True)
     slot_status_enum.create(op.get_bind(), checkfirst=True)
     slot_source_enum.create(op.get_bind(), checkfirst=True)

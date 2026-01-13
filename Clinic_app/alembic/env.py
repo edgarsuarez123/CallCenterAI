@@ -69,7 +69,7 @@ db_password = os.getenv("DB_PASSWORD")
 
 if db_host and db_name and db_user and db_password:
     # Use sync connection (postgresql+psycopg2) for migrations
-    sync_database_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    sync_database_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
     config.set_main_option("sqlalchemy.url", sync_database_url)
 
 # other values from the config, defined by the needs of env.py,
@@ -137,12 +137,10 @@ def run_migrations_online() -> None:
             with context.begin_transaction():
                 context.run_migrations()
     except Exception as e:
-        # If connection fails, we can still generate migrations in offline mode
-        # This is useful for initial migration generation
-        import warnings
-        warnings.warn(f"Could not connect to database: {e}. Generating migration without database comparison.")
-        # Fall back to offline mode
-        run_migrations_offline()
+        # Re-raise the actual error instead of falling back to offline mode
+        import logging
+        logging.error(f"Migration failed: {e}")
+        raise
 
 
 if context.is_offline_mode():

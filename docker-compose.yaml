@@ -1,0 +1,28 @@
+# CallCenterAI - Production Docker Compose
+# App container only - connects to external PostgreSQL
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: callcenter-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - APP_ENVIRONMENT=production
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+

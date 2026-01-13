@@ -1,12 +1,32 @@
 # Clinic_app/data/models/booking.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Index, CheckConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, DateTime, ForeignKey, Index, CheckConstraint, TypeDecorator
+from sqlalchemy.dialects.postgresql import UUID, ENUM as PG_ENUM
 from sqlalchemy.orm import relationship
-from sqlalchemy import Enum as SQLEnum
 from Clinic_app.common.database import Base
 from Clinic_app.data.enums import BookingStatus
+
+
+class BookingStatusEnum(TypeDecorator):
+    """Type decorator to ensure BookingStatus enum values are used (not names)."""
+    impl = PG_ENUM
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=False)
+    
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, BookingStatus):
+            return value.value  # Use enum value, not name
+        return value
+    
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return BookingStatus(value)
 
 
 class Booking(Base):
@@ -24,7 +44,11 @@ class Booking(Base):
     patient_id = Column(UUID(as_uuid=True), ForeignKey("patient.id", ondelete="CASCADE"), nullable=False, index=True)
     slot_start = Column(DateTime(timezone=True), nullable=False)
     slot_end = Column(DateTime(timezone=True), nullable=False)
-    status = Column(SQLEnum(BookingStatus), nullable=False, default=BookingStatus.TENTATIVE)
+    status = Column(
+        BookingStatusEnum(),
+        nullable=False,
+        default=BookingStatus.TENTATIVE.value
+    )
     hold_token = Column(UUID(as_uuid=True), nullable=True)  # Temporary reservation token (only for tentative)
     hold_expires_at = Column(DateTime(timezone=True), nullable=True)  # Expiration timestamp (only for tentative)
     google_event_id = Column(String, nullable=True)  # Linked GCal event (nullable for graceful degradation)
