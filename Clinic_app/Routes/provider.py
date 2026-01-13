@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, delete
+from sqlalchemy import select, and_, or_, delete, cast, String
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, field_validator
 
@@ -451,8 +451,8 @@ async def block_time(
         
         if existing:
             # Update existing slot to BLOCKED
-            existing.status = SlotStatus.BLOCKED
-            existing.source = SlotSource.GCAL  # Mark as manually blocked
+            existing.status = SlotStatus.BLOCKED.value
+            existing.source = SlotSource.GCAL.value  # Mark as manually blocked
             slot = existing
         else:
             # Create new blocked slot
@@ -461,8 +461,8 @@ async def block_time(
                 provider_id=provider_id,
                 slot_start=request.start_datetime,
                 slot_end=request.end_datetime,
-                status=SlotStatus.BLOCKED,
-                source=SlotSource.GCAL
+                status=SlotStatus.BLOCKED.value,
+                source=SlotSource.GCAL.value
             )
             db.add(slot)
         
@@ -519,7 +519,7 @@ async def unblock_time(
         stmt = select(AvailabilitySlot).where(
             and_(
                 AvailabilitySlot.provider_id == provider_id,
-                AvailabilitySlot.status == SlotStatus.BLOCKED,
+                cast(AvailabilitySlot.status, String) == SlotStatus.BLOCKED.value,
                 or_(
                     # Slot starts within range
                     and_(

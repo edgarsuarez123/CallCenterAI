@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import logging
-from api.Routes.health import health_router
+from Clinic_app.Routes.health import health_router
 from Clinic_app.Routes.admin import admin_router
 from Clinic_app.Routes.provider import provider_router
 from Clinic_app.Routes.retell import retell_router

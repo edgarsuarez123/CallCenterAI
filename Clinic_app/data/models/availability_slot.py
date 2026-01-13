@@ -1,12 +1,53 @@
 # Clinic_app/data/models/availability_slot.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, DateTime, ForeignKey, Index, UniqueConstraint, CheckConstraint, TypeDecorator
+from sqlalchemy.dialects.postgresql import UUID, ENUM as PG_ENUM
 from sqlalchemy.orm import relationship
-from sqlalchemy import Enum as SQLEnum
 from Clinic_app.common.database import Base
 from Clinic_app.data.enums import SlotStatus, SlotSource
+
+
+class SlotStatusEnum(TypeDecorator):
+    """Type decorator to ensure SlotStatus enum values are used (not names)."""
+    impl = PG_ENUM
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__('free', 'booked', 'blocked', name='slotstatus', create_type=False)
+    
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, SlotStatus):
+            return value.value  # Use enum value, not name
+        return value
+    
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return SlotStatus(value)
+
+
+class SlotSourceEnum(TypeDecorator):
+    """Type decorator to ensure SlotSource enum values are used (not names)."""
+    impl = PG_ENUM
+    cache_ok = True
+    
+    def __init__(self):
+        super().__init__('csv', 'gcal', name='slotsource', create_type=False)
+    
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return value
+        if isinstance(value, SlotSource):
+            return value.value  # Use enum value, not name
+        return value
+    
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return value
+        return SlotSource(value)
 
 
 class AvailabilitySlot(Base):
@@ -21,8 +62,8 @@ class AvailabilitySlot(Base):
     provider_id = Column(UUID(as_uuid=True), ForeignKey("provider.id", ondelete="CASCADE"), nullable=False, index=True)
     slot_start = Column(DateTime(timezone=True), nullable=False)
     slot_end = Column(DateTime(timezone=True), nullable=False)
-    source = Column(SQLEnum(SlotSource), nullable=False)  # csv/gcal
-    status = Column(SQLEnum(SlotStatus), nullable=False, default=SlotStatus.FREE)  # free/booked/blocked
+    source = Column(SlotSourceEnum(), nullable=False)  # csv/gcal
+    status = Column(SlotStatusEnum(), nullable=False, default=SlotStatus.FREE.value)  # free/booked/blocked
     last_sync_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh time
 
     # Unique constraint: prevents duplicate slots for same provider/time

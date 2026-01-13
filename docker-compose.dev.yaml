@@ -1,0 +1,97 @@
+# CallCenterAI - Local Development Docker Compose
+# Includes PostgreSQL and Redis for self-contained development
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: callcenter-api-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - APP_ENVIRONMENT=development
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=callcenterai
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      # Mount source code for hot-reload (development only)
+      - ./Clinic_app:/app/Clinic_app:ro
+    command: ["uvicorn", "Clinic_app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    networks:
+      - callcenter-network
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: callcenter-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=callcenterai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d callcenterai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - callcenter-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: callcenter-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - callcenter-network
+
+  # Optional: Run migrations on startup
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: callcenter-migrate
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=callcenterai
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["sh", "-c", "cd Clinic_app && alembic upgrade head"]
+    networks:
+      - callcenter-network
+    profiles:
+      - migrate
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  callcenter-network:
+    driver: bridge
+

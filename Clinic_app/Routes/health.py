@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 from datetime import datetime, timezone
 from sqlalchemy import text
-from api.services.database import AsyncSessionLocal
+from Clinic_app.common.database import AsyncSessionLocal
 
 health_router = APIRouter()
 
