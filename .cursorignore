@@ -1,0 +1,4 @@
+﻿# Environment variables (secrets, keys)
+.env
+.env.local
+.env.*.local
