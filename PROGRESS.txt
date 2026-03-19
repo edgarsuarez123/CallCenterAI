@@ -1,0 +1,106 @@
+================================================================================
+SESSION: 2026-03-18 (Session 003 — Feature 0 Bug Fix + Tests Green)
+================================================================================
+COMPLETED:
+- Fixed bug: agentql.wrap_async() is a coroutine and must be awaited
+  - tests/test_playwright_docker.py: added await to wrap_async call
+  - agentql-test/test_nextgen_headless.py: added await to wrap_async call
+- Pinned exact versions in requirements.txt: playwright==1.58.0, agentql==1.18.1
+- Confirmed on Python 3.14.0, Windows:
+    tests/test_playwright_validation.py  — 11/11 PASSED (unit, mock-based)
+    tests/test_playwright_docker.py      —  8/8  PASSED (integration, real Chromium)
+
+SKIPPED / DEFERRED:
+- F0.1: Running click-test.js against NextGen — MANUAL, requires pilot clinic credentials
+- F0.6: Playwright validation result logging — MANUAL, requires running test_nextgen_headless.py
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+1. Begin Feature 1 (pre-HEDIS fixes) — all 4 items, no credentials needed:
+   F1.1: Register admin_router, retell_router, provider_router in main.py + APScheduler lifespan
+   F1.2: Create common/auth.py (verify_admin_api_key dependency) + apply to admin/provider routes
+   F1.3: Create workers/booking_reaper.py + wire into main.py lifespan
+   F1.4: Create common/redis.py (singleton async Redis client)
+2. After each sub-step: write and run tests
+3. Pilot clinic NextGen validation (F0.1 + F0.2) can happen in parallel any time Edgar has access
+
+FILES MODIFIED:
+- requirements.txt (pinned playwright==1.58.0, agentql==1.18.1)
+- tests/test_playwright_docker.py (await fix on wrap_async)
+- agentql-test/test_nextgen_headless.py (await fix on wrap_async)
+- PROGRESS.txt (this update)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-18 (Session 002 — Feature 0 Code Steps)
+================================================================================
+COMPLETED:
+- F0.3a: Added playwright + agentql to requirements.txt (unpinned — pin after first confirmed install)
+- F0.3b: Updated Dockerfile — PLAYWRIGHT_BROWSERS_PATH env var, playwright install-deps + install chromium as root before USER appuser
+- F0.2:  Created agentql-test/test_nextgen_headless.py — 4-step Python headless validation script (credentials from env vars only)
+- F0.4:  Created tests/test_playwright_validation.py — 9 unit tests (mock-based PlaywrightEHRService contract + Redis cache key format)
+- F0.5:  Created tests/test_playwright_docker.py — 7 integration tests (Playwright launches, Chromium loads URLs, AgentQL wrap_async works)
+- No linter errors on any new file
+
+SKIPPED / DEFERRED:
+- F0.1: Running click-test.js against pilot clinic — MANUAL STEP, requires Edgar + pilot clinic credentials
+- F0.6: Logging Playwright validation result — MANUAL STEP, requires Edgar to run test_nextgen_headless.py
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+1. Edgar: Install dependencies locally: pip install playwright agentql && playwright install chromium
+2. Edgar: Run mock tests to confirm they pass: pytest tests/test_playwright_validation.py -v -m unit
+3. Edgar: Run Docker runtime tests (after docker build): pytest tests/test_playwright_docker.py -v -m integration
+4. Edgar: Run F0.1 — node agentql-test/click-test.js (requires NextGen open in Chrome + AGENTQL_API_KEY)
+5. Edgar: Run F0.2 — set env vars + python agentql-test/test_nextgen_headless.py
+6. Edgar: Log result (PASS/FAIL + reason) in PROGRESS.txt under "Playwright Validation Result"
+7. Begin Feature 1 (pre-HEDIS fixes) in parallel — does NOT depend on F0 result
+
+FILES MODIFIED:
+- requirements.txt (added playwright, agentql)
+- Dockerfile (PLAYWRIGHT_BROWSERS_PATH env, playwright install steps)
+- agentql-test/test_nextgen_headless.py (created)
+- tests/test_playwright_validation.py (created)
+- tests/test_playwright_docker.py (created)
+- PROGRESS.txt (this update)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-18 (Session 001 — Initial Planning)
+================================================================================
+COMPLETED:
+- Created INFRASTRUCTURE.md — full codebase architecture reference (771 lines)
+- Created PLAN.md — full MVP roadmap (Features 0–8) using CLAUDE.md template
+- Created PROGRESS.txt — this file
+- Read and analyzed: CLAUDE.md, HEDIS_PRD_v2.md, PRD.md, main.py, all routes, all services, all models
+- Identified all 8 gaps between current Phase 1 codebase and HEDIS MVP requirements
+- Confirmed: admin_router, retell_router, provider_router implemented but NOT registered in main.py
+- Confirmed: PLAN.md and PROGRESS.txt did not exist — created both per CLAUDE.md startup rules
+
+SKIPPED / DEFERRED:
+- No code written this session (planning session only)
+- Feature 0 Playwright validation not run — requires pilot clinic credentials (manual step for Edgar)
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+1. Edgar runs Feature 0 Step F0.1: execute agentql-test/click-test.js against pilot clinic's NextGen
+2. Log Playwright validation result (PASS or FAIL + reason) in this PROGRESS.txt
+3. Begin Feature 1 (pre-HEDIS fixes) in parallel — does NOT depend on F0 result:
+   - Register routers in main.py (F1.1)
+   - Add admin API key auth in common/auth.py (F1.2)
+   - Wire APScheduler reaper (F1.3) — add apscheduler to requirements.txt
+   - Redis client singleton in common/redis.py (F1.4)
+4. After Feature 1: write tests (test_router_registration.py, test_auth.py, test_booking_reaper.py, test_redis.py)
+5. After tests pass: begin Feature 2 (schema + migrations)
+
+FILES MODIFIED:
+- INFRASTRUCTURE.md (created)
+- PLAN.md (created)
+- PROGRESS.txt (created)
+================================================================================

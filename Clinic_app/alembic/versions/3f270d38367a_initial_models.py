@@ -28,13 +28,11 @@ def upgrade() -> None:
     
     # Create ENUM types for PostgreSQL
     # Note: Using native PostgreSQL ENUMs for better type safety
-    # Set create_type=False since we explicitly create them below
-    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=False)
-    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=False)
-    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=False)
-    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=False)
+    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=True)
+    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=True)
+    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=True)
+    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=True)
     
-    # Explicitly create the types first
     booking_status_enum.create(op.get_bind(), checkfirst=True)
     slot_status_enum.create(op.get_bind(), checkfirst=True)
     slot_source_enum.create(op.get_bind(), checkfirst=True)
@@ -50,8 +48,6 @@ def upgrade() -> None:
         sa.Column('status', sa.String(length=50), nullable=False, server_default='active'),
         sa.Column('license_token', sa.Text(), nullable=False),
         sa.Column('license_expires_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('business_hours_start', sa.String(length=5), nullable=False, server_default='09:00'),
-        sa.Column('business_hours_end', sa.String(length=5), nullable=False, server_default='17:00'),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.text('now()')),
     )
     op.create_index('ix_clinic_id', 'clinic', ['id'], unique=False)
@@ -175,12 +171,13 @@ def upgrade() -> None:
     op.create_index('ix_booking_provider_id', 'booking', ['provider_id'], unique=False)
     op.create_index('ix_booking_patient_id', 'booking', ['patient_id'], unique=False)
     op.create_index('idx_status_hold_expires', 'booking', ['status', 'hold_expires_at'], unique=False)
-    # Non-unique index for slot lookups (capacity enforcement done at application level)
+    # Partial unique index for double-booking prevention
     op.create_index(
-        'idx_booking_slot_lookup',
+        'idx_booking_unique_slot',
         'booking',
-        ['provider_id', 'slot_start', 'slot_end', 'status'],
-        unique=False
+        ['provider_id', 'slot_start', 'slot_end'],
+        unique=True,
+        postgresql_where=text("status IN ('tentative', 'confirmed')")
     )
     
     # Create booking_audit table
@@ -220,7 +217,6 @@ def upgrade() -> None:
         sa.Column('clinic_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('call_type', sa.String(), nullable=False),
         sa.Column('related_id', postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column('tentative_booking_id', postgresql.UUID(as_uuid=True), nullable=True),  # For hold cleanup on call_ended
         sa.Column('duration_seconds', sa.Integer(), nullable=True),
         sa.Column('outcome', sa.String(), nullable=True),
         sa.Column('retell_call_id', sa.String(), nullable=True),

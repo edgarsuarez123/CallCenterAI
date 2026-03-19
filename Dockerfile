@@ -2,15 +2,17 @@
 FROM python:3.11-slim
 
 # Set environment variables
+# PLAYWRIGHT_BROWSERS_PATH: fixed path so non-root appuser can read the Chromium binary
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install base system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gcc \
@@ -19,8 +21,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies (includes playwright + agentql)
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Install Playwright Chromium system dependencies for this distro, then download
+# the Chromium browser binary into the shared PLAYWRIGHT_BROWSERS_PATH.
+# Both steps run as root (before USER appuser) so they have apt-get + write access.
+# playwright install-deps resolves the exact system packages needed for this OS version.
+RUN apt-get update \
+    && playwright install-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && playwright install chromium \
+    && chmod -R 755 /opt/playwright-browsers
 
 # Copy application code
 COPY . .

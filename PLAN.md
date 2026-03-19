@@ -1,0 +1,774 @@
+# PLAN.md — CallCenterAI HEDIS Implementation Plans
+
+> This file tracks all implementation plans in chronological order.
+> Plans are never deleted — superseded plans are marked [SUPERSEDED].
+> Each plan includes what was decided, why, and what was deferred.
+> Source of truth for all feature work: HEDIS_PRD_v2.md
+> Architecture reference: INFRASTRUCTURE.md
+> Session rules: CLAUDE.md
+
+---
+
+## Plan Index
+
+| # | Date | Title | Status |
+|---|---|---|---|
+| 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active |
+| 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Active |
+
+---
+
+## Plan 001 — MVP Roadmap — Full Feature Inventory
+**Date:** 2026-03-18
+**Status:** Active
+**Source:** HEDIS_PRD_v2.md (all sections) + INFRASTRUCTURE.md gap analysis
+
+### What We Are Building
+
+A full HEDIS outreach automation platform:
+- Multi-tenant SaaS (FastAPI + Azure PostgreSQL)
+- Retell AI outbound calling with per-clinic agents
+- Claude API CSV parsing (gap type extraction)
+- Server-side Playwright + AgentQL for NextGen EHR scheduling
+- Clinic dashboard (Google OAuth + JWT) for campaign management
+- HIPAA-aligned PHI handling throughout
+
+### Current State (Phase 1 — ~95% Complete)
+
+The core GCal-based booking system (inbound calls) is built and tested:
+- 10 ORM models, 2 Alembic migrations
+- Retell webhooks + tool endpoints (schedule, confirm, availability)
+- PHI encryption (AES-256-GCM), patient service, booking service
+- Admin + provider CRUD routes (implemented but NOT registered in main.py)
+- Google Calendar service (legacy, fully tested)
+- 8 test files covering all services
+
+### What Is Missing for HEDIS MVP
+
+See Features 0–8 below. Everything after Feature 1 is net-new.
+
+### Key Architecture Decisions & Reasoning
+
+1. **Server-side Playwright over Chrome Extension** — Playwright headless runs on Azure; no clinic install required. Chrome Extension fallback documented in HEDIS_CAMPAIGN_IMPLEMENTATION.md. Feature 0 validates which path to take.
+2. **One Retell agent per clinic** — gap_type passed as call metadata, not separate agents. Keeps Retell billing simple.
+3. **Claude API for CSV parsing** — payer-format CSV columns vary wildly; LLM normalization is cheaper and more robust than heuristics.
+4. **Redis for selector cache + distributed lock** — 24h selector TTL saves ~60% AgentQL tokens. Distributed lock prevents concurrent Playwright actions per clinic (NextGen race conditions).
+5. **FIFO across campaigns** — contacts processed in CSV row order across all active campaigns. Predictable, matches clinic staff expectations.
+6. **No patient name/DOB in DB** — PHI minimization. Name + DOB passed as Retell call metadata only; stored in campaign_audit AES-256-GCM encrypted only for dashboard display.
+
+### Testing Standard (Applied After Every Feature)
+
+**Unit tests:** `@pytest.mark.unit` — mock all DB + external calls, test business logic
+**Integration tests:** `@pytest.mark.integration` — real DB (test transaction rollback), mock external APIs
+**PHI tests:** encryption/decryption round-trips, hash dedup correctness
+**Webhook tests:** HMAC verification with valid + invalid signatures
+**Coverage target:** All new service functions, all new route handlers
+
+### Deferred (Post-MVP / Post-Pilot)
+
+- SOAP note generation
+- Inbound callback handling
+- TCPA do-not-call list checking
+- EHR support beyond NextGen
+- BAA contract onboarding flow (manual for pilot)
+- Advanced analytics/reporting
+- Multi-language beyond English + Spanish
+- Azure Key Vault (using env var for pilot; Key Vault in v1.1)
+- Reminder call engine (deferred from MVP — not needed for HEDIS outreach pilot)
+
+---
+
+## Feature Order and Dependency Graph
+
+```
+Feature 0: Playwright Validation Gate (manual — Edgar runs test)
+    └── gates all EHR work (Feature 5)
+
+Feature 1: Pre-HEDIS Codebase Fixes
+    ├── 1a: Register routers in main.py
+    ├── 1b: Admin API key auth
+    ├── 1c: Reaper worker (APScheduler)
+    └── 1d: Redis client singleton
+
+Feature 2: New Schema + Migrations
+    ├── New enums (CampaignStatus, ContactStatus, GapType)
+    ├── New tables: clinic_staff, campaign, campaign_contact, campaign_audit, clinic_ehr_config
+    ├── Alter: clinic_integration (11 new columns)
+    └── New requirements: anthropic, playwright, agentql, PyJWT, python-multipart, openpyxl
+
+Feature 3: Auth (Google OAuth + JWT + Admin API Key)
+    ├── 3a: Admin API key dependency
+    ├── 3b-d: Google OAuth flow + JWT + clinic selector
+    └── 3e-f: JWT dependency + staff management endpoint
+
+Feature 4: CSV Upload + Claude Parsing + Campaign Creation
+    ├── 4a-b: Upload endpoint + Claude API client
+    ├── 4c-d: Gap type mapping + campaign/contact creation
+    └── 4e: Campaign management routes
+
+Feature 5: EHR Integration (Playwright + AgentQL)   [depends on Feature 0 result]
+    ├── 5a-e: Playwright service (session, heartbeat, queue, Redis cache)
+    ├── 5f-g: Retell EHR tool endpoints
+    └── 5h-i: Admin EHR config + credential test
+
+Feature 6: Campaign Worker + Outbound Calling
+    ├── 6a-f: Worker loop (concurrency, calling hours, retry, 5s gap)
+    ├── 6c: Retell outbound call client
+    └── 6g-h: call_analyzed webhook + campaign webhook updates
+
+Feature 7: Clinic Dashboard
+    ├── 7a-e: Frontend screens (selector, list, upload, detail, EHR setup)
+    └── 7f-g: 30s polling, status badges
+
+Feature 8: Hardening + Pilot Onboarding
+    ├── 8a: PHI audit
+    ├── 8b: Load test (12 concurrent calls)
+    ├── 8c: Azure production deploy
+    └── 8d-f: Pilot clinic onboarding + supervised campaign
+```
+
+---
+
+## 5-Week Schedule
+
+| Week | Features | Gate |
+|---|---|---|
+| 1 | F0 (validation) → F1 (fixes) → F2 (schema) → Start F3 (auth) | Playwright test result logged in PROGRESS.txt |
+| 2 | Finish F3 → F4 (upload + parsing) → Start F6 (worker scaffold) | Campaign created and visible in DB |
+| 3 | F5 (EHR) → Finish F6 (webhooks + worker) | Test booking created in NextGen during supervised test call |
+| 4 | F7 (dashboard) → F3f (staff mgmt) → F8a (PHI audit) | Staff can log in and see campaign |
+| 5 | F8 (deploy + pilot + supervised run) | First real HEDIS call placed and appointment booked |
+
+---
+
+## Plan 002 — Feature 0: Playwright Validation Gate
+**Date:** 2026-03-18
+**Status:** Active
+**Source:** HEDIS_PRD_v2.md §10.6 + CLAUDE.md §Critical Validation Gate
+**Depends On:** Pilot clinic credentials (NextGen URL, username, password)
+
+### What We Are Validating
+
+Before writing a single line of backend HEDIS code, we must confirm that:
+1. Server-side headless Chromium can open and load the pilot clinic's NextGen EHR
+2. Playwright can programmatically log in (not blocked by SSO, CAPTCHA, or IP filter)
+3. AgentQL can read available appointment slots from the scheduler page
+4. AgentQL can fill the booking form and submit an appointment
+
+**If any step fails,** the architecture pivots to Chrome Extension + WebSocket per `HEDIS_CAMPAIGN_IMPLEMENTATION.md`. This determines whether Features 5 and 6 use Playwright (simpler, fully server-side) or Chrome Extension (more complex, requires clinic install).
+
+### What Currently Exists
+
+`agentql-test/click-test.js` — Node.js proof-of-concept using:
+- Playwright via CDP (Chrome DevTools Protocol) connecting to a running Chrome instance
+- AgentQL natural-language element querying (`query_elements`)
+- Clicks `book_appointment_button` by semantic description
+
+**Limitation of existing test:** Uses CDP to attach to an *existing* running Chrome. For production, we need to confirm **headless Chromium** works (no existing Chrome needed), which is what will run on Azure.
+
+### Key Architecture Decisions for This Feature
+
+- **Headless vs. CDP:** Production uses `playwright.chromium.launch(headless=True)` on the server. The existing test uses CDP (developer convenience). Both must be validated.
+- **Node.js vs. Python:** Existing test is Node.js. Production code will be Python (server-side). Both should be tested for NextGen compatibility, but Python test is more important.
+- **Azure compatibility:** Azure App Service with Chromium requires specific system dependencies (`libglib2.0`, `libnss3`, etc.). Dockerfile will need Playwright system deps added.
+
+### Implementation Steps
+
+> **Note:** Steps marked [MANUAL — EDGAR] require the pilot clinic's NextGen credentials and cannot be automated by Claude.
+
+#### Step F0.1 — Extend existing test for headless mode [MANUAL — EDGAR]
+
+Run the existing `agentql-test/click-test.js` against pilot clinic's NextGen as a baseline.
+- Confirms AgentQL connectivity works at all
+- Log result in PROGRESS.txt
+
+**Test to write after this step:** None — this is a manual exploratory test, not a unit test.
+
+**Success criteria:** Script runs without error, `book_appointment_button` is found on the page.
+**Failure criteria:** NextGen blocks connection, login fails, or AgentQL throws.
+
+---
+
+#### Step F0.2 — Write Python headless Playwright test [MANUAL — EDGAR + Code]
+
+Create `agentql-test/test_nextgen_headless.py` that validates the full Python headless flow:
+
+```python
+# agentql-test/test_nextgen_headless.py
+# NOT a pytest test — standalone validation script
+# Run manually: python agentql-test/test_nextgen_headless.py
+
+import asyncio
+import agentql
+from playwright.async_api import async_playwright
+
+NEXTGEN_URL = "..."       # From env or hardcoded for local test only — NEVER commit
+NEXTGEN_USERNAME = "..."  # From env — NEVER commit
+NEXTGEN_PASSWORD = "..."  # From env — NEVER commit
+
+async def validate():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await agentql.wrap_async(browser.new_page())
+
+        # Step 1: Login
+        await page.goto(NEXTGEN_URL)
+        # ... login form fill + submit
+
+        # Step 2: Navigate to scheduler
+        # ... navigate to appointment scheduler
+
+        # Step 3: Read available slots
+        slots_response = await page.query_elements("""
+        {
+            available_appointment_slots[] {
+                date
+                time
+                provider_name
+            }
+        }
+        """)
+        print(f"Slots found: {slots_response.available_appointment_slots}")
+        assert len(slots_response.available_appointment_slots) > 0, "No slots found"
+
+        # Step 4: Fill booking form (use test/dummy patient)
+        # ... fill form fields via AgentQL
+
+        # Step 5: DO NOT SUBMIT in validation — confirm form is fillable
+        print("VALIDATION PASSED: Headless Playwright + AgentQL works with NextGen")
+
+        await browser.close()
+
+asyncio.run(validate())
+```
+
+**Test to write after this step:** See F0.4.
+
+**Success criteria:** Script runs headlessly, slots are read, form is fillable.
+**Failure criteria:** Any step throws — especially login blocked or scheduler page not parseable.
+
+---
+
+#### Step F0.3 — Test Dockerfile Playwright compatibility [Code]
+
+Add Playwright system dependencies to `Dockerfile` and confirm the container can run Playwright headlessly:
+
+```dockerfile
+# Add after the existing apt-get install line:
+RUN apt-get install -y \
+    libglib2.0-0 \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    --no-install-recommends
+```
+
+Also add to `requirements.txt`:
+- `playwright` (with `playwright install chromium` as a Dockerfile step)
+- `agentql`
+
+**Test to write after this step:** See F0.5.
+
+**Success criteria:** `docker build` succeeds; container can run `python agentql-test/test_nextgen_headless.py` without error.
+**Failure criteria:** Missing system library or Playwright install fails in container.
+
+---
+
+#### Step F0.4 — Write pytest unit tests for Playwright service interface [Code]
+
+These tests do NOT connect to real NextGen. They test the service contract — that our `PlaywrightEHRService` class (to be built in Feature 5) has the correct interface and that mocking works correctly for future integration tests.
+
+**File:** `tests/test_playwright_validation.py`
+
+```python
+# tests/test_playwright_validation.py
+"""
+Unit tests validating the Playwright service interface contract.
+These use mocks — no real NextGen connection required.
+"""
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
+@pytest.mark.unit
+class TestPlaywrightServiceInterface:
+    """Verify the PlaywrightEHRService interface contract before implementation."""
+
+    def test_service_constructor_requires_credentials(self):
+        """PlaywrightEHRService must require nextgen_url, username, password."""
+        # Will be implemented in Feature 5 — this test defines the expected interface
+        pass  # Placeholder — replace when PlaywrightEHRService is created
+
+    @pytest.mark.asyncio
+    async def test_get_available_slots_returns_list(self):
+        """get_available_slots must return a list of slot dicts with start_time, end_time, provider_name."""
+        # Mock contract test
+        mock_slots = [
+            {"start_time": "2026-04-01T09:00:00-05:00", "end_time": "2026-04-01T09:30:00-05:00", "provider_name": "Dr. Smith"},
+        ]
+        mock_service = AsyncMock()
+        mock_service.get_available_slots.return_value = mock_slots
+        result = await mock_service.get_available_slots(provider_name="Dr. Smith", date="2026-04-01")
+        assert isinstance(result, list)
+        assert all("start_time" in s and "end_time" in s and "provider_name" in s for s in result)
+
+    @pytest.mark.asyncio
+    async def test_book_appointment_returns_ehr_id(self):
+        """book_appointment must return an ehr_appointment_id string on success."""
+        mock_service = AsyncMock()
+        mock_service.book_appointment.return_value = {"ehr_appointment_id": "nextgen_appt_12345", "success": True}
+        result = await mock_service.book_appointment(
+            provider_name="Dr. Smith",
+            slot_start="2026-04-01T09:00:00-05:00",
+            patient_name="John Doe",
+            patient_dob="1980-01-15",
+            appt_type_code="PREV"
+        )
+        assert result["success"] is True
+        assert "ehr_appointment_id" in result
+
+    @pytest.mark.asyncio
+    async def test_get_available_slots_must_respond_within_3s(self):
+        """Validates the <3s response time contract per HEDIS PRD §10.3."""
+        import time
+        mock_service = AsyncMock()
+        mock_service.get_available_slots.return_value = []
+        start = time.monotonic()
+        await mock_service.get_available_slots(provider_name="Dr. Smith", date="2026-04-01")
+        elapsed = time.monotonic() - start
+        # Mock always passes this — contract test for documentation + future load test
+        assert elapsed < 3.0, f"Slot query took {elapsed:.2f}s — exceeds 3s Retell limit"
+
+    def test_agentql_selector_cache_key_format(self):
+        """Redis cache key for AgentQL selectors must follow: agentql:selector:{clinic_id}:{element_name}"""
+        clinic_id = "550e8400-e29b-41d4-a716-446655440000"
+        element_name = "appointment_slot_grid"
+        expected_key = f"agentql:selector:{clinic_id}:{element_name}"
+        # This documents the key format before implementation
+        assert expected_key.startswith("agentql:selector:")
+        assert clinic_id in expected_key
+        assert element_name in expected_key
+```
+
+**Success criteria:** All 4 tests pass (they're mock-based, should always pass).
+**Failure criteria:** Import errors or test framework issues.
+
+---
+
+#### Step F0.5 — Write integration test for Playwright Docker environment [Code]
+
+**File:** `tests/test_playwright_docker.py`
+
+```python
+# tests/test_playwright_docker.py
+"""
+Integration test: validates Playwright + Chromium are installed and can launch.
+Does NOT connect to NextGen — just confirms the runtime is available.
+Run inside Docker container: pytest tests/test_playwright_docker.py -m integration
+"""
+import pytest
+
+@pytest.mark.integration
+@pytest.mark.slow
+class TestPlaywrightRuntime:
+
+    @pytest.mark.asyncio
+    async def test_chromium_launches_headlessly(self):
+        """Playwright can launch headless Chromium in this environment."""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            pytest.skip("playwright not installed — run: pip install playwright && playwright install chromium")
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.goto("about:blank")
+            title = await page.title()
+            await browser.close()
+            assert title == ""  # about:blank has empty title
+
+    @pytest.mark.asyncio
+    async def test_agentql_importable(self):
+        """agentql package is importable and has wrap_async."""
+        try:
+            import agentql
+            assert hasattr(agentql, "wrap_async")
+        except ImportError:
+            pytest.skip("agentql not installed — run: pip install agentql")
+```
+
+**Success criteria:** Both tests pass inside Docker container.
+**Failure criteria:** Playwright not installed or system libraries missing in container.
+
+---
+
+#### Step F0.6 — Decision logging and PROGRESS.txt update [MANUAL — EDGAR]
+
+After running F0.1 and F0.2, Edgar must log the result in `PROGRESS.txt` before any Feature 5 work begins:
+
+**If Playwright headless WORKS:**
+```
+Playwright Validation: PASSED
+- Headless: YES
+- Login: YES
+- AgentQL slot read: YES
+- Form fillable: YES
+- Architecture path: Server-side Playwright (Features 5-6 use PlaywrightEHRService)
+```
+
+**If Playwright headless is BLOCKED:**
+```
+Playwright Validation: FAILED — NextGen blocks headless
+- Reason: [specific error]
+- Architecture path: Chrome Extension + WebSocket (see HEDIS_CAMPAIGN_IMPLEMENTATION.md)
+- Feature 5 pivots to: WebSocket relay + Chrome Extension AgentQL
+```
+
+### Files Created / Modified in Feature 0
+
+| File | Action | Notes |
+|---|---|---|
+| `agentql-test/test_nextgen_headless.py` | Create | Manual validation script — credentials from env only, never committed |
+| `Dockerfile` | Modify | Add Playwright system dependencies |
+| `requirements.txt` | Modify | Add `playwright`, `agentql` |
+| `tests/test_playwright_validation.py` | Create | Unit tests — mock-based, no real NextGen |
+| `tests/test_playwright_docker.py` | Create | Integration test — validates runtime |
+| `PROGRESS.txt` | Update | Log validation result |
+
+### What Is NOT In Scope for Feature 0
+
+- Writing the actual `PlaywrightEHRService` class (Feature 5)
+- Wiring Playwright into the booking flow (Feature 5)
+- Redis selector cache implementation (Feature 5)
+- Any campaign logic (Feature 6)
+
+---
+
+## Plan 003 — Feature 1: Pre-HEDIS Codebase Fixes
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 0 validation logged)
+**Source:** HEDIS_PRD_v2.md §15 + CLAUDE.md §Known Architectural Gaps
+
+### What We Are Building
+
+4 blocking fixes that make the existing codebase production-functional.
+None of these depend on Feature 0's result — they can be parallelized with the Playwright test.
+
+### Implementation Steps
+
+#### Step F1.1 — Register routers in main.py
+
+**File:** `Clinic_app/main.py`
+
+Add `app.include_router()` for `admin_router`, `retell_router`, `provider_router`.
+Add APScheduler lifespan event for reaper.
+
+**Changes:**
+- Import routers
+- `app.include_router(admin_router)`
+- `app.include_router(retell_router)`
+- `app.include_router(provider_router)`
+- Wire APScheduler in `@asynccontextmanager` lifespan
+
+**Tests to write after this step:**
+- `tests/test_router_registration.py` — confirm all expected route paths return non-404 with a health-check style test
+- Update existing route tests to not fail on missing router
+
+---
+
+#### Step F1.2 — Admin API key authentication
+
+**File:** `Clinic_app/common/auth.py` (new), `Clinic_app/Routes/admin.py`, `Clinic_app/Routes/provider.py`
+
+```python
+# common/auth.py
+from fastapi import HTTPException, Security
+from fastapi.security import APIKeyHeader
+
+API_KEY_HEADER = APIKeyHeader(name="X-Admin-Key", auto_error=False)
+
+async def verify_admin_api_key(api_key: str = Security(API_KEY_HEADER)):
+    expected = os.environ.get("ADMIN_API_KEY")
+    if not expected or api_key != expected:
+        raise HTTPException(status_code=401, detail={"code": "UNAUTHORIZED", "message": "Invalid or missing admin API key"})
+```
+
+Add `Depends(verify_admin_api_key)` to all `/admin/*` route handlers.
+
+**Tests to write after this step:**
+- `tests/test_auth.py` (new) — test valid key passes, missing key returns 401, wrong key returns 401
+
+---
+
+#### Step F1.3 — APScheduler reaper worker
+
+**File:** `Clinic_app/workers/booking_reaper.py` (new), `Clinic_app/main.py`
+
+```python
+# workers/booking_reaper.py
+import logging
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+logger = logging.getLogger(__name__)
+
+scheduler = AsyncIOScheduler()
+
+async def run_booking_reaper():
+    """Expire tentative bookings past their hold_expires_at."""
+    from Clinic_app.common.database import AsyncSessionLocal
+    from Clinic_app.services.booking import get_expired_tentative_bookings, expire_booking
+    async with AsyncSessionLocal() as db:
+        expired = await get_expired_tentative_bookings(db)
+        for booking in expired:
+            await expire_booking(db, booking.id)
+            logger.info(f"Reaped expired booking: {booking.id}")
+        if expired:
+            await db.commit()
+```
+
+Add `apscheduler` to `requirements.txt`.
+
+**Tests to write after this step:**
+- `tests/test_booking_reaper.py` — test that expired holds are found and expired, non-expired holds are untouched
+
+---
+
+#### Step F1.4 — Redis client singleton
+
+**File:** `Clinic_app/common/redis.py` (new), `Clinic_app/main.py`
+
+```python
+# common/redis.py
+import os
+import redis.asyncio as aioredis
+
+_redis_client = None
+
+async def get_redis():
+    global _redis_client
+    if _redis_client is None:
+        url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+        _redis_client = await aioredis.from_url(url, encoding="utf-8", decode_responses=True)
+    return _redis_client
+
+async def close_redis():
+    global _redis_client
+    if _redis_client:
+        await _redis_client.aclose()
+        _redis_client = None
+```
+
+**Tests to write after this step:**
+- `tests/test_redis.py` — test get/set/delete with a real Redis instance (integration, tagged `@pytest.mark.integration`) and test client initialization with mock (unit)
+
+---
+
+### Feature 1 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_router_registration.py` | Unit | All routes return non-404, router is registered |
+| `tests/test_auth.py` | Unit | Admin key validation (valid/missing/wrong) |
+| `tests/test_booking_reaper.py` | Unit + Integration | Reaper expires correct bookings |
+| `tests/test_redis.py` | Unit + Integration | Redis client init, get/set/delete |
+
+---
+
+## Plan 004 — Feature 2: New Schema + Migrations
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 1)
+**Source:** HEDIS_PRD_v2.md §12
+
+### Summary
+
+Add to `enums.py`: `CampaignStatus`, `ContactStatus`, `GapType`
+
+New ORM models:
+- `clinic_staff.py`
+- `campaign.py`
+- `campaign_contact.py`
+- `campaign_audit.py`
+- `clinic_ehr_config.py`
+
+Modified ORM model:
+- `clinic_integration.py` — add 11 new columns
+
+New Alembic migrations:
+- `add_hedis_tables.py` — 5 new tables
+- `extend_clinic_integration.py` — 11 new columns on existing table
+
+Add to `requirements.txt`:
+- `anthropic` — Claude API
+- `playwright` — (may already be added by F0)
+- `agentql` — (may already be added by F0)
+- `PyJWT>=2.8` or `python-jose[cryptography]` — JWT
+- `python-multipart` — FastAPI file uploads
+- `openpyxl` — Excel file parsing
+
+### Feature 2 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_new_models.py` | Unit | Model instantiation, field defaults, relationships |
+| `tests/test_migrations.py` | Integration | Alembic upgrade/downgrade round-trip succeeds |
+| `tests/test_enums.py` | Unit | All enum values match PRD spec |
+
+---
+
+## Plan 005 — Feature 3: Authentication & Authorization
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 2)
+**Source:** HEDIS_PRD_v2.md §5
+
+### Summary
+
+- Admin API key dependency (done in F1.2 — already written)
+- Google OAuth 2.0 flow: `/auth/google` → Google → `/auth/google/callback` → JWT
+- JWT scoped to `clinic_id` + `role`, 8-hour expiry
+- Clinic selector: `/auth/me` (clinic list), `/auth/select-clinic` (scoped JWT)
+- JWT FastAPI dependency for campaign + dashboard routes
+- `POST /admin/clinics/{id}/staff` — link Google `sub` to clinic with role
+
+### Feature 3 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_google_oauth.py` | Unit | OAuth URL generation, callback token exchange (mocked) |
+| `tests/test_jwt.py` | Unit | JWT creation, decoding, expiry, scope enforcement |
+| `tests/test_clinic_selector.py` | Unit | Multi-clinic staff returns selector, single-clinic skips it |
+
+---
+
+## Plan 006 — Feature 4: CSV Upload + Claude Parsing + Campaign Creation
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 3)
+**Source:** HEDIS_PRD_v2.md §7 + §8.1
+
+### Summary
+
+- `POST /campaigns/upload` — multipart, 10MB/2000-row limit, CSV + Excel
+- `services/csv_parser.py` — Claude API client, gap type normalization, E.164 phone normalization
+- `services/campaign.py` — create Campaign + CampaignContact rows, phone AES-256-GCM + hash
+- Campaign management routes: list, detail, pause, resume, export (no PHI in export)
+
+### Feature 4 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_csv_parser.py` | Unit | Claude response parsing, gap type mapping, malformed row handling |
+| `tests/test_campaign_service.py` | Unit + Integration | Campaign creation, contact dedup, phone encryption |
+| `tests/test_campaign_routes.py` | Integration | Upload endpoint, list, detail, pause/resume |
+
+---
+
+## Plan 007 — Feature 5: EHR Integration (Playwright + AgentQL)
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 0 result is logged + Feature 2 complete)
+**Source:** HEDIS_PRD_v2.md §10
+**Architecture Branch:** Server-side Playwright (default) OR Chrome Extension (if F0 shows NextGen blocks headless)
+
+### Summary
+
+- `services/playwright_ehr.py` — browser context lifecycle, login, 8-min heartbeat, re-auth, asyncio.Queue action serializer
+- AgentQL slot reader + appointment booker + Redis selector cache (24h TTL)
+- `POST /retell/tools/get_available_slots` — must respond <3s
+- `POST /retell/tools/book_appointment` — returns ehr_appointment_id
+- `POST /admin/clinics/{id}/ehr-test` — credential test
+- `PUT /admin/clinics/{id}/appt-types` — gap_type → nextgen_appt_type_code mapping
+
+### Feature 5 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_playwright_ehr_service.py` | Unit | Session lifecycle, slot parse, booking form fill — all mocked |
+| `tests/test_ehr_tool_endpoints.py` | Integration | `/retell/tools/get_available_slots` and `book_appointment` with mock Playwright |
+| `tests/test_selector_cache.py` | Unit | Redis cache get/set/miss/TTL logic |
+| `tests/test_ehr_credential_test.py` | Unit | Admin ehr-test endpoint returns pass/fail correctly |
+
+---
+
+## Plan 008 — Feature 6: Campaign Worker + Outbound Calling
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 4 + Feature 5)
+**Source:** HEDIS_PRD_v2.md §8.2 + §9
+
+### Summary
+
+- `workers/campaign_worker.py` — FIFO loop, calling hours (9am–6pm clinic tz), concurrency limiter (Redis lock), 5s inter-call gap, retry scheduler, EXHAUSTED at 3 attempts
+- `services/retell_client.py` — async httpx Retell outbound call client with tenacity retry
+- `POST /retell/webhook/call_analyzed` — Claude API one-sentence summary, encrypt, store in campaign_audit
+- Update `call_started` + `call_ended` webhook handlers to handle `call_type=hedis_campaign` and update CampaignContact status
+
+### Feature 6 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_campaign_worker.py` | Unit | FIFO ordering, calling hours gate, concurrency limit, retry timing |
+| `tests/test_retell_client.py` | Unit | Outbound call creation, retry on failure, metadata payload |
+| `tests/test_call_analyzed_webhook.py` | Unit | Claude API call, summary encryption, transcript discard |
+| `tests/test_campaign_webhooks.py` | Integration | call_started/call_ended update CampaignContact status correctly |
+
+---
+
+## Plan 009 — Feature 7: Clinic Dashboard
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 3 + Feature 4)
+**Source:** HEDIS_PRD_v2.md §14
+
+### Summary
+
+Desktop-only. Minimal React SPA (Vite) served as static files from FastAPI.
+
+Screens:
+1. Clinic Selector (staff in 2+ clinics)
+2. Campaign List (name, status, progress bar, date)
+3. Upload Screen (drag-and-drop CSV/Excel)
+4. Campaign Detail (patient table: name, gap type, status badge, appointment, provider, language, attempts, summary)
+5. EHR Setup (URL + credentials + Test Connection)
+
+30-second polling on campaign detail. Status color codes per PRD §14.2.
+
+### Feature 7 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_dashboard_api.py` | Integration | Campaign detail endpoint returns correct patient data (decrypted) |
+| `tests/test_export.py` | Unit | CSV export contains no PHI — only phone_hash, gap_type, outcome |
+
+---
+
+## Plan 010 — Feature 8: Hardening + Pilot Onboarding
+**Date:** 2026-03-18
+**Status:** Pending (starts after Feature 7)
+**Source:** HEDIS_PRD_v2.md §16 Week 5
+
+### Summary
+
+- PHI audit: grep for plaintext names/phones in logs, verify encryption end-to-end
+- Load test: 12 concurrent Retell calls (4 clinics × 3 concurrent each)
+- Azure production deploy with all env vars
+- Pilot clinic onboarding: NextGen creds, appt type mapping, Retell agent config, retry hours
+- First supervised campaign with real patients
+
+### Feature 8 Test Summary
+
+| Test File | Type | What It Tests |
+|---|---|---|
+| `tests/test_phi_audit.py` | Unit | No PHI in log output, no plaintext in DB columns |
+| `tests/test_load.py` | Slow | 12 concurrent mock calls — checks concurrency limit enforcement |
+
+---
+
+*Last updated: 2026-03-18*
+*Maintained by: Edgar J. Suárez Colón*
+*Next action: Run Playwright validation (Feature 0, Step F0.1)*
