@@ -1,7 +1,16 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import logging
+
+from fastapi import FastAPI, Depends
+from fastapi.responses import JSONResponse
+
 from Clinic_app.Routes.health import health_router
+from Clinic_app.Routes.admin import admin_router
+from Clinic_app.Routes.retell import retell_router
+from Clinic_app.Routes.provider import provider_router
+from Clinic_app.common.auth import verify_admin_api_key
+from Clinic_app.common.redis import close_redis
+from Clinic_app.workers.booking_reaper import scheduler, run_booking_reaper
 
 # Configure logging
 logging.basicConfig(
@@ -10,17 +19,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──────────────────────────────────────────────────────────────
+    logger.info("Starting up CallCenterAI API")
+
+    # Start booking reaper (runs every 60 seconds)
+    scheduler.add_job(run_booking_reaper, "interval", seconds=60, id="booking_reaper")
+    scheduler.start()
+    logger.info("Booking reaper scheduled (interval=60s)")
+
+    yield
+
+    # ── Shutdown ─────────────────────────────────────────────────────────────
+    logger.info("Shutting down CallCenterAI API")
+    scheduler.shutdown(wait=False)
+    await close_redis()
+
+
 # Create FastAPI app
 app = FastAPI(
     title="CallCenterAI API",
     description="API for Call Center AI operations",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
-# Root endpoint
+# ── Routers ───────────────────────────────────────────────────────────────────
+
+# Health — no auth
+app.include_router(health_router)
+
+# Admin routes — protected by API key
+app.include_router(admin_router, dependencies=[Depends(verify_admin_api_key)])
+app.include_router(provider_router, dependencies=[Depends(verify_admin_api_key)])
+
+# Retell webhooks + tool endpoints — auth handled internally via HMAC signature
+app.include_router(retell_router)
+
+
+# ── Root ──────────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def root():
     """Root endpoint with API information."""
@@ -28,14 +71,12 @@ def root():
         "message": "CallCenterAI API",
         "version": "1.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
     }
 
 
-# Include routers
-app.include_router(health_router)
+# ── Error handler ─────────────────────────────────────────────────────────────
 
-# Error handler
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc: Exception):
     """General exception handler."""
@@ -44,12 +85,13 @@ async def general_exception_handler(request, exc: Exception):
         status_code=500,
         content={
             "error": "Internal server error",
-            "detail": str(exc)
-        }
+            "detail": str(exc),
+        },
     )
 
 
-# Run the application
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
@@ -57,6 +99,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        log_level="info"
+        log_level="info",
     )
-
