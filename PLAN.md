@@ -16,7 +16,8 @@
 | 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active |
 | 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Active |
 | 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete (code done, tests pending) |
-| 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Active |
+| 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Complete |
+| 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Active |
 
 ---
 
@@ -992,25 +993,257 @@ from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 
 ## Plan 005 — Feature 3: Authentication & Authorization
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 2)
+**Updated:** 2026-03-20 (expanded to full step-by-step)
+**Status:** Active
 **Source:** HEDIS_PRD_v2.md §5
 
-### Summary
+### What We Are Building
 
-- Admin API key dependency (done in F1.2 — already written)
-- Google OAuth 2.0 flow: `/auth/google` → Google → `/auth/google/callback` → JWT
-- JWT scoped to `clinic_id` + `role`, 8-hour expiry
-- Clinic selector: `/auth/me` (clinic list), `/auth/select-clinic` (scoped JWT)
-- JWT FastAPI dependency for campaign + dashboard routes
-- `POST /admin/clinics/{id}/staff` — link Google `sub` to clinic with role
+The authentication layer that gates the clinic dashboard. Staff log in with their Google account,
+the system maps their Google identity to their clinic membership(s), and issues a JWT that carries
+`clinic_id` + `role` for every subsequent request.
+
+Admin API key auth is already done (F1.2). This feature adds the staff-facing auth path.
+
+### Key Architecture Decisions & Reasoning
+
+1. **`google_sub` as identity anchor, not email** — Already stored in `clinic_staff` this way
+   (F2). The OAuth callback extracts `sub` from the ID token. Email is stored for display only.
+
+2. **Two-phase JWT (unscoped → scoped)** — A staff member can belong to multiple clinics.
+   After callback we issue an **unscoped JWT** (no `clinic_id`). The client calls `/auth/me`
+   to get their clinic list, picks one, and calls `/auth/select-clinic` to get a **scoped JWT**
+   (`clinic_id` + `role` embedded). All campaign/dashboard routes require a scoped JWT.
+   Single-clinic staff can skip the selector and get a scoped JWT directly from callback.
+
+3. **Stateless CSRF protection for OAuth state** — Rather than server-side sessions, the `state`
+   param sent to Google is a short-lived HMAC-signed token (signed with `JWT_SECRET_KEY`,
+   5-minute expiry). On callback, we verify it. No session store required.
+
+4. **PyJWT for JWT, not python-jose** — Already in `requirements.txt`. Simpler, well-maintained,
+   no cryptography dependency beyond what we already have.
+
+5. **httpx for Google token exchange** — Already in requirements. Async, fits our FastAPI stack.
+
+6. **`get_current_staff` dependency returns `StaffToken`** — A small Pydantic model with
+   `google_sub`, `email`, `clinic_id` (Optional), `role` (Optional). Routes that need a scoped
+   token call `Depends(require_scoped_staff)` which wraps `get_current_staff` and raises 403 if
+   `clinic_id` is None.
+
+### Deferred
+
+- Refresh tokens / sliding sessions — 8h JWT expiry is fine for pilot
+- PKCE — not required for server-side OAuth flow
+- Role-based field-level access within dashboard — viewer vs admin enforced at route level only
+- Token revocation — not needed for pilot
+
+---
+
+### Implementation Steps
+
+#### Step F3.1 — Create `Clinic_app/common/jwt.py`
+
+JWT utility module. Two token types share the same signing key but differ in payload:
+
+- **Unscoped** — `{ sub, email, type: "unscoped", exp }`
+- **Scoped** — `{ sub, email, clinic_id, role, type: "scoped", exp }`
+- **State** — `{ nonce, type: "oauth_state", exp }` (5-min expiry, CSRF guard)
+
+```python
+# Clinic_app/common/jwt.py
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 8
+STATE_EXPIRY_SECONDS = 300  # 5 minutes
+
+class StaffToken(BaseModel):
+    google_sub: str
+    email: str
+    clinic_id: Optional[UUID] = None
+    role: Optional[str] = None      # "admin" | "viewer"
+    token_type: str                 # "unscoped" | "scoped"
+
+def create_state_token() -> str: ...           # For OAuth CSRF protection
+def verify_state_token(state: str) -> bool: ...# Validate state on callback
+
+def create_unscoped_token(sub: str, email: str) -> str: ...
+def create_scoped_token(sub: str, email: str, clinic_id: UUID, role: str) -> str: ...
+def decode_token(token: str) -> StaffToken: ...# Raises 401 on invalid/expired
+```
+
+**FastAPI dependencies (also in this file):**
+
+```python
+async def get_current_staff(
+    credentials: HTTPAuthorizationCredentials = Security(HTTPBearer(auto_error=False))
+) -> StaffToken:
+    # Extracts Bearer token, decodes, returns StaffToken
+    # Raises HTTP 401 if missing or invalid
+
+async def require_scoped_staff(
+    staff: StaffToken = Depends(get_current_staff)
+) -> StaffToken:
+    # Wraps get_current_staff — raises HTTP 403 if clinic_id is None
+    # Use this on all campaign/dashboard routes
+```
+
+---
+
+#### Step F3.2 — Create `Clinic_app/services/auth_service.py`
+
+Business logic for the auth flow. Keeps routes thin.
+
+```python
+# Clinic_app/services/auth_service.py
+
+def build_google_auth_url(state: str) -> str:
+    """Build Google OAuth authorization URL with required scopes."""
+    # scope: openid email profile
+    # Reads GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI from env
+
+async def exchange_code_for_tokens(code: str) -> dict:
+    """POST to Google token endpoint, return token response dict."""
+    # Reads GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI from env
+    # Uses httpx.AsyncClient
+    # Returns { access_token, id_token, ... }
+
+def extract_google_user(id_token_payload: dict) -> tuple[str, str]:
+    """Extract (sub, email) from decoded Google ID token payload."""
+    # PyJWT decode without verification (already verified by Google)
+    # Returns (sub, email)
+
+async def get_staff_clinics(
+    db: AsyncSession, google_sub: str
+) -> list[ClinicStaff]:
+    """Return all ClinicStaff rows for this google_sub, with clinic joined."""
+
+async def upsert_staff_email(
+    db: AsyncSession, google_sub: str, email: str
+) -> None:
+    """Update email on all ClinicStaff rows for this sub (email can change on Google)."""
+
+async def create_staff(
+    db: AsyncSession,
+    clinic_id: UUID,
+    google_sub: str,
+    email: str,
+    role: str,
+) -> ClinicStaff:
+    """Create a new ClinicStaff row. Raises 409 if already exists."""
+```
+
+---
+
+#### Step F3.3 — Create `Clinic_app/Routes/auth.py`
+
+Four endpoints on `auth_router` (prefix `/auth`, no auth dependency at router level — each
+endpoint manages its own auth):
+
+**`GET /auth/google`**
+```
+→ Generate state token (create_state_token)
+→ Build Google auth URL (build_google_auth_url)
+→ Return 302 redirect to Google
+```
+
+**`GET /auth/google/callback?code=&state=`**
+```
+→ Verify state token (verify_state_token) → 400 if invalid
+→ Exchange code for tokens (exchange_code_for_tokens) → 400 on failure
+→ Decode Google ID token → extract (sub, email)
+→ upsert_staff_email (keep email current)
+→ get_staff_clinics(sub)
+→ If 0 clinics → 403 {"code": "NOT_PROVISIONED"}
+→ If 1 clinic → create_scoped_token → return {"token": ..., "token_type": "scoped"}
+→ If >1 clinics → create_unscoped_token → return {"token": ..., "token_type": "unscoped", "requires_clinic_selection": true}
+```
+
+**`GET /auth/me`** — requires `get_current_staff` (unscoped or scoped)
+```
+→ get_staff_clinics(staff.google_sub)
+→ Return list of { clinic_id, clinic_name, role }
+```
+
+**`POST /auth/select-clinic`** — requires `get_current_staff` (unscoped)
+```
+Body: { "clinic_id": UUID }
+→ Verify staff.google_sub has access to clinic_id in DB
+→ If not found → 403
+→ Issue create_scoped_token(sub, email, clinic_id, role)
+→ Return {"token": ..., "token_type": "scoped"}
+```
+
+---
+
+#### Step F3.4 — Add `POST /admin/clinics/{clinic_id}/staff` to `admin.py`
+
+```
+Body: { google_sub, email, role }
+→ Verify clinic exists
+→ create_staff(db, clinic_id, google_sub, email, role)
+→ 409 if already provisioned
+→ Return created staff record
+```
+
+This is how Edgar provisions clinic staff before they can log in.
+Protected by `verify_admin_api_key` (already on all admin routes).
+
+---
+
+#### Step F3.5 — Register `auth_router` in `main.py`
+
+```python
+from Clinic_app.Routes.auth import auth_router
+app.include_router(auth_router)  # No global auth — endpoints manage their own
+```
+
+---
+
+#### Step F3.6 — Write tests
+
+**`tests/test_jwt.py`** (unit)
+- `create_unscoped_token` → decodes to correct payload
+- `create_scoped_token` → decodes with clinic_id and role
+- Expired token → `decode_token` raises HTTP 401
+- Tampered token → raises HTTP 401
+- `create_state_token` → `verify_state_token` round-trip passes
+- Expired state token → `verify_state_token` returns False
+- `get_current_staff` with valid Bearer → returns StaffToken
+- `get_current_staff` with no header → raises 401
+- `require_scoped_staff` with unscoped token → raises 403
+
+**`tests/test_auth_routes.py`** (unit — all external calls mocked)
+- `GET /auth/google` → 302 redirect with correct Google URL params
+- `GET /auth/google/callback` with invalid state → 400
+- `GET /auth/google/callback` with valid state, 1 clinic → scoped JWT returned
+- `GET /auth/google/callback` with valid state, 0 clinics → 403 NOT_PROVISIONED
+- `GET /auth/google/callback` with valid state, 2 clinics → unscoped JWT + requires_clinic_selection
+- `GET /auth/me` with valid token → clinic list
+- `GET /auth/me` with no token → 401
+- `POST /auth/select-clinic` with valid clinic_id → scoped JWT
+- `POST /auth/select-clinic` with clinic_id staff doesn't belong to → 403
+- `POST /admin/clinics/{id}/staff` → creates staff row
+- `POST /admin/clinics/{id}/staff` duplicate → 409
+
+---
+
+### Files Created / Modified
+
+| File | Action |
+|---|---|
+| `Clinic_app/common/jwt.py` | Create |
+| `Clinic_app/services/auth_service.py` | Create |
+| `Clinic_app/Routes/auth.py` | Create |
+| `Clinic_app/Routes/admin.py` | Modify — add staff endpoint |
+| `Clinic_app/main.py` | Modify — register auth_router |
+| `tests/test_jwt.py` | Create |
+| `tests/test_auth_routes.py` | Create |
 
 ### Feature 3 Test Summary
 
 | Test File | Type | What It Tests |
 |---|---|---|
-| `tests/test_google_oauth.py` | Unit | OAuth URL generation, callback token exchange (mocked) |
-| `tests/test_jwt.py` | Unit | JWT creation, decoding, expiry, scope enforcement |
-| `tests/test_clinic_selector.py` | Unit | Multi-clinic staff returns selector, single-clinic skips it |
+| `tests/test_jwt.py` | Unit | Token creation, decode, expiry, CSRF state, FastAPI dependencies |
+| `tests/test_auth_routes.py` | Unit | All 4 auth endpoints + staff management, mocked Google OAuth |
 
 ---
 

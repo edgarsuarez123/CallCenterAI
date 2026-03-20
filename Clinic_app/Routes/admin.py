@@ -21,10 +21,12 @@ from pydantic import BaseModel, field_validator
 from Clinic_app.common.database import get_db
 from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
+from Clinic_app.data.models.clinic_staff import ClinicStaff
 from Clinic_app.data.models.license import License
 from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.enums import BookingStatus
 from Clinic_app.services.booking import list_bookings, cancel_booking, get_booking_by_id
+from Clinic_app.services.auth_service import create_staff
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +828,109 @@ async def update_license(
                 "message": "Failed to update license"
             }
         )
+
+
+# ============================================================================
+# STAFF MANAGEMENT ENDPOINTS
+# ============================================================================
+
+class StaffCreateRequest(BaseModel):
+    """Request model for provisioning a staff member to a clinic."""
+    google_sub: str
+    email: str
+    role: str = "viewer"  # "admin" | "viewer"
+
+
+class StaffResponse(BaseModel):
+    """Response model for a clinic staff record."""
+    id: UUID
+    clinic_id: UUID
+    google_sub: str
+    email: str
+    role: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@admin_router.post("/clinics/{clinic_id}/staff", response_model=APIResponse, status_code=201)
+async def provision_staff(
+    clinic_id: UUID,
+    request: StaffCreateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """
+    Provision a Google account as a staff member for a clinic.
+
+    This is the admin-only endpoint Edgar uses to grant clinic dashboard access
+    to staff before they can log in via Google OAuth.
+
+    Raises 404 if the clinic does not exist.
+    Raises 409 if the google_sub is already provisioned for this clinic.
+    """
+    try:
+        staff = await create_staff(
+            db=db,
+            clinic_id=clinic_id,
+            google_sub=request.google_sub,
+            email=request.email,
+            role=request.role,
+        )
+        await db.commit()
+        logger.info(f"Staff provisioned: clinic_id={clinic_id}, sub={request.google_sub[:8]}..., role={request.role}")
+        return APIResponse(
+            success=True,
+            data=StaffResponse.model_validate(staff),
+            message="Staff member provisioned successfully",
+        )
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error provisioning staff: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "INTERNAL_ERROR", "message": "Failed to provision staff member"},
+        )
+
+
+@admin_router.get("/clinics/{clinic_id}/staff", response_model=APIResponse)
+async def list_clinic_staff(
+    clinic_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """List all provisioned staff members for a clinic."""
+    clinic = await db.get(Clinic, clinic_id)
+    if not clinic:
+        raise_not_found("Clinic", clinic_id)
+
+    stmt = select(ClinicStaff).where(ClinicStaff.clinic_id == clinic_id).order_by(ClinicStaff.created_at)
+    result = await db.execute(stmt)
+    staff_list = result.scalars().all()
+
+    return APIResponse(
+        success=True,
+        data=[StaffResponse.model_validate(s) for s in staff_list],
+    )
+
+
+@admin_router.delete("/clinics/{clinic_id}/staff/{staff_id}", response_model=APIResponse)
+async def remove_staff(
+    clinic_id: UUID,
+    staff_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """Remove a staff member's access to a clinic."""
+    staff = await db.get(ClinicStaff, staff_id)
+    if not staff or staff.clinic_id != clinic_id:
+        raise_not_found("Staff member", staff_id)
+
+    await db.delete(staff)
+    await db.commit()
+    logger.info(f"Staff removed: staff_id={staff_id}, clinic_id={clinic_id}")
+    return APIResponse(success=True, message="Staff member removed successfully")
 
 
 # ============================================================================

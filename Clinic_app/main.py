@@ -8,6 +8,7 @@ from Clinic_app.Routes.health import health_router
 from Clinic_app.Routes.admin import admin_router
 from Clinic_app.Routes.retell import retell_router
 from Clinic_app.Routes.provider import provider_router
+from Clinic_app.Routes.auth import auth_router
 from Clinic_app.common.auth import verify_admin_api_key
 from Clinic_app.common.redis import close_redis
 from Clinic_app.workers.booking_reaper import scheduler, run_booking_reaper
@@ -60,6 +61,9 @@ app.include_router(provider_router, dependencies=[Depends(verify_admin_api_key)]
 
 # Retell webhooks + tool endpoints — auth handled internally via HMAC signature
 app.include_router(retell_router)
+
+# Auth — Google OAuth + JWT (each endpoint manages its own auth)
+app.include_router(auth_router)
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────
