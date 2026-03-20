@@ -14,10 +14,11 @@
 | # | Date | Title | Status |
 |---|---|---|---|
 | 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active |
-| 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Active |
-| 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete (code done, tests pending) |
+| 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Complete (NextGen validated 2026-03-20) |
+| 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete |
 | 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Complete |
-| 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Active |
+| 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Complete |
+| 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Active |
 
 ---
 
@@ -1247,25 +1248,408 @@ app.include_router(auth_router)  # No global auth — endpoints manage their own
 
 ---
 
-## Plan 006 — Feature 4: CSV Upload + Claude Parsing + Campaign Creation
+## Plan 006 — Feature 4: CSV Upload + Claude Parsing + Campaign Creation + Clinic Settings
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 3)
+**Updated:** 2026-03-20 (expanded to full step-by-step; added measurement_year dedup, clinic settings API)
+**Status:** Active — next to implement
 **Source:** HEDIS_PRD_v2.md §7 + §8.1
 
-### Summary
+### What We Are Building
 
-- `POST /campaigns/upload` — multipart, 10MB/2000-row limit, CSV + Excel
-- `services/csv_parser.py` — Claude API client, gap type normalization, E.164 phone normalization
-- `services/campaign.py` — create Campaign + CampaignContact rows, phone AES-256-GCM + hash
-- Campaign management routes: list, detail, pause, resume, export (no PHI in export)
+The campaign creation pipeline. A clinic admin uploads a CSV of patients with HEDIS care gaps.
+The system parses it (Claude API for gap type normalization), creates a Campaign record, and creates
+one CampaignContact row per patient. Also adds the clinic settings API so admins can configure
+calling hours, max attempts, and retry hours from the dashboard rather than requiring a superadmin.
+
+### Key Architecture Decisions & Reasoning
+
+1. **`measurement_year` on `Campaign` — cross-year HEDIS dedup**
+   HEDIS is a yearly program. Insurance carriers send gap lists annually. If the same patient
+   appears in a 2025 gap list AND a 2026 gap list, both are legitimate — they represent different
+   measurement year obligations. However, if a patient appears in TWO 2025 gap lists (e.g., one
+   from Medicare, one from Medicaid — dual eligibles), we must not call them twice for the same
+   gap in the same year.
+
+   **Dedup rule at CSV ingestion:**
+   - Check: `clinic_id + phone_hash + gap_type + measurement_year`
+   - If an active contact (not EXHAUSTED/DECLINED) already exists for all four → skip row,
+     log as `already_active`, do not create duplicate
+   - If a BOOKED contact already exists for all four → skip row, log as `already_booked`
+   - If measurement_year differs → always create new contact (new year = new obligation)
+
+2. **Claude API for CSV column normalization — not regex**
+   Payer-submitted HEDIS CSVs have wildly inconsistent column names. One uses "Member Phone",
+   another "contact_number", another "cell". One uses "Colorectal Cancer Screening", another
+   "COL". Claude maps these to our internal schema reliably; regex would require per-payer
+   maintenance. Claude is called once per upload (batch prompt for all rows), not once per row.
+
+3. **E.164 phone normalization before encryption**
+   All phones are normalized to E.164 (`+1XXXXXXXXXX`) before encryption and hashing.
+   The SHA-256 hash is computed over the E.164 form — this ensures a phone stored as
+   "787-555-1234" and "+17875551234" produce the same hash and dedup correctly.
+
+4. **Clinic settings API — scoped JWT, admin role only for writes**
+   Calling hours, max attempts, and retry hours are on `clinic_integration` (added in F2.7).
+   Currently only the superadmin API key can touch this table. Clinic admins need to configure
+   these from the dashboard without contacting Edgar. `PATCH /clinic/settings` requires
+   `role=admin` in the scoped JWT. `GET /clinic/settings` is readable by any staff.
+
+5. **Campaign defaults inherit from clinic settings at creation time**
+   When a CSV is uploaded, the new Campaign row is initialized with the clinic's current
+   `calling_hours_start`, `calling_hours_end`, `max_attempts`, etc. The campaign can then
+   be further customized per-campaign after creation. This avoids the campaign worker having
+   to join through `clinic_integration` on every tick.
+
+6. **10MB / 2000-row limits on upload**
+   Per PRD §7. Claude API prompt size is a constraint — 2000 rows fits safely in a single
+   Anthropic API call for header/column normalization. Rows over the limit are rejected with
+   a 422 explaining the limit, not silently truncated.
+
+### Deferred (Not in Feature 4 Scope)
+
+- Campaign worker / outbound calling (Feature 6)
+- Retell webhook handlers (Feature 5/6)
+- Dashboard frontend (Feature 7)
+- Excel (.xlsx) upload — CSV only for pilot; openpyxl conversion deferred to v1.1
+- Per-row retry customization (campaign-level only for now)
+
+---
+
+### Implementation Steps
+
+#### Step F4.1 — Alembic migration: add `measurement_year` to `campaign`
+
+**File:** `Clinic_app/alembic/versions/d4e5f6a7b8c9_add_measurement_year_to_campaign.py`
+
+```python
+# Revision chain: c3d4e5f6a7b8 → d4e5f6a7b8c9
+def upgrade():
+    op.add_column('campaign',
+        sa.Column('measurement_year', sa.Integer(), nullable=False,
+                  server_default=str(datetime.utcnow().year))
+    )
+    # Composite index for the cross-campaign dedup query
+    op.create_index(
+        'idx_contact_dedup',
+        'campaign_contact',
+        ['clinic_id', 'phone_hash', 'gap_type', 'measurement_year']
+        # measurement_year joined through campaign — actual index in campaign table
+    )
+    # measurement_year index on campaign itself for worker queries
+    op.create_index('idx_campaign_year', 'campaign', ['clinic_id', 'measurement_year'])
+
+def downgrade():
+    op.drop_index('idx_campaign_year')
+    op.drop_index('idx_contact_dedup')
+    op.drop_column('campaign', 'measurement_year')
+```
+
+Also add `measurement_year: int` column to `Clinic_app/data/models/campaign.py`.
+
+**Tests to write after this step:**
+- `tests/test_measurement_year_dedup.py` — unit test the dedup query logic (mocked DB)
+
+---
+
+#### Step F4.2 — Clinic settings API
+
+**Files:** `Clinic_app/Routes/clinic.py` (new), `Clinic_app/services/clinic_service.py` (new or extend)
+
+**`GET /clinic/settings`** — requires `require_scoped_staff` (any role)
+```
+→ Load ClinicIntegration row for staff.clinic_id
+→ Return: {
+    timezone, calling_hours_start, calling_hours_end,
+    campaign_concurrency_limit, max_attempts,
+    voicemail_retry_hours, no_answer_retry_hours, error_retry_hours
+  }
+```
+
+**`PATCH /clinic/settings`** — requires `require_scoped_staff` with `role == "admin"`
+```
+Body (all fields optional):
+{
+  "calling_hours_start": "09:00",   # HH:MM, validated: 00:00–23:59
+  "calling_hours_end": "17:00",
+  "campaign_concurrency_limit": 3,  # 1–10
+  "max_attempts": 3,                # 1–5
+  "voicemail_retry_hours": 4,       # 1–72
+  "no_answer_retry_hours": 2,
+  "error_retry_hours": 24,
+  "timezone": "America/Chicago"     # Must be valid IANA tz
+}
+→ Validate: calling_hours_start < calling_hours_end
+→ Validate: all ints within bounds
+→ Validate: timezone is valid IANA string (use zoneinfo.available_timezones())
+→ Update ClinicIntegration row for staff.clinic_id
+→ Return updated settings
+```
+
+**Why `role == "admin"` check in route, not via dependency?**
+We want all scoped staff to be able to call `GET /clinic/settings`. A separate dependency
+that checks role would block viewers from the GET. So `require_scoped_staff` handles the
+auth, and the PATCH handler explicitly checks `staff.role == "admin"` → 403 if not.
+
+**Register `clinic_router` in `main.py`:**
+```python
+from Clinic_app.Routes.clinic import clinic_router
+app.include_router(clinic_router)
+```
+
+---
+
+#### Step F4.3 — Claude CSV parser service
+
+**File:** `Clinic_app/services/csv_parser.py`
+
+```python
+# services/csv_parser.py
+"""
+Claude API CSV normalization.
+Handles inconsistent payer HEDIS CSV column formats.
+One API call per upload (batch prompt, not per-row).
+"""
+
+SYSTEM_PROMPT = """
+You are a HEDIS data normalization assistant. You will receive the first 3 rows
+of a CSV (header + 2 data rows) and return a JSON column mapping that maps each
+input column header to one of the following normalized field names:
+
+  phone         → patient phone number (required)
+  gap_type      → HEDIS care gap measure (required)
+  language      → preferred language (optional, default "en")
+  patient_name  → patient name for call greeting (optional, passed to Retell only)
+  patient_dob   → date of birth (optional, passed to Retell only)
+  ignore        → column should be ignored
+
+For gap_type values, also map the raw value to one of these standard codes:
+  colorectal_cancer_screening | breast_cancer_screening | cervical_cancer_screening |
+  diabetes_hba1c | diabetes_eye_exam | diabetes_nephropathy | hypertension_control |
+  depression_screening | well_child_visit | adolescent_well_care | adult_bmi_assessment |
+  medication_adherence_diabetes | medication_adherence_hypertension | other
+
+Return ONLY valid JSON. No explanation.
+"""
+
+async def parse_csv_columns(header_row: list[str], sample_rows: list[list[str]]) -> ColumnMapping:
+    """Call Claude API with the first 2 data rows to normalize column names."""
+    # Returns ColumnMapping(phone_col, gap_type_col, language_col, name_col, dob_col)
+
+def normalize_phone(raw: str) -> str:
+    """Normalize phone to E.164 (+1XXXXXXXXXX). Raises ValueError if unparseable."""
+    # Strip non-digits, add +1 if 10 digits, validate 11 digits starting with 1
+
+def map_gap_type(raw: str, mapping: dict) -> GapType:
+    """Apply Claude-provided gap_type mapping. Falls back to GapType.OTHER."""
+
+async def parse_csv_file(
+    file_bytes: bytes,
+    encoding: str = "utf-8",
+) -> list[ParsedRow]:
+    """
+    Full parse pipeline:
+    1. Detect delimiter (comma vs pipe vs tab)
+    2. Extract header + first 2 rows → Claude column normalization
+    3. Apply mapping to all rows
+    4. Normalize phones to E.164
+    5. Map gap types
+    6. Return list of ParsedRow(phone_e164, gap_type, language, name, dob, raw_row_num)
+    7. Collect errors per row (don't abort entire upload on bad rows)
+    """
+```
+
+**Key behavior:**
+- Rows with unparseable phones are collected in `parse_errors` and returned to the caller —
+  upload is not aborted. The caller decides whether to proceed or reject.
+- Rows with unrecognized gap types are mapped to `GapType.OTHER` — not rejected.
+- Claude is called ONCE with just the header + 2 rows. The actual column mapping is then
+  applied locally in Python to all remaining rows (no per-row Claude calls).
+
+---
+
+#### Step F4.4 — Campaign service
+
+**File:** `Clinic_app/services/campaign_service.py`
+
+```python
+# services/campaign_service.py
+
+async def create_campaign(
+    db: AsyncSession,
+    clinic_id: UUID,
+    staff_id: UUID,
+    name: str,
+    measurement_year: int,
+    parsed_rows: list[ParsedRow],
+    clinic_integration: ClinicIntegration,
+) -> CampaignCreateResult:
+    """
+    Create one Campaign row + N CampaignContact rows.
+    Applies cross-campaign dedup before inserting.
+    Returns CampaignCreateResult with campaign_id, inserted_count, skipped_count, error_rows.
+    """
+    # 1. Create Campaign row (inherit defaults from clinic_integration)
+    # 2. For each ParsedRow:
+    #    a. Normalize + hash phone (SHA-256 of E.164)
+    #    b. Dedup check: SELECT id FROM campaign_contact
+    #                    JOIN campaign USING (campaign_id)
+    #                    WHERE clinic_id = :clinic_id
+    #                      AND phone_hash = :hash
+    #                      AND gap_type = :gap_type
+    #                      AND measurement_year = :year
+    #                      AND status NOT IN ('exhausted', 'declined')
+    #       → If found: skip, add to skipped_contacts list
+    #    c. Encrypt phone (AES-256-GCM via common/encryption.py)
+    #    d. INSERT CampaignContact
+    # 3. UPDATE Campaign.total_contacts = inserted_count
+    # 4. COMMIT
+    # 5. Return CampaignCreateResult
+
+async def get_campaign(db: AsyncSession, clinic_id: UUID, campaign_id: UUID) -> Campaign:
+    """Fetch campaign by ID, enforcing clinic_id tenant filter. Raises 404 if not found."""
+
+async def list_campaigns(
+    db: AsyncSession, clinic_id: UUID, status: Optional[CampaignStatus] = None
+) -> list[Campaign]:
+    """List campaigns for clinic, optionally filtered by status. Ordered by created_at DESC."""
+
+async def pause_campaign(db: AsyncSession, clinic_id: UUID, campaign_id: UUID) -> Campaign:
+    """Set status=PAUSED. Raises 409 if not ACTIVE."""
+
+async def resume_campaign(db: AsyncSession, clinic_id: UUID, campaign_id: UUID) -> Campaign:
+    """Set status=ACTIVE. Raises 409 if not PAUSED."""
+
+async def cancel_campaign(db: AsyncSession, clinic_id: UUID, campaign_id: UUID) -> Campaign:
+    """Set status=CANCELED. Terminal — cannot be resumed."""
+
+async def get_campaign_contacts(
+    db: AsyncSession, clinic_id: UUID, campaign_id: UUID,
+    limit: int = 100, offset: int = 0
+) -> list[CampaignContact]:
+    """Paginated contact list for campaign detail view."""
+```
+
+---
+
+#### Step F4.5 — Campaign upload endpoint
+
+**File:** `Clinic_app/Routes/campaigns.py` (new)
+
+```python
+campaign_router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+
+POST /campaigns/upload
+  - Requires: require_scoped_staff + role=admin
+  - Body: multipart/form-data
+      file: UploadFile (CSV, max 10MB)
+      name: str           (campaign name)
+      measurement_year: int (default: current year)
+  - Validation:
+      → file.content_type must be text/csv or text/plain
+      → File size ≤ 10MB (read into memory, check len)
+      → Row count ≤ 2000 (checked after parse)
+  - Pipeline:
+      → parse_csv_file(file_bytes) → list[ParsedRow] + parse_errors
+      → If len(parsed_rows) > 2000 → 422
+      → If len(parsed_rows) == 0 → 422 "No valid rows found"
+      → create_campaign(db, clinic_id, staff_id, name, measurement_year, rows, clinic_integration)
+  - Response 201:
+      {
+        campaign_id, name, measurement_year,
+        total_contacts, skipped_contacts, parse_errors,
+        status: "pending"
+      }
+```
+
+---
+
+#### Step F4.6 — Campaign management routes
+
+**File:** `Clinic_app/Routes/campaigns.py` (continued)
+
+```python
+GET    /campaigns                  → list_campaigns (any scoped staff)
+GET    /campaigns/{id}             → get_campaign + contact count breakdown (any scoped staff)
+GET    /campaigns/{id}/contacts    → paginated contact list, status filter (any scoped staff)
+POST   /campaigns/{id}/pause       → pause_campaign (admin only)
+POST   /campaigns/{id}/resume      → resume_campaign (admin only)
+POST   /campaigns/{id}/cancel      → cancel_campaign (admin only, confirm required)
+GET    /campaigns/{id}/export      → CSV export: phone_hash, gap_type, status, attempt_count
+                                     NO patient name, NO decrypted phone (PHI-safe export)
+```
+
+Register `campaign_router` in `main.py`.
+
+---
+
+#### Step F4.7 — Tests
+
+**`tests/test_csv_parser.py`** (unit — Claude mocked)
+- Column normalization: "Member Phone" → `phone`, "COL" → `colorectal_cancer_screening`
+- E.164 normalization: "787-555-1234" → "+17875551234"
+- E.164 normalization: "(787) 555-1234" → "+17875551234"
+- Unparseable phone → row collected in parse_errors, not raised
+- Unrecognized gap type → maps to `GapType.OTHER`
+- Zero valid rows → empty list returned
+- Claude API failure → tenacity retry, raises after max retries
+
+**`tests/test_campaign_service.py`** (unit + integration)
+- `create_campaign` creates Campaign row + correct contact count
+- Dedup: same phone + gap_type + measurement_year → skipped (not duplicated)
+- Different measurement_year → NOT skipped (new year = new obligation)
+- Different gap_type, same phone → NOT skipped (different gap)
+- BOOKED contact → skipped on re-upload (status in exhausted/declined/booked)
+- Phone is stored encrypted (not plaintext)
+- Phone hash is SHA-256 of E.164 form
+- `pause_campaign` raises 409 if already PAUSED
+- `list_campaigns` filters by clinic_id (no cross-tenant leakage)
+
+**`tests/test_campaign_routes.py`** (unit — DB mocked)
+- Upload: valid CSV → 201 with campaign_id
+- Upload: file > 10MB → 422
+- Upload: > 2000 rows → 422
+- Upload: 0 valid rows → 422
+- Upload: non-admin staff → 403
+- GET /campaigns → returns list for correct clinic only
+- POST /campaigns/{id}/pause → 200 if ACTIVE, 409 if already PAUSED
+- GET /campaigns/{id}/export → no PHI in response
+
+**`tests/test_clinic_settings.py`** (unit)
+- GET /clinic/settings → returns current values
+- PATCH /clinic/settings as admin → updates and returns new values
+- PATCH /clinic/settings as viewer → 403
+- PATCH with calling_hours_start > calling_hours_end → 422
+- PATCH with invalid timezone → 422
+- PATCH with concurrency_limit > 10 → 422
+
+---
+
+### Files Created / Modified
+
+| File | Action |
+|---|---|
+| `Clinic_app/alembic/versions/d4e5f6a7b8c9_add_measurement_year.py` | Create |
+| `Clinic_app/data/models/campaign.py` | Modify — add `measurement_year` column |
+| `Clinic_app/Routes/clinic.py` | Create |
+| `Clinic_app/services/clinic_service.py` | Create (or extend existing) |
+| `Clinic_app/services/csv_parser.py` | Create |
+| `Clinic_app/services/campaign_service.py` | Create |
+| `Clinic_app/Routes/campaigns.py` | Create |
+| `Clinic_app/main.py` | Modify — register clinic_router, campaign_router |
+| `tests/test_csv_parser.py` | Create |
+| `tests/test_campaign_service.py` | Create |
+| `tests/test_campaign_routes.py` | Create |
+| `tests/test_clinic_settings.py` | Create |
 
 ### Feature 4 Test Summary
 
 | Test File | Type | What It Tests |
 |---|---|---|
-| `tests/test_csv_parser.py` | Unit | Claude response parsing, gap type mapping, malformed row handling |
-| `tests/test_campaign_service.py` | Unit + Integration | Campaign creation, contact dedup, phone encryption |
-| `tests/test_campaign_routes.py` | Integration | Upload endpoint, list, detail, pause/resume |
+| `tests/test_csv_parser.py` | Unit | Claude response parsing, column mapping, E.164 normalization, malformed rows |
+| `tests/test_campaign_service.py` | Unit + Integration | Campaign creation, cross-year dedup logic, phone encryption, tenant isolation |
+| `tests/test_campaign_routes.py` | Unit | Upload endpoint, file limits, campaign CRUD, PHI-safe export |
+| `tests/test_clinic_settings.py` | Unit | Settings GET/PATCH, role enforcement, validation (hours, tz, bounds) |
+| `tests/test_measurement_year_dedup.py` | Unit | Dedup: same year skipped, new year passes, same phone/diff gap passes |
 
 ---
 
@@ -1369,4 +1753,4 @@ Screens:
 
 *Last updated: 2026-03-20*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: Begin Feature 2 — F2.1 (enums) → F2.2–F2.6 (models) → F2.7 (clinic_integration alter) → F2.8–F2.9 (migrations) → F2.10–F2.11 (requirements + __init__) → tests*
+*Next action: Begin Feature 4 — F4.1 (measurement_year migration) → F4.2 (clinic settings API) → F4.3 (Claude CSV parser) → F4.4 (campaign service) → F4.5 (upload endpoint) → F4.6 (management routes) → F4.7 (tests)*
