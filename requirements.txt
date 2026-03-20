@@ -50,6 +50,12 @@ apscheduler==3.10.4
 playwright==1.58.0
 agentql==1.18.1
 
+# HEDIS campaign additions
+anthropic>=0.25.0        # Claude API — CSV gap type parsing + call summary generation
+PyJWT>=2.8.0             # JWT for clinic staff sessions (Feature 3)
+python-multipart>=0.0.9  # FastAPI file upload support (Feature 4)
+openpyxl>=3.1.0          # Excel file parsing alongside CSV (Feature 4)
+
 # Development and testing (optional)
 pytest==7.4.3
 pytest-asyncio==0.21.1
