@@ -15,6 +15,8 @@
 |---|---|---|---|
 | 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active |
 | 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Active |
+| 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete (code done, tests pending) |
+| 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Active |
 
 ---
 
@@ -586,42 +588,405 @@ async def close_redis():
 
 ## Plan 004 — Feature 2: New Schema + Migrations
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 1)
+**Updated:** 2026-03-20 (expanded to full step-by-step with architecture rationale)
+**Status:** Active (Feature 1 code complete, Feature 2 begins next session)
 **Source:** HEDIS_PRD_v2.md §12
 
-### Summary
+### What We Are Building
 
-Add to `enums.py`: `CampaignStatus`, `ContactStatus`, `GapType`
+The HEDIS schema layer. Phase 1 has no concept of outbound campaigns, HEDIS care gaps, clinic staff
+logins, or EHR (NextGen) credentials. Feature 2 adds all of that at the data model level — no
+business logic yet, just the schema foundation that Features 3–8 build on.
 
-New ORM models:
-- `clinic_staff.py`
-- `campaign.py`
-- `campaign_contact.py`
-- `campaign_audit.py`
-- `clinic_ehr_config.py`
+### Key Architecture Decisions & Reasoning
 
-Modified ORM model:
-- `clinic_integration.py` — add 11 new columns
+1. **`clinic_staff` uses `google_sub` not email** — Google OAuth `sub` claim is stable; email
+   can be changed by the user. `sub` is what we store and match on callback. This prevents
+   a staff member from being locked out or duplicated if they change their Google email.
 
-New Alembic migrations:
-- `add_hedis_tables.py` — 5 new tables
-- `extend_clinic_integration.py` — 11 new columns on existing table
+2. **`campaign_contact` stores phone_encrypted + phone_hash, no name/DOB** — PHI minimization.
+   Name and DOB are passed as Retell call metadata at the moment of dial. They are never
+   stored in this table. The dual-column pattern (AES-256-GCM + SHA-256 hash) mirrors the
+   patient table — hash enables dedup across campaigns without decrypting every row.
 
-Add to `requirements.txt`:
-- `anthropic` — Claude API
-- `playwright` — (may already be added by F0)
-- `agentql` — (may already be added by F0)
-- `PyJWT>=2.8` or `python-jose[cryptography]` — JWT
-- `python-multipart` — FastAPI file uploads
-- `openpyxl` — Excel file parsing
+3. **`campaign_audit.patient_name_encrypted`** — The only place name appears in the DB is here,
+   after the call ends, for dashboard display. It comes from the Retell `call_analyzed` webhook
+   metadata. Raw transcripts are discarded; only a one-sentence Claude summary is stored
+   (encrypted).
 
-### Feature 2 Test Summary
+4. **`clinic_ehr_config.appt_type_mapping` as JSONB** — NextGen appointment type codes are
+   arbitrary per-clinic and change rarely. One clinic uses "PREV" for colorectal, another
+   "SCREEN_COL". JSONB avoids a join table and doesn't require schema migration when a clinic
+   updates their codes. Application code maps `GapType` enum value to the code at call time.
+
+5. **Campaign retry hours as per-campaign columns (not global)** — Different campaigns have
+   different urgency. A campaign running against an imminent HEDIS deadline may retry voicemails
+   after 2 hours; a low-priority campaign might wait 24 hours. These cannot be global constants.
+
+6. **`clinic_integration` gets the HEDIS operational columns** (not `clinic`) — Retell agent
+   config, GCal creds, and outbound campaign settings are all integration/operational concerns.
+   `clinic` stays as the lightweight tenant record (billing tier, status, license).
+
+### Deferred (Not in Feature 2 Scope)
+
+- Business logic, services, workers — Feature 4–6
+- Auth flow — Feature 3
+- Dashboard — Feature 7
+- Alembic downgrade paths beyond stub `pass` — post-pilot
+
+---
+
+### Implementation Steps
+
+#### Step F2.1 — Add 3 enums to `enums.py`
+
+**File:** `Clinic_app/data/enums.py`
+
+Add below the existing enums:
+
+```python
+class CampaignStatus(str, Enum):
+    """Lifecycle state of a HEDIS outreach campaign (batch)."""
+    PENDING = "pending"       # Created, not yet started
+    ACTIVE = "active"         # Worker is actively placing calls
+    PAUSED = "paused"         # Manually paused by staff
+    COMPLETED = "completed"   # All contacts reached final state
+    CANCELED = "canceled"     # Manually canceled
+
+
+class ContactStatus(str, Enum):
+    """Lifecycle state of a single patient contact within a campaign."""
+    PENDING = "pending"       # Not yet attempted
+    CALLING = "calling"       # Call in progress right now
+    BOOKED = "booked"         # Appointment successfully created in NextGen
+    DECLINED = "declined"     # Patient explicitly declined
+    VOICEMAIL = "voicemail"   # Reached voicemail — will retry
+    NO_ANSWER = "no_answer"   # No answer — will retry
+    ERROR = "error"           # Technical error — will retry
+    EXHAUSTED = "exhausted"   # Max attempts (3) reached, no booking
+
+
+class GapType(str, Enum):
+    """HEDIS care gap types. Drives Retell agent script and NextGen appt type mapping."""
+    COLORECTAL_CANCER_SCREENING = "colorectal_cancer_screening"
+    BREAST_CANCER_SCREENING = "breast_cancer_screening"
+    CERVICAL_CANCER_SCREENING = "cervical_cancer_screening"
+    DIABETES_HBA1C = "diabetes_hba1c"
+    DIABETES_EYE_EXAM = "diabetes_eye_exam"
+    DIABETES_NEPHROPATHY = "diabetes_nephropathy"
+    HYPERTENSION_CONTROL = "hypertension_control"
+    DEPRESSION_SCREENING = "depression_screening"
+    WELL_CHILD_VISIT = "well_child_visit"
+    ADOLESCENT_WELL_CARE = "adolescent_well_care"
+    ADULT_BMI_ASSESSMENT = "adult_bmi_assessment"
+    MEDICATION_ADHERENCE_DIABETES = "medication_adherence_diabetes"
+    MEDICATION_ADHERENCE_HYPERTENSION = "medication_adherence_hypertension"
+    OTHER = "other"  # Fallback for Claude parsing edge cases
+```
+
+**Why these gap types?** These are the standard HEDIS measures that NextGen-based primary care clinics most commonly need to close before year-end. The `OTHER` fallback prevents Claude CSV parsing from throwing on an unrecognized measure.
+
+---
+
+#### Step F2.2 — Create `clinic_staff.py`
+
+**File:** `Clinic_app/data/models/clinic_staff.py`
+
+```python
+# Clinic_app/data/models/clinic_staff.py
+"""
+Staff member linked to a clinic via Google OAuth.
+One staff member can belong to multiple clinics (multiple rows, same google_sub).
+"""
+id: UUID PK
+clinic_id: UUID FK → clinic.id CASCADE
+google_sub: String(255) NOT NULL          # Google OAuth 'sub' claim — stable, not email
+email: String(255) NOT NULL               # For display only — not used as auth key
+role: String(50) NOT NULL default "viewer"  # "admin" | "viewer"
+created_at: DateTime(tz)
+```
+
+**Indexes:**
+- `UNIQUE (clinic_id, google_sub)` — one role per staff per clinic, prevents duplicates
+- `Index('idx_staff_google_sub', 'google_sub')` — fast lookup on OAuth callback (across all clinics)
+
+**No FK to a global `user` table** — staff identity is Google's responsibility. We don't manage
+user accounts; we manage clinic membership.
+
+---
+
+#### Step F2.3 — Create `campaign.py`
+
+**File:** `Clinic_app/data/models/campaign.py`
+
+```python
+# Clinic_app/data/models/campaign.py
+"""
+One campaign = one CSV upload batch.
+Stores operational config (calling hours, concurrency, retry hours) per campaign.
+Progress counters are denormalized for dashboard performance.
+"""
+id: UUID PK
+clinic_id: UUID FK → clinic.id CASCADE, index
+name: Text NOT NULL                             # e.g., "Q1 2026 HEDIS Outreach"
+status: CampaignStatus NOT NULL default PENDING
+total_contacts: Integer NOT NULL default 0      # Set on campaign creation from CSV row count
+called_count: Integer NOT NULL default 0        # Incremented on each CALLING transition
+booked_count: Integer NOT NULL default 0        # Incremented on BOOKED
+failed_count: Integer NOT NULL default 0        # Incremented on EXHAUSTED or DECLINED
+
+# Operational config — override clinic defaults
+calling_hours_start: String(5) NOT NULL default "09:00"   # HH:MM
+calling_hours_end: String(5) NOT NULL default "18:00"
+campaign_concurrency_limit: Integer NOT NULL default 3
+voicemail_retry_hours: Integer NOT NULL default 4
+no_answer_retry_hours: Integer NOT NULL default 2
+error_retry_hours: Integer NOT NULL default 24
+max_attempts: Integer NOT NULL default 3
+
+created_by: UUID FK → clinic_staff.id SET NULL  # nullable — staff account may be deleted
+created_at: DateTime(tz)
+updated_at: DateTime(tz)
+```
+
+**Indexes:**
+- `Index('idx_campaign_clinic_status', 'clinic_id', 'status')` — worker queries active campaigns per clinic
+- `CheckConstraint('booked_count + failed_count <= total_contacts', ...)` — basic sanity guard
+
+**Why denormalized counters?** The dashboard polls every 30 seconds. A `COUNT(*)` across
+`campaign_contact` with `clinic_id` filter on every poll adds up. These counters are incremented
+atomically in the same transaction as the contact status update — no separate query needed.
+
+---
+
+#### Step F2.4 — Create `campaign_contact.py`
+
+**File:** `Clinic_app/data/models/campaign_contact.py`
+
+```python
+# Clinic_app/data/models/campaign_contact.py
+"""
+One row per patient per campaign. The campaign worker reads from this table to know who to call.
+PHI minimization: only phone stored here (encrypted + hash). Name/DOB passed as Retell metadata only.
+"""
+id: UUID PK
+campaign_id: UUID FK → campaign.id CASCADE, index
+clinic_id: UUID FK → clinic.id CASCADE, index    # denormalized for row-level tenant queries
+phone_encrypted: BYTEA NOT NULL                  # AES-256-GCM encrypted E.164 phone
+phone_hash: String(64) NOT NULL                  # SHA-256 for dedup without decryption
+gap_type: GapType NOT NULL                       # Drives Retell agent script + NextGen appt type
+preferred_language: String(10) NOT NULL default "en"  # "en" | "es"
+status: ContactStatus NOT NULL default PENDING
+attempt_count: Integer NOT NULL default 0        # 0–3
+last_attempted_at: DateTime(tz) nullable
+next_attempt_after: DateTime(tz) nullable        # NULL = ready now; set by retry scheduler
+ehr_appointment_id: String nullable              # NextGen appt ID on BOOKED
+created_at: DateTime(tz)
+updated_at: DateTime(tz)
+```
+
+**Indexes:**
+- `Index('idx_contact_worker_queue', 'clinic_id', 'campaign_id', 'status', 'next_attempt_after')`
+  — the campaign worker's primary query: "give me PENDING contacts where next_attempt_after IS NULL
+  or <= now(), ordered by created_at (FIFO)"
+- `Index('idx_contact_phone_hash', 'clinic_id', 'phone_hash')` — dedup check on CSV import
+
+**Why `clinic_id` denormalized here?** Every worker query, every admin dashboard query, every
+audit lookup must filter by `clinic_id` for tenant isolation. Joining through `campaign` to get
+`clinic_id` on every query is wasteful and risks missing the tenant filter if a join is forgotten.
+
+---
+
+#### Step F2.5 — Create `campaign_audit.py`
+
+**File:** `Clinic_app/data/models/campaign_audit.py`
+
+```python
+# Clinic_app/data/models/campaign_audit.py
+"""
+Immutable call-level record. One row per call attempt.
+Written by the call_analyzed webhook handler after each call ends.
+"""
+id: UUID PK
+campaign_contact_id: UUID FK → campaign_contact.id CASCADE, index
+campaign_id: UUID FK → campaign.id CASCADE, index
+clinic_id: UUID FK → clinic.id CASCADE, index
+retell_call_id: String NOT NULL, index           # For webhook correlation
+outcome: ContactStatus NOT NULL                  # BOOKED | DECLINED | VOICEMAIL | NO_ANSWER | ERROR
+patient_name_encrypted: BYTEA nullable           # AES-256-GCM — for dashboard display only
+call_summary_encrypted: BYTEA nullable           # One-sentence Claude summary, AES-256-GCM
+ehr_appointment_id: String nullable              # NextGen appt ID if outcome == BOOKED
+attempt_number: Integer NOT NULL                 # 1, 2, or 3
+called_at: DateTime(tz)
+created_at: DateTime(tz)
+```
+
+**Indexes:**
+- `Index('idx_audit_clinic_campaign', 'clinic_id', 'campaign_id', 'called_at')` — dashboard detail view
+
+**Why `patient_name_encrypted` nullable?** The name arrives from Retell's `call_analyzed` webhook
+metadata. If the webhook fires without metadata (edge case), we don't want to block the audit write.
+The dashboard handles NULL name gracefully (shows "—").
+
+**Why immutable?** Audit rows are never updated — they represent what happened on a specific call.
+If a retry occurs, a new audit row is written with `attempt_number=2`. This gives a complete
+call history per contact.
+
+---
+
+#### Step F2.6 — Create `clinic_ehr_config.py`
+
+**File:** `Clinic_app/data/models/clinic_ehr_config.py`
+
+```python
+# Clinic_app/data/models/clinic_ehr_config.py
+"""
+NextGen EHR connection config for Playwright automation.
+One record per clinic (UNIQUE on clinic_id).
+Credentials are AES-256-GCM encrypted — never stored plaintext.
+"""
+id: UUID PK
+clinic_id: UUID FK → clinic.id CASCADE, UNIQUE, index   # one EHR config per clinic
+nextgen_url: Text NOT NULL                              # URL Playwright navigates to
+nextgen_username_encrypted: BYTEA NOT NULL              # AES-256-GCM
+nextgen_password_encrypted: BYTEA NOT NULL              # AES-256-GCM
+appt_type_mapping: JSONB NOT NULL default {}
+  # e.g.: {"colorectal_cancer_screening": "PREV", "diabetes_hba1c": "DM_A1C"}
+  # Keys are GapType enum values; values are clinic-specific NextGen appt type codes
+connection_verified_at: DateTime(tz) nullable           # Timestamp of last successful credential test
+created_at: DateTime(tz)
+updated_at: DateTime(tz)
+```
+
+**Why JSONB for `appt_type_mapping`?** NextGen appointment type codes are arbitrary per-clinic
+and change rarely. JSONB avoids a join table and doesn't require an Alembic migration when a
+clinic updates their codes. Application code at call time does:
+`code = ehr_config.appt_type_mapping.get(gap_type.value, "PREV")` as safe fallback.
+
+---
+
+#### Step F2.7 — Alter `clinic_integration.py` (9 new columns)
+
+**File:** `Clinic_app/data/models/clinic_integration.py`
+
+Add these columns to the existing model:
+
+```python
+# HEDIS campaign operational defaults — overridable per campaign
+timezone = Column(String(100), nullable=False, default="America/New_York")
+  # IANA timezone — used by campaign worker to enforce calling hours in clinic local time
+calling_hours_start = Column(String(5), nullable=False, default="09:00")
+calling_hours_end = Column(String(5), nullable=False, default="18:00")
+campaign_concurrency_limit = Column(Integer, nullable=False, default=3)
+voicemail_retry_hours = Column(Integer, nullable=False, default=4)
+no_answer_retry_hours = Column(Integer, nullable=False, default=2)
+error_retry_hours = Column(Integer, nullable=False, default=24)
+max_attempts = Column(Integer, nullable=False, default=3)
+
+# Outbound calling DID (separate from inbound retell_did)
+retell_outbound_number = Column(String, nullable=True)
+  # E.164 format. Nullable — clinic may not have outbound enabled yet
+```
+
+**Why on `clinic_integration` and not `clinic`?** These are operational/integration settings
+that live alongside the Retell agent ID and GCal credentials. `clinic` stays as the lean tenant
+record (name, tier, status, license). Mixing campaign operational defaults into `clinic` would
+bloat it with concerns that belong in integration config.
+
+---
+
+#### Step F2.8 — Alembic migration: `add_hedis_tables`
+
+**File:** `Clinic_app/alembic/versions/add_hedis_tables.py`
+
+```
+Operations:
+1. Create PostgreSQL ENUM types: campaignstatus, contactstatus, gaptype
+2. CREATE TABLE clinic_staff
+3. CREATE TABLE campaign
+4. CREATE TABLE campaign_contact
+5. CREATE TABLE campaign_audit
+6. CREATE TABLE clinic_ehr_config
+
+Downgrade: DROP all 5 tables + 3 ENUM types (in reverse FK order)
+```
+
+**Migration order matters:** `clinic_staff` before `campaign` (FK `created_by`),
+`campaign` before `campaign_contact` (FK `campaign_id`),
+`campaign_contact` before `campaign_audit` (FK `campaign_contact_id`),
+`clinic_ehr_config` has no inter-table FKs, can go in any order.
+
+---
+
+#### Step F2.9 — Alembic migration: `extend_clinic_integration`
+
+**File:** `Clinic_app/alembic/versions/extend_clinic_integration.py`
+
+```
+Operations:
+ADD COLUMN timezone VARCHAR(100) NOT NULL DEFAULT 'America/New_York'
+ADD COLUMN calling_hours_start VARCHAR(5) NOT NULL DEFAULT '09:00'
+ADD COLUMN calling_hours_end VARCHAR(5) NOT NULL DEFAULT '18:00'
+ADD COLUMN campaign_concurrency_limit INTEGER NOT NULL DEFAULT 3
+ADD COLUMN voicemail_retry_hours INTEGER NOT NULL DEFAULT 4
+ADD COLUMN no_answer_retry_hours INTEGER NOT NULL DEFAULT 2
+ADD COLUMN error_retry_hours INTEGER NOT NULL DEFAULT 24
+ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3
+ADD COLUMN retell_outbound_number VARCHAR NULL
+
+Downgrade: DROP COLUMN each of the above
+```
+
+**This migration is independent of `add_hedis_tables`** — they modify different tables and can
+be applied in either order, though by convention `add_hedis_tables` runs first (lower revision number).
+
+---
+
+#### Step F2.10 — Update `requirements.txt`
+
+Add (skip if already present from Feature 0):
+```
+anthropic>=0.25.0        # Claude API — CSV gap type parsing + call summary
+PyJWT>=2.8.0             # JWT for clinic staff sessions (Feature 3)
+python-multipart>=0.0.9  # FastAPI file upload support (Feature 4)
+openpyxl>=3.1.0          # Excel CSV parsing (Feature 4)
+```
+
+`playwright` and `agentql` already added in Feature 0. `redis` already in requirements.
+
+---
+
+#### Step F2.11 — Update `data/models/__init__.py`
+
+Add imports for all 5 new models so Alembic's `env.py` `target_metadata` picks them up:
+
+```python
+from Clinic_app.data.models.clinic_staff import ClinicStaff
+from Clinic_app.data.models.campaign import Campaign
+from Clinic_app.data.models.campaign_contact import CampaignContact
+from Clinic_app.data.models.campaign_audit import CampaignAudit
+from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
+```
+
+---
+
+### Feature 2 Test Plan
 
 | Test File | Type | What It Tests |
 |---|---|---|
-| `tests/test_new_models.py` | Unit | Model instantiation, field defaults, relationships |
-| `tests/test_migrations.py` | Integration | Alembic upgrade/downgrade round-trip succeeds |
-| `tests/test_enums.py` | Unit | All enum values match PRD spec |
+| `tests/test_enums.py` | Unit | All enum values and members match PRD spec; `GapType.OTHER` exists as fallback |
+| `tests/test_new_models.py` | Unit | Model instantiation with required fields, field defaults, FK relationships, `__repr__` |
+| `tests/test_migrations.py` | Integration | Alembic `upgrade head` succeeds on clean DB; `downgrade base` reverses cleanly |
+
+---
+
+### What Is NOT In Scope for Feature 2
+
+- Business logic, services, or workers that use these models (Features 4–6)
+- Google OAuth flow or JWT auth (Feature 3)
+- Campaign routes or CSV upload endpoint (Feature 4)
+- Dashboard frontend (Feature 7)
+- Alembic downgrade beyond `pass` stub — not needed for pilot
 
 ---
 
@@ -769,6 +1134,6 @@ Screens:
 
 ---
 
-*Last updated: 2026-03-18*
+*Last updated: 2026-03-20*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: Run Playwright validation (Feature 0, Step F0.1)*
+*Next action: Begin Feature 2 — F2.1 (enums) → F2.2–F2.6 (models) → F2.7 (clinic_integration alter) → F2.8–F2.9 (migrations) → F2.10–F2.11 (requirements + __init__) → tests*
