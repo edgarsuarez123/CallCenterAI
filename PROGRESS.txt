@@ -225,3 +225,70 @@ FILES MODIFIED:
 - PLAN.md (created)
 - PROGRESS.txt (created)
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-20 (Session 007 — Feature 3: Google OAuth + JWT Authentication)
+================================================================================
+COMPLETED:
+- Implemented Clinic_app/common/jwt.py:
+    StaffToken (Pydantic model), create_state_token, verify_state_token,
+    create_unscoped_token, create_scoped_token, decode_token,
+    get_current_staff (FastAPI dependency), require_scoped_staff (FastAPI dependency)
+- Implemented Clinic_app/services/auth_service.py:
+    build_google_auth_url, exchange_code_for_tokens (httpx + tenacity retry),
+    extract_google_user, get_staff_clinics, upsert_staff_email,
+    create_staff (raises 409 on duplicate), get_staff_for_clinic
+- Implemented Clinic_app/Routes/auth.py (4 endpoints):
+    GET  /auth/google           → 302 redirect to Google consent screen
+    GET  /auth/google/callback  → exchange code, issue scoped/unscoped/403 JWT
+    GET  /auth/me               → list clinic memberships (any valid JWT)
+    POST /auth/select-clinic    → upgrade unscoped → scoped JWT
+- Modified Clinic_app/Routes/admin.py (3 new staff management endpoints):
+    POST   /admin/clinics/{id}/staff    → provision staff (201)
+    GET    /admin/clinics/{id}/staff    → list staff
+    DELETE /admin/clinics/{id}/staff/{staff_id} → remove staff
+- Modified Clinic_app/main.py: registered auth_router
+- Added PyJWT>=2.8.0, python-multipart>=0.0.9 to requirements.txt
+- Created tests/test_jwt.py: 19 unit tests covering all JWT utilities
+- Created tests/test_auth_routes.py: 14 unit tests covering all auth endpoints
+- All 33 tests passing: test_jwt.py (19) + test_auth_routes.py (14)
+- Updated PLAN.md: Plan 005 expanded to full step-by-step implementation guide
+
+SKIPPED / DEFERRED:
+- Alembic migration for Feature 3: ClinicStaff table migration was already
+  created in Feature 2 (migration b2c3d4e5f6a7) — no new migration needed
+- E2E OAuth integration test: requires real Google OAuth credentials, deferred
+  to production deployment testing
+
+ERRORS / BLOCKERS:
+- cryptography system package broken (pyo3 PanicException: No module named '_cffi_backend')
+  Fixed: pip install --ignore-installed cryptography cffi
+- ModuleNotFoundError: No module named 'fastapi' — Fixed: pip install fastapi==0.104.1 httpx
+- ModuleNotFoundError: No module named 'google' — Fixed: pip install google-auth
+- ModuleNotFoundError: No module named 'googleapiclient' — Fixed: pip install google-api-python-client
+- ModuleNotFoundError: No module named 'tenacity' — Fixed: pip install tenacity apscheduler redis
+- TestClient TypeError ('app' kwarg removed in httpx 0.28) — Fixed: pip install httpx==0.27.2
+- TestGoogleCallback tests got 500 (DB not initialized) — Fixed: added
+  app.dependency_overrides[get_db] to all 4 callback tests (state check runs
+  after dependency resolution, so even INVALID_STATE test needs DB override)
+
+NEXT SESSION SHOULD START WITH:
+1. Feature 4: Campaign Worker — implement background task for HEDIS outreach
+   - Clinic_app/workers/campaign_worker.py (FIFO queue, 3 concurrent calls, timezone enforcement)
+   - Retell outbound call initiation via Retell API
+   - Contact status lifecycle (PENDING → CALLING → BOOKED/VOICEMAIL/NO_ANSWER/ERROR)
+2. Feature 5: Retell webhook handlers (call_analyzed, slot_availability tool)
+3. Before any HEDIS work: Edgar must run F0.1 (NextGen Playwright validation)
+
+FILES MODIFIED:
+- Clinic_app/common/jwt.py (created)
+- Clinic_app/services/auth_service.py (created)
+- Clinic_app/Routes/auth.py (created)
+- Clinic_app/Routes/admin.py (modified — added staff endpoints)
+- Clinic_app/main.py (modified — registered auth_router)
+- requirements.txt (modified — added PyJWT, python-multipart)
+- tests/test_jwt.py (created)
+- tests/test_auth_routes.py (created)
+- PLAN.md (modified — Plan 005 expanded)
+- PROGRESS.txt (this file)
+================================================================================
