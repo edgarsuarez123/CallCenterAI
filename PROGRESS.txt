@@ -292,3 +292,21 @@ FILES MODIFIED:
 - PLAN.md (modified — Plan 005 expanded)
 - PROGRESS.txt (this file)
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-20 (Session 007b — AgentQL/Playwright NextGen Validation Result)
+================================================================================
+COMPLETED:
+- F0.1 VALIDATED: Edgar confirmed AgentQL + headless Playwright works against
+  the pilot clinic's actual NextGen instance.
+  Result: PASS — headless Chrome is NOT blocked, AgentQL can read appointment
+  slots, booking form is accessible.
+  Architecture decision confirmed: proceed with server-side Playwright.
+  Chrome Extension fallback architecture is NOT needed.
+
+NEXT SESSION SHOULD START WITH:
+- Feature 4: Campaign Worker (now unblocked by F0.1 validation)
+
+FILES MODIFIED:
+- PROGRESS.txt (this entry)
+================================================================================
