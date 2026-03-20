@@ -37,6 +37,10 @@ class Campaign(Base):
     error_retry_hours = Column(Integer, nullable=False, default=24)
     max_attempts = Column(Integer, nullable=False, default=3)
 
+    # HEDIS measurement year — used for cross-year dedup at CSV ingestion.
+    # Same patient + same gap + same year = duplicate; new year = new obligation.
+    measurement_year = Column(Integer, nullable=False, default=2026)
+
     created_by = Column(UUID(as_uuid=True), ForeignKey("clinic_staff.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
