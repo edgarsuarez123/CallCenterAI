@@ -70,6 +70,73 @@ FILES MODIFIED:
 ================================================================================
 
 ================================================================================
+SESSION: 2026-03-20 (Session 005 — Feature 2 Architecture + Planning)
+================================================================================
+COMPLETED:
+- Full architectural review of Feature 2 with Edgar (senior DB architect walkthrough)
+- Documented all 5 new tables, 3 new enums, and clinic_integration alterations
+- Confirmed PHI minimization decisions: no name/DOB in campaign_contact, only in campaign_audit (encrypted)
+- Confirmed JSONB for appt_type_mapping in clinic_ehr_config (per-clinic NextGen code variance)
+- Confirmed phone_encrypted + phone_hash dual-column pattern (mirrors patient table)
+- Confirmed clinic_staff uses Google OAuth sub (not email) as stable identifier
+- Updated PLAN.md Plan 004 with full step-by-step implementation detail
+
+SKIPPED / DEFERRED:
+- Feature 2 code not yet written (this session was architecture + planning only)
+- Feature 1 tests still not written (test_router_registration.py, test_auth.py, test_booking_reaper.py, test_redis.py) — carry-over from F1
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+1. Write Feature 2 code — in this order:
+   F2.1: Add 3 enums to enums.py (CampaignStatus, ContactStatus, GapType)
+   F2.2: Create 5 new model files (clinic_staff, campaign, campaign_contact, campaign_audit, clinic_ehr_config)
+   F2.3: Alter clinic_integration.py — add 9 new columns
+   F2.4: Create Alembic migration: add_hedis_tables (5 new tables + 3 new PG enum types)
+   F2.5: Create Alembic migration: extend_clinic_integration (9 new columns)
+   F2.6: Write tests (test_new_models.py, test_enums.py, test_migrations.py)
+2. After F2 tests pass: begin Feature 3 (Google OAuth + JWT)
+
+FILES MODIFIED:
+- PROGRESS.txt (this update)
+- PLAN.md (expanded Plan 004 with full implementation steps)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-20 (Session 004 — Feature 1: Pre-HEDIS Codebase Fixes)
+================================================================================
+COMPLETED:
+- F1.1: Registered all routers in main.py
+  - app.include_router(admin_router, dependencies=[Depends(verify_admin_api_key)])
+  - app.include_router(provider_router, dependencies=[Depends(verify_admin_api_key)])
+  - app.include_router(retell_router)
+  - app.include_router(health_router)
+- F1.2: Created Clinic_app/common/auth.py — verify_admin_api_key dependency (APIKeyHeader X-Admin-Key)
+- F1.3: Created Clinic_app/workers/booking_reaper.py — APScheduler AsyncIOScheduler, run_booking_reaper()
+  - Wired into main.py lifespan (interval=60s, starts on startup, shuts down on teardown)
+- F1.4: Created Clinic_app/common/redis.py — async Redis singleton (get_redis / close_redis)
+  - close_redis() called in main.py lifespan shutdown
+
+SKIPPED / DEFERRED:
+- F1 tests NOT written: test_router_registration.py, test_auth.py, test_booking_reaper.py, test_redis.py
+  Reason: unknown — code exists, tests were not created before moving on
+  Action needed: write these tests before or alongside Feature 2 tests
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+- Begin Feature 2 (schema + migrations) — see PLAN.md Plan 004
+
+FILES MODIFIED:
+- Clinic_app/main.py (routers + lifespan)
+- Clinic_app/common/auth.py (created)
+- Clinic_app/common/redis.py (created)
+- Clinic_app/workers/booking_reaper.py (created)
+================================================================================
+
+================================================================================
 SESSION: 2026-03-18 (Session 001 — Initial Planning)
 ================================================================================
 COMPLETED:
