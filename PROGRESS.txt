@@ -70,6 +70,60 @@ FILES MODIFIED:
 ================================================================================
 
 ================================================================================
+SESSION: 2026-03-20 (Session 006 — Feature 2: Schema Implementation Complete)
+================================================================================
+COMPLETED:
+- F2.1: Added 3 enums to enums.py (CampaignStatus, ContactStatus, GapType w/ 14 values)
+- F2.2: Created Clinic_app/data/models/clinic_staff.py
+- F2.3: Created Clinic_app/data/models/campaign.py
+- F2.4: Created Clinic_app/data/models/campaign_contact.py
+- F2.5: Created Clinic_app/data/models/campaign_audit.py
+- F2.6: Created Clinic_app/data/models/clinic_ehr_config.py
+- F2.7: Altered Clinic_app/data/models/clinic_integration.py — added 9 HEDIS columns
+- F2.8: Created Alembic migration b2c3d4e5f6a7_add_hedis_tables.py (5 tables + 3 PG ENUMs, full downgrade)
+- F2.9: Created Alembic migration c3d4e5f6a7b8_extend_clinic_integration.py (9 columns, full downgrade)
+- F2.10: Updated requirements.txt — added anthropic, PyJWT, python-multipart, openpyxl
+- F2.11: Updated Clinic_app/data/models/__init__.py — exports all 5 new models
+- F2.12: Created tests/test_enums.py (16 tests) and tests/test_new_models.py (27 tests)
+- All 43 unit tests passing
+
+SKIPPED / DEFERRED:
+- test_migrations.py (integration) — requires live PostgreSQL DB; deferred to pilot environment
+- Feature 1 carry-over tests (test_router_registration.py, test_auth.py, test_booking_reaper.py, test_redis.py) — still pending
+
+ERRORS / BLOCKERS:
+- SQLAlchemy Column(default=...) does not set Python attribute at instantiation time (only at INSERT);
+  tests updated to check Column.default.arg metadata instead of Python instance values
+
+NEXT SESSION SHOULD START WITH:
+- Begin Feature 3 (Google OAuth + JWT):
+  F3.1: Create Routes/auth.py — GET /auth/google, GET /auth/google/callback
+  F3.2: Create services/auth.py — Google token exchange, JWT create/decode
+  F3.3: Create common/jwt.py — create_access_token, decode_access_token, get_current_staff dependency
+  F3.4: GET /auth/me — return list of clinic memberships for the logged-in Google sub
+  F3.5: POST /auth/select-clinic — issue scoped JWT (clinic_id + role in payload)
+  F3.6: POST /admin/clinics/{id}/staff — link Google sub to clinic with role (admin only)
+  F3.7: Register auth_router in main.py
+  F3.8: Write tests (test_google_oauth.py, test_jwt.py, test_clinic_selector.py)
+
+FILES MODIFIED:
+- Clinic_app/data/enums.py
+- Clinic_app/data/models/clinic_staff.py (created)
+- Clinic_app/data/models/campaign.py (created)
+- Clinic_app/data/models/campaign_contact.py (created)
+- Clinic_app/data/models/campaign_audit.py (created)
+- Clinic_app/data/models/clinic_ehr_config.py (created)
+- Clinic_app/data/models/clinic_integration.py
+- Clinic_app/data/models/__init__.py
+- Clinic_app/alembic/versions/b2c3d4e5f6a7_add_hedis_tables.py (created)
+- Clinic_app/alembic/versions/c3d4e5f6a7b8_extend_clinic_integration.py (created)
+- requirements.txt
+- tests/test_enums.py (created)
+- tests/test_new_models.py (created)
+- PROGRESS.txt (this update)
+================================================================================
+
+================================================================================
 SESSION: 2026-03-20 (Session 005 — Feature 2 Architecture + Planning)
 ================================================================================
 COMPLETED:
