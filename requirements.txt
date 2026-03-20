@@ -42,6 +42,9 @@ redis==5.0.1
 # Retry logic (required for state persistence)
 tenacity==8.2.3
 
+# Background job scheduling (booking reaper)
+apscheduler==3.10.4
+
 # EHR Integration — server-side headless browser automation
 # Run after pip install: `python -m playwright install chromium`
 playwright==1.58.0
