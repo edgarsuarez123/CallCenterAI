@@ -310,3 +310,71 @@ NEXT SESSION SHOULD START WITH:
 FILES MODIFIED:
 - PROGRESS.txt (this entry)
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-21 — Documentation reconciliation (PLAN.md + PROGRESS)
+================================================================================
+COMPLETED:
+- Reconciled PLAN.md with repository: Feature 4 (Plan 006) marked Complete; Plan Index
+  extended with rows 007–010; Plan 001 "Current State" updated (F0–F4 implemented, next F5/F6).
+- Plan section statuses aligned: Feature 0 (002), Feature 1 (003), Feature 2 (004),
+  Feature 3 (005), Feature 4 (006) → Complete; Feature 5 (007) → Active — next to implement.
+- Plan 009 (Feature 7): clarified Pending — backend campaign/settings APIs exist; UI not started.
+- Footer next action: Feature 5 (EHR Playwright + Retell tools), then Feature 6.
+- Correction recorded: Session 007 "NEXT SESSION" incorrectly listed "Feature 4: Campaign Worker";
+  outbound worker + Retell outbound is Feature 6 per PLAN.md, not Feature 4.
+
+SKIPPED / DEFERRED:
+- pytest run not executed this session (doc-only update)
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+- Implement Feature 5 (Plan 007): Playwright EHR service, Redis selector cache, Retell EHR
+  tool endpoints, admin EHR config + credential test — see PLAN.md Plan 007.
+
+FILES MODIFIED:
+- PLAN.md
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-21 — Feature 5 (Plan 007): EHR Integration implemented
+================================================================================
+COMPLETED:
+- Task A: Clinic_app/services/selector_cache.py — Redis get/set/invalidate (24h TTL,
+  key agentql:selector:{clinic_id}:{element_name}); tests/test_selector_cache.py
+- Task B: Clinic_app/services/playwright_ehr.py — PlaywrightEHRService (per-clinic lock,
+  session, heartbeat, AgentQL flows from validation script); tests/test_playwright_ehr_service.py
+- Task C: retell.py — POST /retell/tools/get_available_slots, /retell/tools/book_appointment
+  (HMAC, EHR config, human-readable slot strings); tests/test_ehr_tool_endpoints.py
+- Task D: admin.py — POST/GET /admin/clinics/{id}/ehr-config, POST ehr-test, PUT appt-types;
+  main.py — lifespan startup/shutdown for playwright_ehr_service (try/except if Chromium missing);
+  tests/test_ehr_admin.py
+- Unit tests: 31 passed across Feature 5 test modules (selector, ehr service, retell tools,
+  admin EHR, existing contract tests)
+
+SKIPPED / DEFERRED:
+- Integration/e2e tests against real NextGen (manual / pilot only)
+- Full suite not run in this session if local venv missing PyJWT etc.
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+- Feature 6: campaign worker + Retell outbound + campaign webhooks; wire initialize_session
+  when campaign RUNNING; optional: add tzdata dep for Windows ZoneInfo consistency
+
+FILES MODIFIED:
+- Clinic_app/services/selector_cache.py (created)
+- Clinic_app/services/playwright_ehr.py (created)
+- Clinic_app/Routes/retell.py
+- Clinic_app/Routes/admin.py
+- Clinic_app/main.py
+- tests/test_selector_cache.py (created)
+- tests/test_playwright_ehr_service.py (created)
+- tests/test_ehr_tool_endpoints.py (created)
+- tests/test_ehr_admin.py (created)
+- PROGRESS.txt (this entry)
+================================================================================

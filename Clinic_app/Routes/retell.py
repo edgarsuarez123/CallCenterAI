@@ -25,12 +25,14 @@ from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.data.models.provider import Provider
 from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.models.call_log import CallLog
+from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.enums import BookingStatus
 from Clinic_app.services.patient import find_patient, create_patient
 from Clinic_app.services.availability import (
     get_available_slots,
     get_next_available_slots
 )
+from Clinic_app.services.playwright_ehr import playwright_ehr_service
 from Clinic_app.services.booking import (
     create_tentative_booking,
     confirm_booking,
@@ -101,6 +103,21 @@ class AvailabilityResponse(BaseModel):
     success: bool
     message: str
     slots: List[Dict[str, Any]] = []
+
+
+class EhrToolSlotsResponse(BaseModel):
+    """NextGen EHR slots for Retell mid-call tool (human-readable strings)."""
+    success: bool
+    message: str = ""
+    slots: List[str] = []
+    slot_details: List[Dict[str, Any]] = []
+
+
+class EhrBookAppointmentResponse(BaseModel):
+    """NextGen booking result for Retell mid-call tool."""
+    success: bool
+    message: str = ""
+    ehr_appointment_id: Optional[str] = None
 
 
 class CallStartedWebhook(BaseModel):
@@ -1232,6 +1249,159 @@ async def get_availability_post(
     
     # Call the shared logic
     return await _get_availability_internal(db, clinic_id, date, provider_id, provider_name)
+
+
+def _format_iso_slot_for_voice(iso_start: str) -> str:
+    """Turn ISO start_time into a spoken label (HEDIS PRD §10.3)."""
+    try:
+        s = iso_start.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%A, %B %d at %I:%M %p").replace(" 0", " ")
+    except Exception:
+        return iso_start
+
+
+async def _get_ehr_config_row(
+    db: AsyncSession, clinic_id: UUID
+) -> Optional[ClinicEHRConfig]:
+    result = await db.execute(
+        select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    )
+    return result.scalar_one_or_none()
+
+
+def _appt_type_code_for_gap(mapping: Dict[str, Any], gap_type: Optional[str]) -> str:
+    """Resolve NextGen appointment type code; default per PRD §10.5."""
+    default = "Preventive Care Visit"
+    if not gap_type:
+        return default
+    if isinstance(mapping, dict) and gap_type in mapping:
+        return str(mapping[gap_type])
+    return default
+
+
+@retell_router.post("/tools/get_available_slots", response_model=EhrToolSlotsResponse)
+async def ehr_get_available_slots(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> EhrToolSlotsResponse:
+    """
+    Mid-call: read NextGen availability via Playwright + AgentQL (HEDIS PRD §10.3).
+    Must respond quickly; pre-warmed session + selector cache help meet the <3s target.
+    """
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", {})
+    args = body.get("args", {})
+    metadata = call_obj.get("metadata") or {}
+
+    agent_id = call_obj.get("agent_id")
+    if not agent_id:
+        return EhrToolSlotsResponse(success=False, message="Missing agent_id in request", slots=[])
+
+    try:
+        clinic_id = await _get_clinic_by_agent_id(db, agent_id)
+    except ValueError:
+        return EhrToolSlotsResponse(success=False, message="Clinic not found for this agent", slots=[])
+
+    cfg = await _get_ehr_config_row(db, clinic_id)
+    if not cfg:
+        return EhrToolSlotsResponse(success=False, message="EHR is not configured for this clinic", slots=[])
+
+    provider_name = args.get("provider_name") or metadata.get("provider_name")
+    if not provider_name:
+        return EhrToolSlotsResponse(success=False, message="Missing provider_name", slots=[])
+
+    date_str = args.get("date")
+    if not date_str:
+        date_str = date.today().isoformat()
+
+    try:
+        raw_slots = await playwright_ehr_service.get_available_slots(
+            db, clinic_id, provider_name, date_str
+        )
+    except Exception as e:
+        logger.error("get_available_slots EHR error: %s", e, exc_info=True)
+        return EhrToolSlotsResponse(
+            success=False,
+            message="Unable to read schedule from the EHR. Please try again or call the clinic.",
+            slots=[],
+        )
+
+    voice_labels = [_format_iso_slot_for_voice(s["start_time"]) for s in raw_slots]
+    return EhrToolSlotsResponse(
+        success=True,
+        message=f"Found {len(voice_labels)} available times" if voice_labels else "No open slots in this range",
+        slots=voice_labels,
+        slot_details=raw_slots,
+    )
+
+
+@retell_router.post("/tools/book_appointment", response_model=EhrBookAppointmentResponse)
+async def ehr_book_appointment(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> EhrBookAppointmentResponse:
+    """Mid-call: book appointment in NextGen (HEDIS PRD §10.4)."""
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", {})
+    args = body.get("args", {})
+
+    agent_id = call_obj.get("agent_id")
+    if not agent_id:
+        return EhrBookAppointmentResponse(success=False, message="Missing agent_id in request")
+
+    try:
+        clinic_id = await _get_clinic_by_agent_id(db, agent_id)
+    except ValueError:
+        return EhrBookAppointmentResponse(success=False, message="Clinic not found for this agent")
+
+    cfg = await _get_ehr_config_row(db, clinic_id)
+    if not cfg:
+        return EhrBookAppointmentResponse(success=False, message="EHR is not configured for this clinic")
+
+    provider_name = args.get("provider_name")
+    chosen_slot = args.get("chosen_slot")
+    patient_name = args.get("patient_name")
+    patient_dob = args.get("patient_dob")
+    gap_type = args.get("gap_type")
+
+    if not all([provider_name, chosen_slot, patient_name, patient_dob]):
+        return EhrBookAppointmentResponse(
+            success=False,
+            message="Missing required fields: provider_name, chosen_slot, patient_name, patient_dob",
+        )
+
+    mapping = cfg.appt_type_mapping if isinstance(cfg.appt_type_mapping, dict) else {}
+    appt_code = _appt_type_code_for_gap(mapping, gap_type)
+
+    try:
+        result = await playwright_ehr_service.book_appointment(
+            db,
+            clinic_id,
+            provider_name,
+            chosen_slot,
+            patient_name,
+            patient_dob,
+            appt_code,
+        )
+    except Exception as e:
+        logger.error("book_appointment EHR error: %s", e, exc_info=True)
+        return EhrBookAppointmentResponse(
+            success=False,
+            message="Booking failed in the EHR. Please try another time or call the clinic.",
+        )
+
+    if result.get("success"):
+        return EhrBookAppointmentResponse(
+            success=True,
+            message="Appointment booked",
+            ehr_appointment_id=result.get("ehr_appointment_id"),
+        )
+    return EhrBookAppointmentResponse(success=False, message=result.get("error", "Booking failed"))
 
 
 # ============================================================================
