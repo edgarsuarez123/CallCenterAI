@@ -10,7 +10,7 @@ import re
 import logging
 from typing import Optional, Dict, Any, List
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +24,12 @@ from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.data.models.clinic_staff import ClinicStaff
 from Clinic_app.data.models.license import License
 from Clinic_app.data.models.booking import Booking
-from Clinic_app.data.enums import BookingStatus
+from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
+from Clinic_app.data.enums import BookingStatus, GapType
+from Clinic_app.common.encryption import encrypt_phi
 from Clinic_app.services.booking import list_bookings, cancel_booking, get_booking_by_id
+from Clinic_app.services.selector_cache import invalidate_clinic_selectors
+from Clinic_app.services.playwright_ehr import playwright_ehr_service
 from Clinic_app.services.auth_service import create_staff
 
 logger = logging.getLogger(__name__)
@@ -198,6 +202,29 @@ class IntegrationBase(BaseModel):
 class IntegrationCreateRequest(IntegrationBase):
     """Request model for creating/updating integration."""
     pass
+
+
+class EhrConfigUpsertRequest(BaseModel):
+    """NextGen URL and credentials. Password and username are encrypted at rest."""
+
+    nextgen_url: str
+    nextgen_username: str
+    nextgen_password: str
+
+
+class ApptTypesPutRequest(BaseModel):
+    """Maps GapType string values to clinic-specific NextGen appointment type codes."""
+
+    mapping: Dict[str, str]
+
+    @field_validator("mapping")
+    @classmethod
+    def validate_gap_keys(cls, v: Dict[str, str]) -> Dict[str, str]:
+        allowed = {g.value for g in GapType}
+        for k in v:
+            if k not in allowed:
+                raise ValueError(f"Invalid gap_type key: {k}")
+        return v
 
 
 class LicenseBase(BaseModel):
@@ -1296,4 +1323,132 @@ async def cancel_clinic_bookings(
                 "message": "Failed to cancel bookings"
             }
         )
+
+
+# ── NextGen EHR (Playwright + AgentQL) — super-admin API key only ─────────────
+
+
+@admin_router.post("/clinics/{clinic_id}/ehr-config", response_model=APIResponse)
+async def upsert_ehr_config(
+    clinic_id: UUID,
+    request: EhrConfigUpsertRequest,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """Create or update encrypted NextGen credentials for a clinic."""
+    clinic = await db.get(Clinic, clinic_id)
+    if not clinic:
+        raise_not_found("Clinic", clinic_id)
+
+    stmt = select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+
+    enc_user = encrypt_phi(request.nextgen_username)
+    enc_pass = encrypt_phi(request.nextgen_password)
+
+    if existing:
+        existing.nextgen_url = request.nextgen_url
+        existing.nextgen_username_encrypted = enc_user
+        existing.nextgen_password_encrypted = enc_pass
+        existing.updated_at = datetime.now(timezone.utc)
+        row = existing
+    else:
+        row = ClinicEHRConfig(
+            clinic_id=clinic_id,
+            nextgen_url=request.nextgen_url,
+            nextgen_username_encrypted=enc_user,
+            nextgen_password_encrypted=enc_pass,
+            appt_type_mapping={},
+        )
+        db.add(row)
+
+    await invalidate_clinic_selectors(clinic_id)
+    await db.commit()
+    await db.refresh(row)
+
+    return APIResponse(
+        success=True,
+        data={
+            "clinic_id": str(clinic_id),
+            "nextgen_url": row.nextgen_url,
+            "appt_type_mapping": row.appt_type_mapping or {},
+            "connection_verified_at": (
+                row.connection_verified_at.isoformat() if row.connection_verified_at else None
+            ),
+        },
+        message="EHR configuration saved",
+    )
+
+
+@admin_router.get("/clinics/{clinic_id}/ehr-config", response_model=APIResponse)
+async def get_ehr_config(
+    clinic_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """Return NextGen config without secrets."""
+    stmt = select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if not row:
+        raise_not_found("ClinicEHRConfig", clinic_id)
+
+    return APIResponse(
+        success=True,
+        data={
+            "clinic_id": str(clinic_id),
+            "nextgen_url": row.nextgen_url,
+            "appt_type_mapping": row.appt_type_mapping or {},
+            "connection_verified_at": (
+                row.connection_verified_at.isoformat() if row.connection_verified_at else None
+            ),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        },
+    )
+
+
+@admin_router.post("/clinics/{clinic_id}/ehr-test", response_model=APIResponse)
+async def ehr_test_credentials(
+    clinic_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """Run a one-off Playwright login against NextGen; updates connection_verified_at on success."""
+    stmt = select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if not row:
+        raise_not_found("ClinicEHRConfig", clinic_id)
+
+    test_result = await playwright_ehr_service.test_credentials(db, clinic_id)
+    if test_result.get("success"):
+        row.connection_verified_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    return APIResponse(success=True, data=test_result, message="EHR credential test complete")
+
+
+@admin_router.put("/clinics/{clinic_id}/appt-types", response_model=APIResponse)
+async def put_appt_type_mapping(
+    clinic_id: UUID,
+    request: ApptTypesPutRequest,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """Update gap_type → NextGen appointment type code mapping (JSONB)."""
+    stmt = select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if not row:
+        raise_not_found("ClinicEHRConfig", clinic_id)
+
+    row.appt_type_mapping = request.mapping
+    row.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+
+    return APIResponse(
+        success=True,
+        data={"clinic_id": str(clinic_id), "appt_type_mapping": row.appt_type_mapping},
+        message="Appointment type mapping updated",
+    )
 

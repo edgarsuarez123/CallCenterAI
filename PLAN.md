@@ -18,7 +18,11 @@
 | 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete |
 | 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Complete |
 | 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Complete |
-| 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Active |
+| 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Complete |
+| 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | Active — next to implement |
+| 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | Pending (after Feature 5) |
+| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending |
+| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending (after Feature 7) |
 
 ---
 
@@ -37,19 +41,23 @@ A full HEDIS outreach automation platform:
 - Clinic dashboard (Google OAuth + JWT) for campaign management
 - HIPAA-aligned PHI handling throughout
 
-### Current State (Phase 1 — ~95% Complete)
+### Current State (HEDIS MVP — through Feature 4)
 
-The core GCal-based booking system (inbound calls) is built and tested:
-- 10 ORM models, 2 Alembic migrations
-- Retell webhooks + tool endpoints (schedule, confirm, availability)
-- PHI encryption (AES-256-GCM), patient service, booking service
-- Admin + provider CRUD routes (implemented but NOT registered in main.py)
-- Google Calendar service (legacy, fully tested)
-- 8 test files covering all services
+The Phase 1 GCal-based booking system (inbound calls) remains built and tested. On top of that, the following HEDIS milestones are **implemented in code** (see Plan Index):
+
+- **Feature 0:** NextGen headless Playwright + AgentQL validated (pilot clinic).
+- **Feature 1:** Routers registered in `main.py`; admin API key auth; booking reaper (APScheduler); Redis singleton.
+- **Feature 2:** HEDIS schema (campaigns, contacts, audit, clinic_staff, clinic_ehr_config, clinic_integration extensions); multiple Alembic migrations (including `measurement_year`).
+- **Feature 3:** Google OAuth + JWT (`/auth/*`), scoped clinic selection, staff provisioning via admin routes.
+- **Feature 4:** CSV/XLSX upload + Claude parsing, campaign + contact creation with dedup, clinic settings GET/PATCH, campaign management + PHI-safe export (see Plan 006).
+
+**Inventory (approximate):** 5 Alembic version files under `Clinic_app/alembic/versions/`; 19+ pytest modules under `tests/`. Routers in `main.py` include health, admin, provider, retell, auth, clinic, and campaign.
+
+**Next for HEDIS MVP:** Feature 5 (NextGen EHR tools + Playwright service), then Feature 6 (campaign worker + outbound Retell + campaign webhooks). Legacy Retell availability still uses Google Calendar until EHR tools ship.
 
 ### What Is Missing for HEDIS MVP
 
-See Features 0–8 below. Everything after Feature 1 is net-new.
+See Features 5–8 below (EHR automation, outbound worker, dashboard UI, hardening/pilot).
 
 ### Key Architecture Decisions & Reasoning
 
@@ -147,7 +155,7 @@ Feature 8: Hardening + Pilot Onboarding
 
 ## Plan 002 — Feature 0: Playwright Validation Gate
 **Date:** 2026-03-18
-**Status:** Active
+**Status:** Complete (pilot NextGen validated 2026-03-20 — see `PROGRESS.txt`)
 **Source:** HEDIS_PRD_v2.md §10.6 + CLAUDE.md §Critical Validation Gate
 **Depends On:** Pilot clinic credentials (NextGen URL, username, password)
 
@@ -460,7 +468,7 @@ Playwright Validation: FAILED — NextGen blocks headless
 
 ## Plan 003 — Feature 1: Pre-HEDIS Codebase Fixes
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 0 validation logged)
+**Status:** Complete
 **Source:** HEDIS_PRD_v2.md §15 + CLAUDE.md §Known Architectural Gaps
 
 ### What We Are Building
@@ -591,7 +599,7 @@ async def close_redis():
 ## Plan 004 — Feature 2: New Schema + Migrations
 **Date:** 2026-03-18
 **Updated:** 2026-03-20 (expanded to full step-by-step with architecture rationale)
-**Status:** Active (Feature 1 code complete, Feature 2 begins next session)
+**Status:** Complete
 **Source:** HEDIS_PRD_v2.md §12
 
 ### What We Are Building
@@ -995,7 +1003,7 @@ from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 ## Plan 005 — Feature 3: Authentication & Authorization
 **Date:** 2026-03-18
 **Updated:** 2026-03-20 (expanded to full step-by-step)
-**Status:** Active
+**Status:** Complete
 **Source:** HEDIS_PRD_v2.md §5
 
 ### What We Are Building
@@ -1250,9 +1258,11 @@ app.include_router(auth_router)  # No global auth — endpoints manage their own
 
 ## Plan 006 — Feature 4: CSV Upload + Claude Parsing + Campaign Creation + Clinic Settings
 **Date:** 2026-03-18
-**Updated:** 2026-03-20 (expanded to full step-by-step; added measurement_year dedup, clinic settings API)
-**Status:** Active — next to implement
+**Updated:** 2026-03-21 (marked complete — implementation reconciled with repository)
+**Status:** Complete
 **Source:** HEDIS_PRD_v2.md §7 + §8.1
+
+**Implementation (repository):** `Clinic_app/Routes/campaigns.py`, `Clinic_app/Routes/clinic.py`, `Clinic_app/services/csv_parser.py`, `Clinic_app/services/campaign_service.py`, `Clinic_app/services/clinic_service.py`, Alembic `d4e5f6a7b8c9_add_measurement_year_to_campaign.py`; tests `test_csv_parser.py`, `test_campaign_service.py`, `test_campaign_routes.py`, `test_clinic_settings.py`, `test_measurement_year_dedup.py`.
 
 ### What We Are Building
 
@@ -1655,9 +1665,10 @@ Register `campaign_router` in `main.py`.
 
 ## Plan 007 — Feature 5: EHR Integration (Playwright + AgentQL)
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 0 result is logged + Feature 2 complete)
+**Updated:** 2026-03-21
+**Status:** Active — next to implement (unblocked: Feature 0 validated; Features 2–4 complete)
 **Source:** HEDIS_PRD_v2.md §10
-**Architecture Branch:** Server-side Playwright (default) OR Chrome Extension (if F0 shows NextGen blocks headless)
+**Architecture Branch:** Server-side Playwright (confirmed for pilot — Feature 0 PASS 2026-03-20). Chrome Extension fallback documented in `HEDIS_CAMPAIGN_IMPLEMENTATION.md` if headless is blocked elsewhere.
 
 ### Summary
 
@@ -1704,7 +1715,7 @@ Register `campaign_router` in `main.py`.
 
 ## Plan 009 — Feature 7: Clinic Dashboard
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 3 + Feature 4)
+**Status:** Pending — backend APIs for campaigns and clinic settings exist; UI not started
 **Source:** HEDIS_PRD_v2.md §14
 
 ### Summary
@@ -1751,6 +1762,6 @@ Screens:
 
 ---
 
-*Last updated: 2026-03-20*
+*Last updated: 2026-03-21*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: Begin Feature 4 — F4.1 (measurement_year migration) → F4.2 (clinic settings API) → F4.3 (Claude CSV parser) → F4.4 (campaign service) → F4.5 (upload endpoint) → F4.6 (management routes) → F4.7 (tests)*
+*Next action: Feature 5 (Plan 007) — `playwright_ehr` service, Redis selector cache, Retell EHR tool endpoints (`get_available_slots` / `book_appointment` under 3 seconds), admin EHR config + credential test. Then Feature 6 — campaign worker, Retell outbound client, campaign webhooks.*

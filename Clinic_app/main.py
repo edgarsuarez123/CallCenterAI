@@ -14,6 +14,7 @@ from Clinic_app.Routes.campaigns import campaign_router
 from Clinic_app.common.auth import verify_admin_api_key
 from Clinic_app.common.redis import close_redis
 from Clinic_app.workers.booking_reaper import scheduler, run_booking_reaper
+from Clinic_app.services.playwright_ehr import playwright_ehr_service
 
 # Configure logging
 logging.basicConfig(
@@ -33,11 +34,21 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("Booking reaper scheduled (interval=60s)")
 
+    try:
+        await playwright_ehr_service.startup()
+        logger.info("PlaywrightEHRService started")
+    except Exception as e:
+        logger.warning("PlaywrightEHRService startup failed — EHR tools may be unavailable: %s", e)
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down CallCenterAI API")
     scheduler.shutdown(wait=False)
+    try:
+        await playwright_ehr_service.shutdown_all()
+    except Exception as e:
+        logger.warning("PlaywrightEHRService shutdown: %s", e)
     await close_redis()
 
 
