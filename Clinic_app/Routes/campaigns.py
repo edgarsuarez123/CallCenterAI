@@ -6,6 +6,7 @@ POST   /campaigns/upload          — upload file, create campaign (admin only)
 GET    /campaigns                 — list campaigns for clinic
 GET    /campaigns/{id}            — campaign detail + progress
 GET    /campaigns/{id}/contacts   — paginated contact list
+POST   /campaigns/{id}/start      — start pending campaign (admin only)
 POST   /campaigns/{id}/pause      — pause (admin only)
 POST   /campaigns/{id}/resume     — resume (admin only)
 POST   /campaigns/{id}/cancel     — cancel (admin only)
@@ -37,7 +38,9 @@ from Clinic_app.services.campaign_service import (
     list_campaigns,
     pause_campaign,
     resume_campaign,
+    start_campaign,
 )
+from Clinic_app.workers.campaign_worker import campaign_worker_manager
 from Clinic_app.services.auth_service import get_staff_for_clinic
 from Clinic_app.services.clinic_service import get_clinic_settings
 from Clinic_app.services.csv_parser import ParseError, parse_file
@@ -318,6 +321,21 @@ async def get_contacts_route(
     ]
 
 
+# ── Start (PENDING -> ACTIVE) ────────────────────────────────────────────────
+
+@campaign_router.post("/{campaign_id}/start", response_model=CampaignResponse)
+async def start_campaign_route(
+    campaign_id: UUID,
+    staff: StaffToken = Depends(require_scoped_staff),
+    db: AsyncSession = Depends(get_db),
+) -> CampaignResponse:
+    """Start a pending campaign and ensure the clinic worker is running. Admin only."""
+    _require_admin(staff)
+    campaign = await start_campaign(db, staff.clinic_id, campaign_id)
+    await campaign_worker_manager.start_clinic_worker(staff.clinic_id)
+    return _campaign_to_response(campaign)
+
+
 # ── Pause ──────────────────────────────────────────────────────────────────────
 
 @campaign_router.post("/{campaign_id}/pause", response_model=CampaignResponse)
@@ -343,6 +361,7 @@ async def resume_campaign_route(
     """Resume a paused campaign. Admin only."""
     _require_admin(staff)
     campaign = await resume_campaign(db, staff.clinic_id, campaign_id)
+    await campaign_worker_manager.start_clinic_worker(staff.clinic_id)
     return _campaign_to_response(campaign)
 
 

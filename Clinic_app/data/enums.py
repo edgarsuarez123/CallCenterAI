@@ -72,6 +72,7 @@ class ContactStatus(str, Enum):
     NO_ANSWER = "no_answer"    # No answer — will retry
     ERROR = "error"            # Technical error — will retry
     EXHAUSTED = "exhausted"    # Max attempts reached, no booking
+    HUMAN_REQUESTED = "human_requested"  # Patient asked for human — terminal
 
 
 class GapType(str, Enum):

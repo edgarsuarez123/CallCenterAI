@@ -18,13 +18,16 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from sqlalchemy import select, and_
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.encryption import encrypt_phi
 from Clinic_app.data.enums import CampaignStatus, ContactStatus
 from Clinic_app.data.models.campaign import Campaign
 from Clinic_app.data.models.campaign_contact import CampaignContact
+from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.services.csv_parser import ParsedRow
 
@@ -36,6 +39,7 @@ _TERMINAL_STATUSES = {
     ContactStatus.BOOKED.value,
     ContactStatus.EXHAUSTED.value,
     ContactStatus.DECLINED.value,
+    ContactStatus.HUMAN_REQUESTED.value,
 }
 
 # Non-terminal statuses that DO block re-upload (still active)
@@ -171,6 +175,7 @@ async def create_campaign(
                 ContactStatus.BOOKED.value: "already_booked",
                 ContactStatus.EXHAUSTED.value: "already_exhausted",
                 ContactStatus.DECLINED.value: "already_declined",
+                ContactStatus.HUMAN_REQUESTED.value: "already_declined",
             }
             reason = reason_map.get(existing.status, "already_active")
             skipped.append(SkippedContact(
@@ -181,8 +186,10 @@ async def create_campaign(
             ))
             continue
 
-        # Encrypt phone
+        # Encrypt phone and optional PHI fields for dial-time metadata
         phone_encrypted = encrypt_phi(row.phone_e164)
+        name_enc = encrypt_phi(row.patient_name) if row.patient_name else None
+        dob_enc = encrypt_phi(row.patient_dob) if row.patient_dob else None
 
         contact = CampaignContact(
             id=uuid.uuid4(),
@@ -190,6 +197,10 @@ async def create_campaign(
             clinic_id=clinic_id,
             phone_encrypted=phone_encrypted,
             phone_hash=phone_hash,
+            patient_name_encrypted=name_enc,
+            patient_dob_encrypted=dob_enc,
+            provider_name=row.provider_name,
+            payer=row.payer,
             gap_type=gap_type_val,
             preferred_language=row.language,
             status=ContactStatus.PENDING.value,
@@ -284,6 +295,114 @@ async def get_campaign_contacts(
     q = q.order_by(CampaignContact.created_at.asc()).limit(limit).offset(offset)
     result = await db.execute(q)
     return list(result.scalars().all())
+
+
+async def get_next_eligible_contact(
+    db: AsyncSession,
+    clinic_id: UUID,
+) -> Optional[CampaignContact]:
+    """
+    Next contact to dial: PENDING, retry window open, belonging to an ACTIVE campaign.
+    FIFO by contact created_at across all active campaigns for the clinic.
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        select(CampaignContact)
+        .join(Campaign, CampaignContact.campaign_id == Campaign.id)
+        .where(
+            and_(
+                CampaignContact.clinic_id == clinic_id,
+                Campaign.status == CampaignStatus.ACTIVE.value,
+                CampaignContact.status == ContactStatus.PENDING.value,
+                or_(
+                    CampaignContact.next_attempt_after.is_(None),
+                    CampaignContact.next_attempt_after <= now,
+                ),
+            )
+        )
+        .order_by(CampaignContact.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def start_campaign(
+    db: AsyncSession,
+    clinic_id: UUID,
+    campaign_id: UUID,
+) -> Campaign:
+    """
+    PENDING -> ACTIVE. Requires verified EHR credentials for the clinic.
+    """
+    campaign = await get_campaign(db, clinic_id, campaign_id)
+    if campaign.status != CampaignStatus.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "INVALID_TRANSITION",
+                "message": f"Campaign cannot be started from status '{campaign.status}'. Must be pending.",
+            },
+        )
+
+    ehr_result = await db.execute(
+        select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
+    )
+    ehr = ehr_result.scalar_one_or_none()
+    if ehr is None or ehr.connection_verified_at is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EHR_NOT_VERIFIED",
+                "message": "NextGen EHR credentials must be configured and verified before starting a campaign.",
+            },
+        )
+
+    campaign.status = CampaignStatus.ACTIVE.value
+    await db.commit()
+    await db.refresh(campaign)
+    logger.info(f"Campaign started: id={campaign_id} clinic_id={clinic_id}")
+    return campaign
+
+
+async def count_calling_contacts(db: AsyncSession, clinic_id: UUID) -> int:
+    """In-flight outbound calls for this clinic (status CALLING)."""
+    result = await db.execute(
+        select(func.count())
+        .select_from(CampaignContact)
+        .where(
+            CampaignContact.clinic_id == clinic_id,
+            CampaignContact.status == ContactStatus.CALLING.value,
+        )
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def maybe_mark_campaign_completed(
+    db: AsyncSession,
+    clinic_id: UUID,
+    campaign_id: UUID,
+) -> None:
+    """
+    If every contact for the campaign is in a terminal state, set campaign COMPLETED.
+    """
+    campaign = await get_campaign(db, clinic_id, campaign_id)
+    if campaign.status not in (
+        CampaignStatus.ACTIVE.value,
+        CampaignStatus.PAUSED.value,
+    ):
+        return
+
+    result = await db.execute(
+        select(CampaignContact.id).where(
+            CampaignContact.campaign_id == campaign_id,
+            CampaignContact.clinic_id == clinic_id,
+            CampaignContact.status.not_in(list(_TERMINAL_STATUSES)),
+        )
+    )
+    if result.first() is None:
+        campaign.status = CampaignStatus.COMPLETED.value
+        await db.flush()
+        logger.info(f"Campaign auto-completed: id={campaign_id} clinic_id={clinic_id}")
 
 
 # ── Campaign lifecycle ─────────────────────────────────────────────────────────

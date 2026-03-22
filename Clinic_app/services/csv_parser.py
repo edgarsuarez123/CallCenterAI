@@ -37,7 +37,14 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # The set of normalized field names Claude must map to.
 NORMALIZED_FIELD_NAMES = {
-    "phone", "gap_type", "language", "patient_name", "patient_dob", "ignore"
+    "phone",
+    "gap_type",
+    "language",
+    "patient_name",
+    "patient_dob",
+    "provider_name",
+    "payer",
+    "ignore",
 }
 
 # The set of valid gap type values Claude must map gap_type values to.
@@ -49,7 +56,7 @@ of a patient outreach CSV (header row + up to 2 data rows) and return a JSON
 object that:
 
 1. Maps each input column header to exactly one of these normalized field names:
-   phone, gap_type, language, patient_name, patient_dob, ignore
+   phone, gap_type, language, patient_name, patient_dob, provider_name, payer, ignore
 
 2. For gap_type values found in the data rows, provides a "gap_type_values" mapping
    from raw strings to one of these standard codes:
@@ -66,6 +73,8 @@ Return ONLY a valid JSON object. No explanation, no markdown. Example:
     "LANG": "language",
     "Member Name": "patient_name",
     "DOB": "patient_dob",
+    "PCP Name": "provider_name",
+    "Payer": "payer",
     "Plan ID": "ignore"
   },
   "gap_type_values": {
@@ -84,8 +93,10 @@ class ParsedRow:
     phone_e164: str             # E.164 format, e.g. "+17875551234"
     gap_type: GapType
     language: str               # "en" | "es" | other BCP-47 code
-    patient_name: Optional[str] = None   # Passed to Retell only — never stored
-    patient_dob: Optional[str] = None    # Passed to Retell only — never stored
+    patient_name: Optional[str] = None   # Encrypted at campaign ingest
+    patient_dob: Optional[str] = None    # Encrypted at campaign ingest
+    provider_name: Optional[str] = None  # Plain text — Retell metadata
+    payer: Optional[str] = None          # Plain text — Retell metadata
     raw_row_number: int = 0     # 1-indexed row number in original file (for error reporting)
 
 
@@ -105,6 +116,8 @@ class ColumnMapping:
     language_col: Optional[str]
     name_col: Optional[str]
     dob_col: Optional[str]
+    provider_col: Optional[str]
+    payer_col: Optional[str]
     gap_type_values: dict[str, str]   # raw gap type string → GapType.value
 
 
@@ -190,6 +203,8 @@ def _build_column_mapping(claude_response: dict, header_row: list[str]) -> Colum
         language_col=find_col("language"),
         name_col=find_col("patient_name"),
         dob_col=find_col("patient_dob"),
+        provider_col=find_col("provider_name"),
+        payer_col=find_col("payer"),
         gap_type_values=gap_type_vals,
     )
 
@@ -328,6 +343,8 @@ def parse_file(
         raw_lang = row.get(mapping.language_col, "en").strip() if mapping.language_col else "en"
         raw_name = row.get(mapping.name_col, "").strip() if mapping.name_col else None
         raw_dob = row.get(mapping.dob_col, "").strip() if mapping.dob_col else None
+        raw_provider = row.get(mapping.provider_col, "").strip() if mapping.provider_col else None
+        raw_payer = row.get(mapping.payer_col, "").strip() if mapping.payer_col else None
 
         try:
             phone_e164 = normalize_phone(raw_phone)
@@ -348,6 +365,8 @@ def parse_file(
             language=language,
             patient_name=raw_name or None,
             patient_dob=raw_dob or None,
+            provider_name=raw_provider or None,
+            payer=raw_payer or None,
             raw_row_number=idx,
         ))
 

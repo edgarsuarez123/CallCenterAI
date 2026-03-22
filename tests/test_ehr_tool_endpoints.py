@@ -5,6 +5,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
 
 os.environ.setdefault("APP_ENVIRONMENT", "development")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests-only")

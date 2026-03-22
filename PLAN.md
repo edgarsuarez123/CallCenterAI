@@ -19,10 +19,19 @@
 | 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Complete |
 | 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Complete |
 | 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Complete |
-| 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | Active — next to implement |
-| 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | Pending (after Feature 5) |
-| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending |
-| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending (after Feature 7) |
+| 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | Complete |
+| 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | Complete |
+| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending — **after Plans 011 + 012**; **penultimate** milestone (before onboarding) |
+| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — **last** milestone (after dashboard) |
+| 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | **Active — next to implement** |
+| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — **after Plan 011 E2E**; **before Plan 009** (dashboard) |
+
+### Implementation order (current)
+
+1. **Plan 011** — Document and validate the full Retell-facing surface (gap types, webhooks, custom tools, post-call extraction), then run an **end-to-end test gate** until the voice + EHR + persistence path is trusted **without** building the dashboard UI.
+2. **Plan 012** — **Production-oriented API security** (disable public OpenAPI in prod, CORS for SPA origin(s), safe 500 responses) plus **HTTP rate limiting** (auth endpoints, sensitive uploads, optionally Retell-facing routes) and **Claude / Anthropic rate limiting** (cost + abuse protection on summarization and any CSV or staff-notes extraction paths). Completes **before** the dashboard so the SPA ships against a hardened API.
+3. **Plan 009 (Feature 7)** — Clinic dashboard (React SPA + detail views, including staff notes once Plan 011 persists them).
+4. **Plan 010 (Feature 8)** — Broader hardening, production deploy, pilot onboarding, PHI audit, load tests — **final** slice after the dashboard exists (may overlap thematically with 012 but 012 is the **pre-dashboard** gate).
 
 ---
 
@@ -1666,7 +1675,7 @@ Register `campaign_router` in `main.py`.
 ## Plan 007 — Feature 5: EHR Integration (Playwright + AgentQL)
 **Date:** 2026-03-18
 **Updated:** 2026-03-21
-**Status:** Active — next to implement (unblocked: Feature 0 validated; Features 2–4 complete)
+**Status:** Complete — `playwright_ehr`, Redis selector cache, Retell EHR tool endpoints, admin EHR config + credential test (see Feature 5 test summary below)
 **Source:** HEDIS_PRD_v2.md §10
 **Architecture Branch:** Server-side Playwright (confirmed for pilot — Feature 0 PASS 2026-03-20). Chrome Extension fallback documented in `HEDIS_CAMPAIGN_IMPLEMENTATION.md` if headless is blocked elsewhere.
 
@@ -1692,7 +1701,7 @@ Register `campaign_router` in `main.py`.
 
 ## Plan 008 — Feature 6: Campaign Worker + Outbound Calling
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 4 + Feature 5)
+**Status:** Complete — campaign worker, Retell outbound client, campaign webhooks, `POST /campaigns/{id}/start`, `call_analyzed` summary path (see Feature 6 test summary below)
 **Source:** HEDIS_PRD_v2.md §8.2 + §9
 
 ### Summary
@@ -1715,12 +1724,16 @@ Register `campaign_router` in `main.py`.
 
 ## Plan 009 — Feature 7: Clinic Dashboard
 **Date:** 2026-03-18
-**Status:** Pending — backend APIs for campaigns and clinic settings exist; UI not started
+**Status:** Pending — **do not start UI until Plan 011 E2E gate and Plan 012 security/rate-limit work are done** (voice path verified; API ready for browser clients)
 **Source:** HEDIS_PRD_v2.md §14
+
+### Ordering
+
+- **Penultimate** product milestone: ship after **Plan 011** and **Plan 012**. **Feature 8 (Plan 010)** is the **last** milestone (broader hardening + pilot onboarding) and follows the dashboard.
 
 ### Summary
 
-Desktop-only. Minimal React SPA (Vite) served as static files from FastAPI.
+Desktop-only. Minimal React SPA (Vite) served as static files from FastAPI. Campaign detail must surface **decrypted staff notes / structured extraction** produced in Plan 011 (not only the one-sentence summary), within existing role and PHI rules.
 
 Screens:
 1. Clinic Selector (staff in 2+ clinics)
@@ -1742,7 +1755,7 @@ Screens:
 
 ## Plan 010 — Feature 8: Hardening + Pilot Onboarding
 **Date:** 2026-03-18
-**Status:** Pending (starts after Feature 7)
+**Status:** Pending — **last** milestone; starts after Feature 7 dashboard ships
 **Source:** HEDIS_PRD_v2.md §16 Week 5
 
 ### Summary
@@ -1762,6 +1775,117 @@ Screens:
 
 ---
 
-*Last updated: 2026-03-21*
-*Maintained by: Edgar J. Suárez Colón*
-*Next action: Feature 5 (Plan 007) — `playwright_ehr` service, Redis selector cache, Retell EHR tool endpoints (`get_available_slots` / `book_appointment` under 3 seconds), admin EHR config + credential test. Then Feature 6 — campaign worker, Retell outbound client, campaign webhooks.*
+## Plan 011 — Retell agent playbook + E2E voice gate + post-call staff notes
+**Date:** 2026-03-22  
+**Updated:** 2026-03-22  
+**Status:** **Active — next to implement.** Finish documentation, agent alignment, richer post-call persistence, and a **full end-to-end test gate** before any dashboard UI work (Plan 009).  
+**Source:** Clinic workflow requirement (labs / follow-up visibility) + operational need to configure one Retell agent per clinic with correct tools and webhooks
+
+### Goals (in order)
+
+1. **Single source of truth** for how each clinic’s Retell agent is wired: gap types, dynamic metadata, webhook URLs, custom tool URLs, and what the server expects for summaries — so onboarding is repeatable and debuggable.
+2. **Staff-usable post-call artifact** beyond a one-sentence summary (Claude extraction; see below).
+3. **E2E validation** (automated + staged real/simulated call where appropriate) proving outbound → voice → tools → booking path → webhooks → DB **before** building the React dashboard.
+
+### Retell agent setup structure (playbook contents)
+
+Maintain the **Retell agent playbook** at [`docs/retell_agent_playbook.md`](docs/retell_agent_playbook.md) (update when routes or metadata change). For each environment (`APP_BASE_URL`), it lists:
+
+| Area | What to configure | FastAPI routes (prefix `/retell`) |
+|---|---|---|
+| **Agent** | One agent per clinic; store Retell `agent_id` in DB; prompt references `gap_type` and clinic-specific scripts. | — |
+| **Outbound metadata** | `create-phone-call` must send fields the worker already supplies (e.g. `clinic_id`, `campaign_contact_id`, `gap_type`, patient context for the voice layer). Playbook documents **exact keys** and allowed `gap_type` values (mirror `data/enums.py` / CSV). | — |
+| **Custom tools (EHR)** | Retell custom functions pointing at this API with clinic auth as today. | `POST /retell/tools/get_available_slots`, `POST /retell/tools/book_appointment` |
+| **Call lifecycle webhooks** | HMAC with `RETELL_WEBHOOK_SECRET`. | `POST /retell/webhook/call_started`, `POST /retell/webhook/call_ended`, `POST /retell/webhook/call_analyzed` |
+| **Legacy / other** | Older demo routes may exist; playbook should state **HEDIS campaign agent must use the tool + webhook paths above**, not legacy scheduling paths unless explicitly migrated. | `POST /retell/schedule`, `POST /retell/confirm_booking`, `GET|POST /retell/availability` — confirm non-HEDIS or deprecated per code review |
+
+Playbook sections to include: **environment variables checklist** (`RETELL_API_KEY`, `RETELL_FROM_NUMBER`, `RETELL_WEBHOOK_SECRET`, `APP_BASE_URL`), **Retell dashboard copy-paste URLs**, **prompt snippet** instructing the model when to call slots vs book vs hand off, and **timeout note** (e.g. slot lookup must stay under 3 seconds per architecture rules).
+
+### Problem (staff notes)
+
+Some HEDIS gaps are **informational** (e.g. bloodwork or mammogram reminders). Staff need **what the patient agreed to** (labs, location, timing) to operationalize orders. The current **one-sentence** encrypted summary in `campaign_audit` may be insufficient.
+
+### Decision (two complementary inputs, one extraction step)
+
+**Do not rely on Retell’s summary alone** unless product verifies it always contains the fields staff need.
+
+1. **Input to Claude** (best available, in order): Retell **post-call summary** from `call_analyzed` when useful; and/or **transcript** / `transcript_with_tool_calls` when the summary is thin.
+2. **Claude output:** **Option A** — short bounded staff-facing narrative; **Option B** — validated JSON (e.g. `patient_agreed_to_labs`, `lab_or_location_mentioned`, `follow_up_action_for_staff`, `free_text_note`). Encrypt at rest; **do not** store full transcript by default unless policy explicitly allows.
+3. **NextGen appointment type strings:** Mapping values must be the **exact strings** the NextGen control expects (display label vs `value` — match `playwright_ehr`).
+
+### E2E gate (blocking before Plan 009)
+
+**Definition of done for Plan 011** includes all of:
+
+- [ ] Playbook reviewed against actual `Routes/retell.py` and `retell_client` / worker metadata.
+- [ ] pytest: webhook + tool handlers + staff-notes extraction paths (summary-only, transcript-only, both).
+- [ ] **Staged E2E:** from campaign start through at least one contact — outbound call connects (or Retell test mode per their docs), agent invokes **get_available_slots** and **book_appointment** as designed, `call_started` / `call_ended` / `call_analyzed` update DB correctly, encrypted staff artifact present where implemented.
+- [ ] Sign-off recorded in `PROGRESS.txt` (date + what was exercised).
+
+Only after this gate: proceed to **Plan 012** (API security + rate limits), then begin Feature 7 dashboard UI (Plan 009).
+
+### Implementation steps
+
+- [ ] Add **Retell agent playbook** doc with the table above + gap-type list + env checklist.
+- [ ] Extend `call_summarizer` or add `call_staff_notes_extractor.py` (Claude, JSON or bounded text; minimal PHI echo in stored blob).
+- [ ] Alembic: encrypted column(s) on `campaign_audit` (or sibling) for staff notes / structured extraction.
+- [ ] Update `webhook_call_analyzed` to feed extractor; persist encrypted result alongside or instead of expanding only the one-liner (product choice).
+- [ ] **Optional for gate:** minimal authenticated **read** API or admin-only JSON endpoint to inspect one campaign row for QA — **not** a substitute for tests; dashboard UI remains Plan 009.
+- [ ] E2E checklist execution + `PROGRESS.txt` entry.
+
+### Deferred
+
+- Full transcript retention at rest (explicit compliance decision).
+- Automatic lab orders in NextGen.
+- Feature 7 UI and polish — **Plan 009**, after Plan 011 gate **and Plan 012**.
+
+### Relationship to other plans
+
+- **Plan 012:** Hardens the API and adds rate limits **before** staff use the dashboard in production-like environments.
+- **Plan 009:** Consumes persisted staff notes; first **user-facing** surface for them.
+- **Plan 010:** Broader production hardening, pilot onboarding, audits, load tests **after** dashboard.
+- **Plan 008:** `call_analyzed` is the integration hook; this plan extends persistence and operationalizes Retell configuration.
+
+---
+
+## Plan 012 — API security hardening + HTTP rate limits + Claude rate limits
+**Date:** 2026-03-23  
+**Status:** Pending — implement **after Plan 011 E2E gate**, **before Plan 009** (clinic dashboard / SPA)  
+**Source:** Gap analysis vs current `main.py`, `Routes/auth.py`, `Routes/campaigns.py`, `Routes/retell.py`, `call_summarizer` / any Anthropic usage
+
+### Why (before dashboard)
+
+The browser UI will increase **attack surface** (CORS, credential handling, traffic patterns). Today: **no global HTTP rate limiting**, **OpenAPI docs publicly exposed**, **no CORS middleware** configured for a separate SPA origin, **500 handler may return raw exception strings**, and **Claude calls** are only indirectly bounded (retries, not quota-style limits). Plan 012 closes these **before** clinics use the dashboard against a shared API.
+
+### Scope — API / edge
+
+- [ ] **OpenAPI / docs:** Disable or restrict `/docs` and `/redoc` in **production** (`APP_ENVIRONMENT`); keep available in dev or behind admin auth if desired.
+- [ ] **CORS:** Configure allowed origins via env (e.g. comma-separated or JSON list) for the future Vite SPA; reject unexpected browser origins in production.
+- [ ] **Error responses:** Production 500 responses must **not** echo internal exception text to clients; log server-side only.
+- [ ] **HTTP rate limiting:** Add application-level limits (e.g. `slowapi` or equivalent) on high-risk routes, at minimum:
+  - **`/auth/*`** — OAuth start, callback, token refresh patterns, `/me`, `/select-clinic` (per-IP and/or per-identity where feasible).
+  - **Campaign file upload / mutating admin-style staff routes** — e.g. CSV/Excel upload, campaign start, exports if abuse-prone.
+  - **Optional:** stricter limits on **`/retell/webhook/call_analyzed`** or other externally triggered paths if needed beyond Retell’s own controls (coordinate with HMAC auth).
+- [ ] **Storage backend for limits:** Prefer **Redis** (`REDIS_URL`) when available so limits are consistent across multiple app workers; document in-memory fallback for single-process dev.
+
+### Scope — Claude / Anthropic
+
+- [ ] **Rate limit** all server paths that call Anthropic (`call_summarizer`, CSV gap-type parsing if applicable, future staff-notes extractor): e.g. **global** requests-per-minute and/or **per-`clinic_id`** (when resolvable) to cap cost and reduce burst abuse.
+- [ ] **Behavior on limit exceeded:** Return a safe, non-leaking response for HTTP-triggered paths; for webhooks, define policy (queue vs drop vs generic summary) — document choice.
+- [ ] **Tests:** Unit/integration tests for limiter wiring and “over limit” behavior on at least one auth and one Claude path.
+
+### Explicitly out of scope (remain in Plan 010 unless pulled forward)
+
+- Full **PHI log audit** automation, **12-call load test**, **Azure BAA** operational checklist — keep in **Plan 010** unless a blocker for pilot.
+
+### Open decisions (answer before implementation)
+
+1. **CORS:** Single global allowlist env var vs per-tenant origins in DB for white-label / multi-domain clinics?
+2. **Claude limits:** Global-only vs **per-`clinic_id`** buckets (fairness across tenants)?
+3. **Admin routes (`X-Admin-Key`):** Same rate-limit tier as staff auth, stricter, or IP allowlist in Azure only?
+
+---
+
+*Last updated: 2026-03-23*  
+*Maintained by: Edgar J. Suárez Colón*  
+*Next action: Plan 011 (E2E gate) → Plan 012 (security + rate limits) → Plan 009 (dashboard) → Plan 010 (onboarding).*

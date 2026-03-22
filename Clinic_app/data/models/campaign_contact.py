@@ -5,7 +5,7 @@ from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, BYTEA
 from sqlalchemy.orm import relationship
 from Clinic_app.common.database import Base
-from Clinic_app.data.enums import ContactStatus, GapType
+from Clinic_app.data.enums import ContactStatus
 
 
 class CampaignContact(Base):
@@ -13,8 +13,8 @@ class CampaignContact(Base):
     One row per patient per campaign. The campaign worker reads this table to determine
     who to call next (FIFO, respecting next_attempt_after).
 
-    PHI minimization: only encrypted phone stored here. Patient name and DOB are passed
-    as Retell call metadata at the moment of dial — never persisted in this table.
+    PHI: encrypted phone, name, and DOB at rest. Name/DOB are decrypted only when placing
+    an outbound call or for authorized dashboard flows. Provider name and payer are plain text.
     The dual-column pattern (phone_encrypted + phone_hash) mirrors the patient table:
     - phone_encrypted: passed to Retell to place the call
     - phone_hash: used for dedup on CSV import without decrypting all rows
@@ -25,9 +25,14 @@ class CampaignContact(Base):
     campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False, index=True)
     clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)  # Denormalized for tenant isolation
 
-    # PHI — phone only
+    # PHI — phone + optional name/DOB for Retell metadata at dial time
     phone_encrypted = Column(BYTEA, nullable=False)          # AES-256-GCM encrypted E.164 phone number
     phone_hash = Column(String(64), nullable=False)          # SHA-256 hash for dedup without decryption
+    patient_name_encrypted = Column(BYTEA, nullable=True)    # AES-256-GCM — decrypt only at dial
+    patient_dob_encrypted = Column(BYTEA, nullable=True)     # AES-256-GCM — decrypt only at dial
+
+    provider_name = Column(String, nullable=True)              # From CSV — Retell metadata
+    payer = Column(String, nullable=True)                      # Insurance plan name — Retell metadata
 
     gap_type = Column(String(100), nullable=False)           # GapType enum value — drives agent script + appt type
     preferred_language = Column(String(10), nullable=False, default="en")  # "en" | "es"
