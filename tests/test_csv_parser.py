@@ -131,6 +131,8 @@ class TestBuildColumnMapping:
         assert mapping.language_col == "Language"
         assert mapping.name_col == "Member Name"
         assert mapping.dob_col == "DOB"
+        assert mapping.provider_col is None
+        assert mapping.payer_col is None
 
     def test_missing_optional_fields_are_none(self):
         response = {
@@ -142,6 +144,8 @@ class TestBuildColumnMapping:
         assert mapping.language_col is None
         assert mapping.name_col is None
         assert mapping.dob_col is None
+        assert mapping.provider_col is None
+        assert mapping.payer_col is None
 
     def test_header_column_not_in_file_is_none(self):
         # Claude returns a column that isn't actually in the file header

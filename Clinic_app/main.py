@@ -14,6 +14,10 @@ from Clinic_app.Routes.campaigns import campaign_router
 from Clinic_app.common.auth import verify_admin_api_key
 from Clinic_app.common.redis import close_redis
 from Clinic_app.workers.booking_reaper import scheduler, run_booking_reaper
+from Clinic_app.workers.campaign_worker import (
+    campaign_worker_manager,
+    resume_active_campaign_workers,
+)
 from Clinic_app.services.playwright_ehr import playwright_ehr_service
 
 # Configure logging
@@ -40,10 +44,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("PlaywrightEHRService startup failed — EHR tools may be unavailable: %s", e)
 
+    try:
+        await resume_active_campaign_workers()
+    except Exception as e:
+        logger.warning("Campaign worker resume failed: %s", e)
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("Shutting down CallCenterAI API")
+    try:
+        await campaign_worker_manager.shutdown_all()
+    except Exception as e:
+        logger.warning("Campaign worker shutdown: %s", e)
     scheduler.shutdown(wait=False)
     try:
         await playwright_ehr_service.shutdown_all()

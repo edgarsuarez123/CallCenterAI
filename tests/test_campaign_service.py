@@ -5,6 +5,8 @@ DB is mocked — no real database required.
 """
 
 import uuid
+from datetime import datetime, timezone
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
@@ -248,3 +250,86 @@ class TestCancelCampaign:
         with pytest.raises(HTTPException) as exc_info:
             await cancel_campaign(mock_db, campaign.clinic_id, campaign.id)
         assert exc_info.value.status_code == 409
+
+
+# ── start_campaign ─────────────────────────────────────────────────────────────
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestStartCampaign:
+    async def test_start_pending_with_verified_ehr(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.PENDING.value)
+        ehr = MagicMock()
+        ehr.connection_verified_at = datetime.now(timezone.utc)
+
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        ehr_res = MagicMock()
+        ehr_res.scalar_one_or_none.return_value = ehr
+        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res])
+        mock_db.commit = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        out = await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert out.status == CampaignStatus.ACTIVE.value
+
+    async def test_start_without_ehr_raises_422(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.PENDING.value)
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        ehr_res = MagicMock()
+        ehr_res.scalar_one_or_none.return_value = None
+        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res])
+
+        with pytest.raises(HTTPException) as exc_info:
+            await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail["code"] == "EHR_NOT_VERIFIED"
+
+    async def test_start_active_raises_409(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.ACTIVE.value)
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        mock_db.execute = AsyncMock(return_value=camp_res)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert exc_info.value.status_code == 409
+
+
+# ── get_next_eligible_contact ─────────────────────────────────────────────────
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestGetNextEligibleContact:
+    async def test_returns_contact_when_found(self):
+        from Clinic_app.services.campaign_service import get_next_eligible_contact
+
+        contact = MagicMock()
+        mock_db = AsyncMock()
+        res = MagicMock()
+        res.scalar_one_or_none.return_value = contact
+        mock_db.execute = AsyncMock(return_value=res)
+
+        out = await get_next_eligible_contact(mock_db, uuid.uuid4())
+        assert out is contact
+
+    async def test_returns_none_when_empty(self):
+        from Clinic_app.services.campaign_service import get_next_eligible_contact
+
+        mock_db = AsyncMock()
+        res = MagicMock()
+        res.scalar_one_or_none.return_value = None
+        mock_db.execute = AsyncMock(return_value=res)
+
+        out = await get_next_eligible_contact(mock_db, uuid.uuid4())
+        assert out is None

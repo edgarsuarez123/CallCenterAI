@@ -9,15 +9,16 @@ import os
 import json
 import hmac
 import hashlib
+import asyncio
 import logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, cast, String
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from Clinic_app.common.database import get_db
 from Clinic_app.data.models.clinic import Clinic
@@ -26,7 +27,13 @@ from Clinic_app.data.models.provider import Provider
 from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.models.call_log import CallLog
 from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
-from Clinic_app.data.enums import BookingStatus
+from Clinic_app.data.models.campaign import Campaign
+from Clinic_app.data.models.campaign_contact import CampaignContact
+from Clinic_app.data.models.campaign_audit import CampaignAudit
+from Clinic_app.data.enums import BookingStatus, ContactStatus, CampaignStatus
+from Clinic_app.common.encryption import encrypt_phi
+from Clinic_app.services.campaign_service import maybe_mark_campaign_completed
+from Clinic_app.services.call_summarizer import summarize_transcript_sync
 from Clinic_app.services.patient import find_patient, create_patient
 from Clinic_app.services.availability import (
     get_available_slots,
@@ -122,21 +129,27 @@ class EhrBookAppointmentResponse(BaseModel):
 
 class CallStartedWebhook(BaseModel):
     """Webhook payload for call started event (can be called as custom function or webhook)."""
+    model_config = ConfigDict(extra="ignore")
+
     call_id: str
     agent_id: str
     from_number: Optional[str] = None
     to_number: Optional[str] = None
     direction: Optional[str] = "inbound"  # Default to inbound if not provided
     timestamp: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class CallEndedWebhook(BaseModel):
     """Webhook payload for call ended event."""
+    model_config = ConfigDict(extra="ignore")
+
     call_id: str
     start_timestamp: Optional[int] = None  # Milliseconds since epoch
     end_timestamp: Optional[int] = None  # Milliseconds since epoch
     disconnection_reason: Optional[str] = None
     timestamp: Optional[str] = None  # ISO format timestamp string
+    metadata: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================
@@ -1280,6 +1293,151 @@ def _appt_type_code_for_gap(mapping: Dict[str, Any], gap_type: Optional[str]) ->
     return default
 
 
+def _hedis_metadata_from_call(call_obj: Dict[str, Any], webhook_metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge metadata from webhook model and raw call object (Retell shape varies)."""
+    md = dict(webhook_metadata or {})
+    raw_md = call_obj.get("metadata")
+    if isinstance(raw_md, dict):
+        for k, v in raw_md.items():
+            md.setdefault(k, v)
+    return md
+
+
+def _map_disconnection_to_outcome(
+    reason: Optional[str],
+    has_appointment: bool,
+) -> ContactStatus:
+    """Map Retell disconnection_reason to ContactStatus for HEDIS campaigns."""
+    r = (reason or "").lower()
+    if any(x in r for x in ("voicemail", "machine")):
+        return ContactStatus.VOICEMAIL
+    if any(
+        x in r
+        for x in (
+            "no_answer",
+            "dial_no_answer",
+            "timeout",
+            "inactivity",
+            "not_connected",
+            "registered_call_timeout",
+        )
+    ):
+        return ContactStatus.NO_ANSWER
+    if "busy" in r or "dial_failed" in r:
+        return ContactStatus.NO_ANSWER
+    if "error" in r:
+        return ContactStatus.ERROR
+    if any(x in r for x in ("hangup", "ended", "disconnected")):
+        return ContactStatus.BOOKED if has_appointment else ContactStatus.DECLINED
+    return ContactStatus.ERROR if not has_appointment else ContactStatus.DECLINED
+
+
+def _extract_transcript_for_summary(call_obj: Dict[str, Any]) -> str:
+    """Best-effort transcript extraction from Retell call payload (shape varies by product version)."""
+    direct = call_obj.get("transcript")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    tw = call_obj.get("transcript_with_tool_calls")
+    if isinstance(tw, str) and tw.strip():
+        return tw.strip()
+    ca = call_obj.get("call_analysis")
+    if isinstance(ca, dict):
+        for key in ("transcript", "summary", "call_summary"):
+            val = ca.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _transcript_requests_human(transcript: str) -> bool:
+    t = transcript.lower()
+    return any(
+        phrase in t
+        for phrase in (
+            "speak to a human",
+            "talk to a human",
+            "real person",
+            "representative",
+            "speak to someone",
+            "call the office",
+        )
+    )
+
+
+async def _apply_hedis_call_ended(
+    db: AsyncSession,
+    call_log: CallLog,
+    webhook: CallEndedWebhook,
+    raw_call: Dict[str, Any],
+    ended_at: datetime,
+) -> None:
+    """Update CampaignContact + Campaign counters for HEDIS outbound calls."""
+    meta = _hedis_metadata_from_call(raw_call, webhook.metadata)
+    if meta.get("call_type") != "hedis_campaign":
+        return
+
+    ccid_raw = meta.get("campaign_contact_id")
+    if not ccid_raw:
+        return
+    try:
+        contact_id = UUID(str(ccid_raw))
+    except (ValueError, TypeError):
+        logger.warning("HEDIS call_ended: invalid campaign_contact_id %r", ccid_raw)
+        return
+
+    contact = await db.get(CampaignContact, contact_id)
+    if not contact or contact.clinic_id != call_log.clinic_id:
+        logger.warning(
+            "HEDIS call_ended: contact missing or wrong clinic id=%s",
+            contact_id,
+        )
+        return
+
+    campaign = await db.get(Campaign, contact.campaign_id)
+    if not campaign or campaign.clinic_id != call_log.clinic_id:
+        return
+
+    has_appt = bool(contact.ehr_appointment_id and str(contact.ehr_appointment_id).strip())
+    outcome = _map_disconnection_to_outcome(webhook.disconnection_reason, has_appt)
+    now = datetime.now(timezone.utc)
+
+    if outcome in (
+        ContactStatus.VOICEMAIL,
+        ContactStatus.NO_ANSWER,
+        ContactStatus.ERROR,
+    ):
+        attempts = contact.attempt_count or 0
+        max_a = campaign.max_attempts or 3
+        if attempts >= max_a:
+            contact.status = ContactStatus.EXHAUSTED.value
+            contact.next_attempt_after = None
+            campaign.failed_count = (campaign.failed_count or 0) + 1
+        else:
+            if outcome == ContactStatus.VOICEMAIL:
+                hrs = campaign.voicemail_retry_hours or 72
+            elif outcome == ContactStatus.NO_ANSWER:
+                hrs = campaign.no_answer_retry_hours or 48
+            else:
+                hrs = campaign.error_retry_hours or 1
+            contact.status = ContactStatus.PENDING.value
+            contact.next_attempt_after = now + timedelta(hours=int(hrs))
+    elif outcome == ContactStatus.BOOKED:
+        contact.status = ContactStatus.BOOKED.value
+        contact.next_attempt_after = None
+        campaign.booked_count = (campaign.booked_count or 0) + 1
+    elif outcome == ContactStatus.DECLINED:
+        contact.status = ContactStatus.DECLINED.value
+        contact.next_attempt_after = None
+        campaign.failed_count = (campaign.failed_count or 0) + 1
+    else:
+        contact.status = outcome.value
+        contact.next_attempt_after = None
+
+    call_log.related_id = contact.id
+
+    await maybe_mark_campaign_completed(db, call_log.clinic_id, campaign.id)
+
+
 @retell_router.post("/tools/get_available_slots", response_model=EhrToolSlotsResponse)
 async def ehr_get_available_slots(
     request: Request,
@@ -1349,6 +1507,7 @@ async def ehr_book_appointment(
     body = json.loads(body_bytes.decode("utf-8"))
     call_obj = body.get("call", {})
     args = body.get("args", {})
+    metadata = call_obj.get("metadata") or {}
 
     agent_id = call_obj.get("agent_id")
     if not agent_id:
@@ -1396,6 +1555,26 @@ async def ehr_book_appointment(
         )
 
     if result.get("success"):
+        cc_raw = metadata.get("campaign_contact_id")
+        if cc_raw and metadata.get("call_type") == "hedis_campaign":
+            try:
+                cid = UUID(str(cc_raw))
+                row = await db.get(CampaignContact, cid)
+                if row and row.clinic_id == clinic_id:
+                    ehr_id = result.get("ehr_appointment_id")
+                    if ehr_id:
+                        row.ehr_appointment_id = str(ehr_id)
+            except (ValueError, TypeError):
+                logger.warning("book_appointment: invalid campaign_contact_id %r", cc_raw)
+        try:
+            await db.commit()
+        except Exception as exc:
+            logger.error("book_appointment commit failed: %s", exc, exc_info=True)
+            await db.rollback()
+            return EhrBookAppointmentResponse(
+                success=False,
+                message="Could not save booking reference.",
+            )
         return EhrBookAppointmentResponse(
             success=True,
             message="Appointment booked",
@@ -1428,7 +1607,7 @@ async def webhook_call_started(
     # Retell sends data nested in a "call" object when called as webhook
     # When called as custom function, data might be in "call" object or at top level
     call_obj = body.get("call", body)  # Try "call" object first, fallback to body
-    webhook = CallStartedWebhook(**call_obj)
+    webhook = CallStartedWebhook.model_validate(call_obj)
     
     logger.info(f"Call started: call_id={webhook.call_id}, agent_id={webhook.agent_id}")
     
@@ -1456,6 +1635,16 @@ async def webhook_call_started(
             retell_call_id=webhook.call_id,
             started_at=started_at
         )
+        meta = _hedis_metadata_from_call(call_obj, webhook.metadata)
+        if meta.get("call_type") == "hedis_campaign" and meta.get("campaign_contact_id"):
+            try:
+                cid = UUID(str(meta["campaign_contact_id"]))
+                contact = await db.get(CampaignContact, cid)
+                if contact and contact.clinic_id == clinic_id:
+                    call_log.related_id = contact.id
+            except (ValueError, TypeError):
+                logger.warning("call_started: invalid campaign_contact_id in metadata")
+
         db.add(call_log)
         await db.commit()
         
@@ -1494,7 +1683,7 @@ async def webhook_call_ended(
     # Retell sends data nested in a "call" object when called as webhook
     # When called as custom function, data might be in "call" object or at top level
     call_obj = body.get("call", body)  # Try "call" object first, fallback to body
-    webhook = CallEndedWebhook(**call_obj)
+    webhook = CallEndedWebhook.model_validate(call_obj)
     
     # Extract outcome (use disconnection_reason if available, otherwise default)
     outcome_str = webhook.disconnection_reason if webhook.disconnection_reason else "unknown"
@@ -1551,6 +1740,11 @@ async def webhook_call_ended(
                 logger.info(f"Releasing unconfirmed tentative booking: {booking.id}")
                 await cancel_booking(db, booking.id, call_log.clinic_id, actor="call_ended")
                 call_log.tentative_booking_id = None
+
+        try:
+            await _apply_hedis_call_ended(db, call_log, webhook, call_obj, ended_at)
+        except Exception as exc:
+            logger.error("HEDIS call_ended handling failed: %s", exc, exc_info=True)
         
         await db.commit()
         
@@ -1562,4 +1756,95 @@ async def webhook_call_ended(
         logger.error(f"Error in call_ended webhook: {str(e)}", exc_info=True)
         await db.rollback()
         return {"status": "ok", "error": "Internal error"}
+
+
+@retell_router.post("/webhook/call_analyzed")
+async def webhook_call_analyzed(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """
+    Post-call analysis: one-sentence Claude summary + CampaignAudit row for HEDIS campaigns.
+    Raw transcript is not persisted.
+    """
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", body)
+
+    call_id = call_obj.get("call_id") or ""
+    agent_id = call_obj.get("agent_id")
+    if not agent_id:
+        return {"status": "ok", "warning": "missing agent_id"}
+
+    try:
+        clinic_id = await _get_clinic_by_agent_id(db, agent_id)
+    except ValueError:
+        return {"status": "ok", "error": "clinic not found"}
+
+    meta = _hedis_metadata_from_call(call_obj, call_obj.get("metadata"))
+    if meta.get("call_type") != "hedis_campaign":
+        return {"status": "ok"}
+
+    cc_raw = meta.get("campaign_contact_id")
+    if not cc_raw:
+        return {"status": "ok", "warning": "missing campaign_contact_id"}
+    try:
+        contact_id = UUID(str(cc_raw))
+    except (ValueError, TypeError):
+        return {"status": "ok", "error": "invalid campaign_contact_id"}
+
+    contact = await db.get(CampaignContact, contact_id)
+    if not contact or contact.clinic_id != clinic_id:
+        return {"status": "ok", "error": "contact not found"}
+
+    transcript = _extract_transcript_for_summary(call_obj)
+    try:
+        summary = await asyncio.to_thread(
+            summarize_transcript_sync,
+            transcript,
+            contact.gap_type,
+        )
+    except Exception as exc:
+        logger.error("call_analyzed Claude summary failed: %s", exc, exc_info=True)
+        summary = "Call summary unavailable."
+
+    pname = meta.get("patient_name")
+    name_enc = encrypt_phi(str(pname)) if pname else None
+    summary_enc = encrypt_phi(summary)
+
+    if (
+        contact.status == ContactStatus.DECLINED.value
+        and _transcript_requests_human(transcript)
+    ):
+        contact.status = ContactStatus.HUMAN_REQUESTED.value
+
+    ended_ms = call_obj.get("end_timestamp")
+    if isinstance(ended_ms, (int, float)):
+        called_at = datetime.fromtimestamp(ended_ms / 1000, tz=timezone.utc)
+    else:
+        called_at = datetime.now(timezone.utc)
+
+    audit = CampaignAudit(
+        campaign_contact_id=contact.id,
+        campaign_id=contact.campaign_id,
+        clinic_id=clinic_id,
+        retell_call_id=str(call_id),
+        outcome=contact.status,
+        patient_name_encrypted=name_enc,
+        call_summary_encrypted=summary_enc,
+        ehr_appointment_id=contact.ehr_appointment_id,
+        attempt_number=contact.attempt_count or 1,
+        called_at=called_at,
+    )
+    db.add(audit)
+    try:
+        await db.flush()
+        await db.commit()
+    except Exception as exc:
+        logger.error("call_analyzed commit failed: %s", exc, exc_info=True)
+        await db.rollback()
+        return {"status": "ok", "error": "commit failed"}
+
+    return {"status": "ok", "audit_id": str(audit.id)}
 
