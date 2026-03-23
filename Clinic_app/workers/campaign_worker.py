@@ -25,6 +25,7 @@ from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.services.campaign_service import (
     count_calling_contacts,
+    expire_overdue_hospital_flu_contacts,
     get_next_eligible_contact,
 )
 from Clinic_app.services.retell_client import RetellClientError, create_outbound_call
@@ -210,6 +211,9 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
                     if active_calls >= limit:
                         await asyncio.sleep(AT_CAPACITY_SLEEP_SECONDS)
                         continue
+
+                    # Expire hospital_flu contacts whose 7-day discharge deadline passed
+                    await expire_overdue_hospital_flu_contacts(db, clinic_id)
 
                     contact = await get_next_eligible_contact(db, clinic_id)
                     if contact is None:
