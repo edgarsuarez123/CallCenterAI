@@ -1,7 +1,7 @@
 # Clinic_app/data/models/campaign_contact.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index
+from sqlalchemy import Column, String, Integer, Date, DateTime, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID, BYTEA
 from sqlalchemy.orm import relationship
 from Clinic_app.common.database import Base
@@ -43,6 +43,10 @@ class CampaignContact(Base):
     next_attempt_after = Column(DateTime(timezone=True), nullable=True)  # NULL = ready now
 
     ehr_appointment_id = Column(String, nullable=True)       # NextGen appointment ID on BOOKED
+
+    # hospital_flu scheduling fields
+    release_date = Column(Date, nullable=True)               # Discharge date from CSV; deadline = release_date + 7 days
+    priority_order = Column(Integer, nullable=False, default=1)  # 0 = hospital_flu (called first); 1 = all others
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

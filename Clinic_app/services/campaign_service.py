@@ -18,13 +18,13 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.encryption import encrypt_phi
-from Clinic_app.data.enums import CampaignStatus, ContactStatus
+from Clinic_app.data.enums import CampaignStatus, ContactStatus, GapType
 from Clinic_app.data.models.campaign import Campaign
 from Clinic_app.data.models.campaign_contact import CampaignContact
 from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
@@ -37,10 +37,16 @@ logger = logging.getLogger(__name__)
 # (a BOOKED contact should block re-upload; EXHAUSTED/DECLINED also block)
 _TERMINAL_STATUSES = {
     ContactStatus.BOOKED.value,
+    ContactStatus.ORDER_AGREED.value,
+    ContactStatus.ORDER_DECLINED.value,
     ContactStatus.EXHAUSTED.value,
     ContactStatus.DECLINED.value,
     ContactStatus.HUMAN_REQUESTED.value,
+    ContactStatus.NOT_YET_ELIGIBLE.value,
+    ContactStatus.EXPIRED.value,
 }
+
+HOSPITAL_FLU_DEADLINE_DAYS = 7
 
 # Non-terminal statuses that DO block re-upload (still active)
 _ACTIVE_STATUSES = {
@@ -191,6 +197,19 @@ async def create_campaign(
         name_enc = encrypt_phi(row.patient_name) if row.patient_name else None
         dob_enc = encrypt_phi(row.patient_dob) if row.patient_dob else None
 
+        # hospital_flu contacts get priority 0 (called first); all others get 1
+        is_hospital_flu = row.gap_type == GapType.HOSPITAL_FLU
+        priority = 0 if is_hospital_flu else 1
+
+        release_dt: Optional[date] = None
+        if row.release_date:
+            try:
+                release_dt = date.fromisoformat(row.release_date)
+            except ValueError:
+                logger.warning(
+                    f"Row {row.raw_row_number}: invalid release_date {row.release_date!r} — ignored"
+                )
+
         contact = CampaignContact(
             id=uuid.uuid4(),
             campaign_id=campaign.id,
@@ -205,6 +224,8 @@ async def create_campaign(
             preferred_language=row.language,
             status=ContactStatus.PENDING.value,
             attempt_count=0,
+            priority_order=priority,
+            release_date=release_dt,
         )
         db.add(contact)
         inserted.append(contact)
@@ -320,10 +341,47 @@ async def get_next_eligible_contact(
                 ),
             )
         )
-        .order_by(CampaignContact.created_at.asc())
+        .order_by(CampaignContact.priority_order.asc(), CampaignContact.created_at.asc())
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def expire_overdue_hospital_flu_contacts(
+    db: AsyncSession,
+    clinic_id: UUID,
+) -> int:
+    """
+    Mark PENDING hospital_flu contacts as EXPIRED when their 7-day discharge deadline
+    has passed. Returns the number of contacts expired.
+    """
+    today = date.today()
+    cutoff = today - timedelta(days=HOSPITAL_FLU_DEADLINE_DAYS)
+
+    result = await db.execute(
+        select(CampaignContact)
+        .join(Campaign, CampaignContact.campaign_id == Campaign.id)
+        .where(
+            CampaignContact.clinic_id == clinic_id,
+            Campaign.status == CampaignStatus.ACTIVE.value,
+            CampaignContact.gap_type == GapType.HOSPITAL_FLU.value,
+            CampaignContact.status == ContactStatus.PENDING.value,
+            CampaignContact.release_date.isnot(None),
+            CampaignContact.release_date <= cutoff,
+        )
+    )
+    contacts = result.scalars().all()
+    for contact in contacts:
+        contact.status = ContactStatus.EXPIRED.value
+
+    if contacts:
+        await db.commit()
+        logger.info(
+            "Expired %d overdue hospital_flu contacts for clinic_id=%s",
+            len(contacts),
+            clinic_id,
+        )
+    return len(contacts)
 
 
 async def start_campaign(

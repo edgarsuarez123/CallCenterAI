@@ -64,31 +64,61 @@ class CampaignStatus(str, Enum):
 
 class ContactStatus(str, Enum):
     """Lifecycle state of a single patient contact within a campaign."""
-    PENDING = "pending"        # Not yet attempted
-    CALLING = "calling"        # Call in progress right now
-    BOOKED = "booked"          # Appointment successfully created in NextGen
-    DECLINED = "declined"      # Patient explicitly declined
-    VOICEMAIL = "voicemail"    # Reached voicemail — will retry
-    NO_ANSWER = "no_answer"    # No answer — will retry
-    ERROR = "error"            # Technical error — will retry
-    EXHAUSTED = "exhausted"    # Max attempts reached, no booking
-    HUMAN_REQUESTED = "human_requested"  # Patient asked for human — terminal
+    PENDING = "pending"                    # Not yet attempted
+    CALLING = "calling"                    # Call in progress right now
+    BOOKED = "booked"                      # Appointment successfully created in NextGen
+    ORDER_AGREED = "order_agreed"          # Order-based gap: patient agreed, staff sends order
+    ORDER_DECLINED = "order_declined"      # Order-based gap: patient declined — terminal
+    DECLINED = "declined"                  # Patient explicitly declined appointment — terminal
+    VOICEMAIL = "voicemail"                # Reached voicemail — will retry
+    NO_ANSWER = "no_answer"                # No answer — will retry
+    ERROR = "error"                        # Technical error — will retry
+    EXHAUSTED = "exhausted"                # Max attempts reached, no booking — terminal
+    HUMAN_REQUESTED = "human_requested"    # Patient asked for human — terminal
+    NOT_YET_ELIGIBLE = "not_yet_eligible"  # Preventive visit not yet due — terminal
+    EXPIRED = "expired"                    # Hospital flu 7-day deadline passed before call — terminal
 
 
 class GapType(str, Enum):
-    """HEDIS care gap types. Drives Retell agent script and NextGen appt type mapping."""
-    COLORECTAL_CANCER_SCREENING = "colorectal_cancer_screening"
-    BREAST_CANCER_SCREENING = "breast_cancer_screening"
-    CERVICAL_CANCER_SCREENING = "cervical_cancer_screening"
-    DIABETES_HBA1C = "diabetes_hba1c"
-    DIABETES_EYE_EXAM = "diabetes_eye_exam"
-    DIABETES_NEPHROPATHY = "diabetes_nephropathy"
-    HYPERTENSION_CONTROL = "hypertension_control"
-    DEPRESSION_SCREENING = "depression_screening"
-    WELL_CHILD_VISIT = "well_child_visit"
-    ADOLESCENT_WELL_CARE = "adolescent_well_care"
-    ADULT_BMI_ASSESSMENT = "adult_bmi_assessment"
-    MEDICATION_ADHERENCE_DIABETES = "medication_adherence_diabetes"
-    MEDICATION_ADHERENCE_HYPERTENSION = "medication_adherence_hypertension"
-    OTHER = "other"  # Fallback for Claude parsing edge cases
+    """
+    HEDIS care gap types (Plan 013 finalized taxonomy).
+
+    Appointment-based (Playwright books in NextGen):
+      preventive_visit, hospital_flu
+
+    Order-based (call summary only — clinic staff sends order manually):
+      colorectal, eye_exam, breast_cancer, kidney, afr_cmp
+
+    Excluded (filtered at CSV parse — never enters campaign queue):
+      medication_review
+
+    Fallback:
+      generic — any unrecognized CSV value
+    """
+    PREVENTIVE_VISIT = "preventive_visit"    # Annual preventive / wellness visit
+    HOSPITAL_FLU = "hospital_flu"            # Hospital follow-up within 7 days of discharge
+    COLORECTAL = "colorectal"                # Colorectal cancer screening / stool test
+    EYE_EXAM = "eye_exam"                    # Eye exam / retinal exam
+    BREAST_CANCER = "breast_cancer"          # Breast cancer screening / mammogram
+    KIDNEY = "kidney"                        # Kidney function lab
+    AFR_CMP = "afr_cmp"                      # Albumin/creatinine ratio + urinalysis
+    MEDICATION_REVIEW = "medication_review"  # Excluded — filtered at parse, never called
+    GENERIC = "generic"                      # Unrecognized gap type — order-based script
+
+
+# Gap types that are appointment-based (Playwright books in NextGen EHR)
+APPOINTMENT_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
+    GapType.PREVENTIVE_VISIT,
+    GapType.HOSPITAL_FLU,
+})
+
+# Gap types that are order-based (voice call only — staff sends order manually)
+ORDER_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
+    GapType.COLORECTAL,
+    GapType.EYE_EXAM,
+    GapType.BREAST_CANCER,
+    GapType.KIDNEY,
+    GapType.AFR_CMP,
+    GapType.GENERIC,
+})
 
