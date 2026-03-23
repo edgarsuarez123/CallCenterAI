@@ -21,18 +21,27 @@
 | 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Complete |
 | 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | Complete |
 | 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | Complete |
-| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending — **after Plans 011 + 012**; **penultimate** milestone (before onboarding) |
-| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — **last** milestone (after dashboard) |
-| 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | **Active — next to implement** |
-| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — **after Plan 011 E2E**; **before Plan 009** (dashboard) |
-| 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Active — decisions recorded; schema + code changes needed before Plan 009 |
+| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending — after MVP test call confirmed + Plan 012 |
+| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — last, after dashboard |
+| 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | Partially superseded by Plan 014 (MVP sprint absorbs Sprint B + C) |
+| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
+| 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Split: critical subset in Plan 014 Sprint A; complex rules deferred post-MVP |
+| 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — top priority this week** |
 
-### Implementation order (current)
+### Implementation order (current — revised 2026-03-23 for MVP sprint)
 
-1. **Plan 011** — Document and validate the full Retell-facing surface (gap types, webhooks, custom tools, post-call extraction), then run an **end-to-end test gate** until the voice + EHR + persistence path is trusted **without** building the dashboard UI.
-2. **Plan 012** — **Production-oriented API security** (disable public OpenAPI in prod, CORS for SPA origin(s), safe 500 responses) plus **HTTP rate limiting** (auth endpoints, sensitive uploads, optionally Retell-facing routes) and **Claude / Anthropic rate limiting** (cost + abuse protection on summarization and any CSV or staff-notes extraction paths). Completes **before** the dashboard so the SPA ships against a hardened API.
-3. **Plan 009 (Feature 7)** — Clinic dashboard (React SPA + detail views, including staff notes once Plan 011 persists them).
-4. **Plan 010 (Feature 8)** — Broader hardening, production deploy, pilot onboarding, PHI audit, load tests — **final** slice after the dashboard exists (may overlap thematically with 012 but 012 is the **pre-dashboard** gate).
+**THIS WEEK (MVP goal: Edgar can upload a fake HEDIS CSV and watch the system make a real call):**
+
+1. **Plan 014 Sprint A** — Fix GapType enum mismatch + add missing ContactStatus values + hospital_flu columns. This is blocking a test call.
+2. **Plan 014 Sprint B** — Create `docs/retell_agent_playbook.md` + audit retell.py/worker metadata alignment. Lets Edgar configure the Retell agent in the dashboard.
+3. **Plan 014 Sprint C** — Use hardcoded scheduling defaults (no new DB tables), simplified staff notes extractor, E2E gate (upload CSV → call fires → correct script → slot/booking path → DB updated).
+
+**AFTER MVP TEST CALL CONFIRMED:**
+
+4. **Plan 012** — API security hardening before any real clinic uses the system.
+5. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
+6. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
+7. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests.
 
 ---
 
@@ -2179,3 +2188,102 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 - Full transcript retention policy decision
 
 ---
+
+## Plan 014 — MVP Sprint: Test Call by March 27
+**Date:** 2026-03-23
+**Status:** 🔴 ACTIVE — top priority
+**Goal:** Edgar uploads a fake HEDIS CSV → system dials the contact via Retell → agent delivers correct gap-type script → for appointment-based gaps, agent checks slots + books in NextGen → post-call summary stored in DB. No dashboard required — Swagger UI is sufficient.
+
+### What "done" looks like
+
+- [ ] Fake CSV with at least one order-based contact (e.g. `colorectal`) and one appointment-based contact (e.g. `preventive_visit`) uploaded via `POST /campaigns/upload`
+- [ ] Campaign started → worker dials → Retell call connects
+- [ ] Agent says the right script for the gap type (driven by `gap_type` metadata)
+- [ ] `get_available_slots` tool returns real slots from NextGen (or mocked sandbox)
+- [ ] `book_appointment` tool creates the appointment (or mocked)
+- [ ] `call_analyzed` webhook fires → summary stored encrypted in `campaign_audit`
+- [ ] Contact status updated correctly in DB (BOOKED or ORDER_AGREED)
+
+---
+
+### Sprint A — Day 1 (March 23): Enum alignment + schema additions
+**Blocking:** GapType enum has old values; ContactStatus missing statuses; campaign_contact missing columns.
+
+- [ ] **A1:** Replace GapType enum in `data/enums.py` with Plan 013 finalized values:
+  `preventive_visit`, `hospital_flu`, `colorectal`, `eye_exam`, `breast_cancer`,
+  `kidney`, `afr_cmp`, `medication_review` (excluded), `generic`
+- [ ] **A2:** Add missing ContactStatus values: `NOT_YET_ELIGIBLE`, `EXPIRED`, `ORDER_AGREED`, `ORDER_DECLINED`
+- [ ] **A3:** Update CSV alias normalization in `services/csv_parser.py` — alias table from Plan 013 §1 (Claude prompt must map all variants to new enum values; filter out `medication_review`)
+- [ ] **A4:** Alembic migration: rename PG enum values for GapType + add 4 new ContactStatus values
+- [ ] **A5:** Alembic migration: add `release_date DATE nullable` + `priority_order INT default 1` to `campaign_contact` (hospital_flu uses priority_order=0; checked before dialing)
+- [ ] **A6:** Update campaign worker: sort contacts by `priority_order ASC` (hospital_flu first); add `EXPIRED` check — if `gap_type == hospital_flu` and `release_date + 7 days < today` → set status=EXPIRED, skip
+- [ ] **A7:** Write/update tests for new enum values, alias normalization, EXPIRED check
+
+**Hardcoded defaults for MVP (no new DB tables):**
+- Preventive visit eligibility → always use `different_year` rule (appointment just needs to be in a different calendar year)
+- Hospital flu scheduling mode → always use `next_to_followup` (in-person, same hour as existing follow-up)
+- Double-booking enforcement → skipped for MVP (Playwright books whatever slot is available)
+
+---
+
+### Sprint B — Day 2 (March 24): Retell agent playbook + metadata audit
+**Blocking:** Edgar cannot configure the Retell agent without knowing exact URLs, metadata keys, and prompt structure.
+
+- [ ] **B1:** Create `docs/retell_agent_playbook.md` with:
+  - Env vars checklist: `RETELL_API_KEY`, `RETELL_FROM_NUMBER`, `RETELL_WEBHOOK_SECRET`, `APP_BASE_URL`
+  - Retell dashboard webhook URLs (copy-paste): `/retell/webhook/call_started`, `/retell/webhook/call_ended`, `/retell/webhook/call_analyzed`
+  - Custom tool URLs: `POST /retell/tools/get_available_slots`, `POST /retell/tools/book_appointment`
+  - Exact metadata keys the worker sends with each outbound call: `clinic_id`, `campaign_contact_id`, `gap_type`, `patient_name` (for agent greeting), `provider_name` (for context)
+  - Gap-type to script section mapping — which gap types use appointment path vs order path
+  - Agent LLM prompt template: when to call `get_available_slots`, when to call `book_appointment`, when to summarize and end (order-based), timeout note (3 seconds max for slot lookup)
+  - Allowed `gap_type` values (mirror `data/enums.py`) — list all 8
+- [ ] **B2:** Audit `services/retell_client.py` create_outbound_call — confirm all metadata keys in B1 are actually sent; fix any gaps
+- [ ] **B3:** Audit `Routes/retell.py` webhook handlers — confirm `call_started`, `call_ended`, `call_analyzed` extract metadata keys correctly; fix any gaps
+- [ ] **B4:** Confirm `call_analyzed` triggers `call_summarizer.py` correctly; confirm encrypted result persisted to `campaign_audit`
+
+---
+
+### Sprint C — Day 3–4 (March 25–26): Simplified staff notes + E2E gate
+
+- [ ] **C1:** Extend `call_summarizer.py` (or add `call_staff_notes_extractor.py`) — Claude extracts structured output for order-based gaps:
+  ```json
+  {
+    "patient_agreed": true/false,
+    "action_for_staff": "Send colorectal stool kit order",
+    "note": "Patient confirmed mailing address and agreed to receive kit"
+  }
+  ```
+  Encrypt with AES-256-GCM; store in `campaign_audit`. Discard transcript. One-sentence summary still stored for appointment-based gaps.
+
+- [ ] **C2:** E2E gate execution:
+  - Stand up API locally with `docker-compose up` (or Azure staging)
+  - Run DB migrations: `alembic upgrade head`
+  - Configure Retell agent in Retell dashboard using playbook from B1
+  - Create clinic + EHR config via admin API (Swagger UI)
+  - Upload fake CSV with 2–3 contacts (mix of order-based + appointment-based)
+  - Start campaign: `POST /campaigns/{id}/start`
+  - Watch worker log: confirm call initiated, tools invoked, webhooks fire, DB updated
+  - Record result in `PROGRESS.txt` with date + what was exercised
+
+---
+
+### Deferred — post-MVP (do not build this week)
+
+| Item | Deferred to |
+|---|---|
+| `clinic_insurance_rules` table | Plan 013 (post-MVP) |
+| `clinic_scheduling_rules` table | Plan 013 (post-MVP) |
+| Double-booking enforcement in Playwright EHR | Plan 013 (post-MVP) |
+| Insurance year eligibility (one_year_one_day rule) | Plan 013 (post-MVP) |
+| Hospital flu telehealth mode (`telehealth_4_5pm`) | Plan 013 (post-MVP) |
+| PUT /clinics/scheduling-rules + PUT /clinics/insurance-rules | Plan 013 (post-MVP) |
+| React dashboard (Feature 7) | Plan 009 (after MVP + Plan 012) |
+| API security hardening + rate limits | Plan 012 (after MVP test call) |
+| PHI audit, load test, production deploy | Plan 010 (after dashboard) |
+| Super Admin onboarding screen | Plan 013 §9 (after pilot) |
+
+---
+
+*Last updated: 2026-03-23 (MVP sprint reorganization)*
+*Maintained by: Edgar J. Suárez Colón*
+*Next action: **Plan 014 Sprint A** (GapType/ContactStatus enum fixes + hospital_flu schema) → Sprint B (Retell playbook) → Sprint C (E2E gate).*
