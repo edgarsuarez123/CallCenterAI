@@ -25,6 +25,7 @@
 | 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — **last** milestone (after dashboard) |
 | 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | **Active — next to implement** |
 | 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — **after Plan 011 E2E**; **before Plan 009** (dashboard) |
+| 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Active — decisions recorded; schema + code changes needed before Plan 009 |
 
 ### Implementation order (current)
 
@@ -1886,6 +1887,295 @@ The browser UI will increase **attack surface** (CORS, credential handling, traf
 
 ---
 
-*Last updated: 2026-03-23*  
-*Maintained by: Edgar J. Suárez Colón*  
+*Last updated: 2026-03-23*
+*Maintained by: Edgar J. Suárez Colón*
 *Next action: Plan 011 (E2E gate) → Plan 012 (security + rate limits) → Plan 009 (dashboard) → Plan 010 (onboarding).*
+
+---
+
+## Plan 013 — Business Logic Decisions: Gap Types, Scheduling Rules, Schema Additions
+**Date:** 2026-03-23
+**Status:** Active — decisions finalized; schema migrations + code changes required before Plan 009 dashboard can be built
+**Source:** Handwritten notes + Edgar decisions made 2026-03-23
+
+### What Was Decided
+
+A comprehensive set of business logic decisions was finalized covering: HEDIS gap type taxonomy, CSV alias normalization, double-booking rules, hospital flu scheduling modes, preventive visit insurance year rules, two new DB tables, new columns on `campaign_contact`, new API endpoints, new contact statuses, dashboard additions, and the Super Admin onboarding screen. All decisions recorded below as authoritative source of truth.
+
+---
+
+### 1. HEDIS Gap Type Taxonomy (Finalized)
+
+#### Appointment-Based (Playwright books in NextGen)
+| Enum value | Description | Notes |
+|---|---|---|
+| `preventive_visit` | Annual preventive / wellness visit | Insurance year rule applies |
+| `hospital_flu` | Hospital follow-up within 7 days of discharge | **Priority queue** — always called first (`priority_order = 0`) |
+
+#### Order-Based (call summary only — clinic admin sends order manually)
+| Enum value | Description |
+|---|---|
+| `colorectal` | Colorectal cancer screening / stool test |
+| `eye_exam` | Eye exam / retinal exam |
+| `breast_cancer` | Breast cancer screening / mammogram |
+| `kidney` | Kidney function lab |
+| `afr_cmp` | Albumin/creatinine ratio + urinalysis |
+
+#### Excluded (filtered at CSV parse — never enters campaign queue)
+| Enum value | Action |
+|---|---|
+| `medication_review` | Filtered out — never called |
+
+#### Fallback
+| Enum value | Action |
+|---|---|
+| `generic` | Any unrecognized gap type value — order-based script |
+
+**There is NO `a1c` gap type.** What appeared as A1C in notes was the preventive visit timing rule.
+
+#### CSV Alias Normalization (Claude must recognize all variants)
+
+| CSV value(s) | Normalized to |
+|---|---|
+| Preventive visit, Annual wellness, AWV, Yearly checkup | `preventive_visit` |
+| Hospital follow-up, Hospital flu, Hosp flu, Post-hospital, Discharge follow-up | `hospital_flu` |
+| Colorectal, CRC, Colonoscopy, Stool test, FIT | `colorectal` |
+| Eye exam, Eye, Vision, Ophthalmology, Retinal exam | `eye_exam` |
+| Breast cancer, Breast cancer screening, Mammogram, BSE | `breast_cancer` |
+| Kidney, Kidney function, CKD, Renal | `kidney` |
+| AFR/CMP, Albumin creatinine, Alb/Cr ratio, urine albumin, bw/uA | `afr_cmp` |
+| Medication review, Med review, Medication management | `medication_review` (EXCLUDED) |
+| Anything else | `generic` |
+
+---
+
+### 2. Double Booking Rules
+
+- Only 1 appointment per hour slot max.
+- Cannot double book restricted type pairs in the same hour.
+- Only follow-up appointments can share a slot with restricted types.
+- HEDIS patients are never new patients — "new patient" matters only when Playwright reads existing slots.
+
+#### Default Combination Flags (all configurable per clinic)
+
+| Pair | Default |
+|---|---|
+| `preventive` + `follow-up` | ALLOWED (true) |
+| `preventive` + `hospital_flu` | BLOCKED (false) |
+| `preventive` + `new_patient` | BLOCKED (false) |
+| `hospital_flu` + `follow-up` | ALLOWED (true) |
+| `hospital_flu` + `new_patient` | BLOCKED (false) |
+| `new_patient` + `follow-up` | ALLOWED (true) |
+
+Stored as 6 boolean flags in `clinic_scheduling_rules`. Clinic Admin can modify anytime. `updated_by` tracks who last changed rules.
+
+---
+
+### 3. Hospital Flu — Scheduling Rules
+
+**7-day deadline:** `release_date` comes from CSV. `deadline = release_date + 7 days`. Worker checks before dialing — if `deadline < today` → `status = EXPIRED` → never call.
+
+**Two scheduling modes** (determined by insurance plan in `clinic_insurance_rules`):
+
+| Mode | Slots | Constraint |
+|---|---|---|
+| `telehealth_4_5pm` | Telehealth only | Within `hospital_flu_telehealth_start`–`hospital_flu_telehealth_end` (clinic timezone). Only on configured days. |
+| `next_to_followup` | In-person only | Must be in same hour as existing follow-up already in NextGen. Only on configured in-person days. |
+
+If payer not configured → default to `next_to_followup` + flag for review.
+
+Days and time window are fully configurable per clinic (stored in `clinic_scheduling_rules`).
+
+---
+
+### 4. Preventive Visit — Insurance Year Rules
+
+**Two rules** (determined by insurance plan in `clinic_insurance_rules`):
+
+| Rule | Logic |
+|---|---|
+| `different_year` | Appointment just needs to be in a different calendar year from last preventive visit |
+| `one_year_one_day` | Appointment must be 366+ days from last visit date |
+
+**Last visit date** is NOT in the CSV — Playwright looks it up in NextGen via AgentQL. Cached in Redis: `clinic_id:phone_hash:last_visit`, 24-hour TTL.
+
+If payer not configured → default to `different_year` + flag for review.
+
+If not yet eligible → agent tells patient earliest eligible date → `status = NOT_YET_ELIGIBLE` (terminal, no retry).
+
+---
+
+### 5. New Database Tables
+
+#### `clinic_insurance_rules`
+```
+id                  UUID PK
+clinic_id           UUID FK → clinic
+payer_name          VARCHAR(255)
+preventive_rule     ENUM(different_year, one_year_one_day)
+hospital_flu_rule   ENUM(telehealth_4_5pm, next_to_followup)
+active              BOOLEAN default true
+updated_at          TIMESTAMPTZ
+```
+
+#### `clinic_scheduling_rules`
+```
+id                                   UUID PK
+clinic_id                            UUID FK → clinic  UNIQUE
+
+-- Double booking combination flags
+allow_preventive_with_followup       BOOLEAN default true
+allow_preventive_with_hospital_flu   BOOLEAN default false
+allow_preventive_with_new_patient    BOOLEAN default false
+allow_hospital_flu_with_followup     BOOLEAN default true
+allow_hospital_flu_with_new_patient  BOOLEAN default false
+allow_new_patient_with_followup      BOOLEAN default true
+
+-- Hospital flu telehealth time window (clinic timezone)
+hospital_flu_telehealth_start        TIME default 16:00
+hospital_flu_telehealth_end          TIME default 17:00
+
+-- Hospital flu telehealth days (7 booleans)
+hospital_flu_telehealth_mon          BOOLEAN default false
+hospital_flu_telehealth_tue          BOOLEAN default false
+hospital_flu_telehealth_wed          BOOLEAN default false
+hospital_flu_telehealth_thu          BOOLEAN default false
+hospital_flu_telehealth_fri          BOOLEAN default true
+hospital_flu_telehealth_sat          BOOLEAN default false
+hospital_flu_telehealth_sun          BOOLEAN default false
+
+-- Hospital flu in-person days (7 booleans)
+hospital_flu_inperson_mon            BOOLEAN default true
+hospital_flu_inperson_tue            BOOLEAN default true
+hospital_flu_inperson_wed            BOOLEAN default true
+hospital_flu_inperson_thu            BOOLEAN default true
+hospital_flu_inperson_fri            BOOLEAN default true
+hospital_flu_inperson_sat            BOOLEAN default false
+hospital_flu_inperson_sun            BOOLEAN default false
+
+updated_at                           TIMESTAMPTZ
+updated_by                           UUID FK → clinic_staff.id  NULLABLE
+```
+
+#### New columns on `campaign_contact`
+```
+release_date     DATE      Nullable — hospital_flu only — from CSV
+priority_order   INTEGER   hospital_flu = 0; all others = CSV row order
+```
+
+---
+
+### 6. New Contact Statuses
+
+| Status | Category | Meaning |
+|---|---|---|
+| `NOT_YET_ELIGIBLE` | Terminal | Preventive patient not eligible per insurance year rule — agent told patient earliest eligible date |
+| `EXPIRED` | Terminal | Hospital flu 7-day deadline passed before call — worker never dials |
+| `ORDER_AGREED` | Terminal | Order-based gap — patient verbally agreed — clinic admin sends order |
+| `ORDER_DECLINED` | Terminal | Order-based gap — patient declined |
+
+---
+
+### 7. New API Endpoints
+
+```
+PUT /clinics/scheduling-rules
+    Auth: Clinic Admin JWT (own clinic only)
+    Body: 6 combination flags + telehealth window + 14 day booleans
+
+PUT /clinics/insurance-rules
+    Auth: Clinic Admin JWT (own clinic only)
+    Body: array of { payer_name, preventive_rule, hospital_flu_rule, active }
+
+PUT /admin/clinics/{id}/scheduling-rules
+    Auth: X-Admin-Key
+    Same body — Super Admin modifies any clinic
+
+PUT /admin/clinics/{id}/insurance-rules
+    Auth: X-Admin-Key
+    Same body — Super Admin modifies any clinic
+```
+
+---
+
+### 8. Dashboard Updates (extends Plan 009)
+
+**New status colors:**
+- Orange → `ORDER_AGREED` — "Send Order" indicator shown next to row
+- Purple → `NOT_YET_ELIGIBLE`
+- Red → also covers `EXPIRED` (added to existing red group)
+
+**New urgent badge:** `🔴 URGENT` on `hospital_flu` contacts with ≤ 2 days before 7-day deadline. Shows days-remaining counter next to patient name.
+
+**New column on patient table:**
+- `Summary` — one-sentence Claude-generated description of what patient said
+
+**New Settings screen (sidebar):**
+- Section 1: Double Booking Rules — 6 toggles, Clinic Admin editable / Clinic Staff read-only
+- Section 2: Hospital Follow-Up Telehealth — 7 day checkboxes + start/end time pickers (clinic timezone)
+- Section 3: Hospital Follow-Up In-Person — 7 day checkboxes
+- [Save Changes] → `PUT /clinics/scheduling-rules`
+- Shows: "Last updated [date] by [staff name]" or "by System" if Super Admin changed it
+
+---
+
+### 9. Super Admin Onboarding Screen (Post-Pilot)
+
+**When:** Build after first clinic onboarded manually during pilot.
+**Why deferred:** Learn what the screen needs from doing it manually first.
+**Tool:** Plain HTML form served from FastAPI — no separate frontend build.
+**Auth:** Protected by `X-Admin-Key` — never linked from clinic dashboard.
+**URL:** `/admin/onboard`
+
+**Steps (in order, one transaction on submit):**
+1. Clinic creation — name, location, timezone, phone
+2. Staff entry — email + role (clinic_admin / clinic_staff / provider), multiple rows
+3. EHR config — NextGen URL, credentials, Retell agent ID, from number, concurrency limit, calling hours, timezone, retry hours
+4. Test Connection button — hits `POST /admin/clinics/{id}/ehr-test` inline; shows green/red without leaving page; must pass
+5. Appointment type codes — one row per appointment-based gap type (`preventive_visit`, `hospital_flu` only); NextGen code per gap
+6. Scheduling rules — 6 combination toggles + telehealth window + 14 day checkboxes
+7. Insurance rules — one row per payer; dropdowns for `preventive_rule` and `hospital_flu_rule`
+8. Submit all — single transaction
+9. Success screen — shows `clinic_id` + staff login instructions to send to clinic
+
+**Deferred:** Self-service signup, billing UI, offboarding flow.
+
+**Payment model (decided):** Invoice only — no Stripe. QuickBooks / Wave / PDF invoices. ACH, check, or payment link. Only automate billing when clinic count > ~20.
+
+---
+
+### 10. Open Question — `updated_by` When Super Admin Acts
+
+When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / no `clinic_staff.id`):
+
+- **Option A:** Store `null` → dashboard shows "Last updated [date] by System"
+- **Option B:** Create a Super Admin record in `clinic_staff` table → link to it
+
+**NOT DECIDED YET** — must resolve before writing the Alembic migration for `clinic_scheduling_rules`.
+
+---
+
+### Implementation Steps (Plan 013)
+
+- [ ] Resolve open question: `updated_by = null vs. Super Admin staff record`
+- [ ] Add `GapType` enum values to `data/enums.py` (ensure all 8 values + `generic` present; remove any `a1c` reference)
+- [ ] Update CSV parser alias normalization map in `services/csv_parser.py` (or equivalent)
+- [ ] Alembic: create `clinic_insurance_rules` table
+- [ ] Alembic: create `clinic_scheduling_rules` table
+- [ ] Alembic: add `release_date` + `priority_order` columns to `campaign_contact`
+- [ ] Add `NOT_YET_ELIGIBLE`, `EXPIRED`, `ORDER_AGREED`, `ORDER_DECLINED` to `ContactStatus` enum + migration
+- [ ] Add SQLAlchemy models for new tables
+- [ ] Implement `PUT /clinics/scheduling-rules` and `PUT /clinics/insurance-rules`
+- [ ] Implement `PUT /admin/clinics/{id}/scheduling-rules` and `PUT /admin/clinics/{id}/insurance-rules`
+- [ ] Update campaign worker: `hospital_flu` priority sort + `EXPIRED` check before dialing
+- [ ] Update EHR/Playwright layer: double booking check against `clinic_scheduling_rules`
+- [ ] Update EHR/Playwright layer: preventive visit eligibility check + Redis cache for last visit date
+- [ ] Update EHR/Playwright layer: hospital flu mode dispatch (`telehealth_4_5pm` vs `next_to_followup`)
+- [ ] Tests: new enums, CSV alias normalization, scheduling rule endpoints, eligibility logic, expiry check
+
+### Deferred
+- Super Admin onboarding screen (`/admin/onboard`) — after pilot
+- Stripe / billing automation — when clinic count > ~20
+- Full transcript retention policy decision
+
+---
