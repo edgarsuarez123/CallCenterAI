@@ -27,7 +27,7 @@ import anthropic
 import openpyxl
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from Clinic_app.data.enums import GapType
+from Clinic_app.data.enums import GapType, APPOINTMENT_BASED_GAP_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ NORMALIZED_FIELD_NAMES = {
     "patient_dob",
     "provider_name",
     "payer",
+    "release_date",  # hospital_flu only: date of hospital discharge (YYYY-MM-DD)
     "ignore",
 }
 
@@ -60,10 +61,19 @@ object that:
 
 2. For gap_type values found in the data rows, provides a "gap_type_values" mapping
    from raw strings to one of these standard codes:
-   colorectal_cancer_screening, breast_cancer_screening, cervical_cancer_screening,
-   diabetes_hba1c, diabetes_eye_exam, diabetes_nephropathy, hypertension_control,
-   depression_screening, well_child_visit, adolescent_well_care, adult_bmi_assessment,
-   medication_adherence_diabetes, medication_adherence_hypertension, other
+   preventive_visit, hospital_flu, colorectal, eye_exam, breast_cancer,
+   kidney, afr_cmp, medication_review, generic
+
+   Alias guide (non-exhaustive):
+   - "Preventive visit", "Annual wellness", "AWV", "Yearly checkup"  →  preventive_visit
+   - "Hospital follow-up", "Hospital flu", "Hosp flu", "Post-hospital", "Discharge follow-up"  →  hospital_flu
+   - "Colorectal", "CRC", "Colonoscopy", "Stool test", "FIT"  →  colorectal
+   - "Eye exam", "Eye", "Vision", "Ophthalmology", "Retinal exam"  →  eye_exam
+   - "Breast cancer", "Breast cancer screening", "Mammogram", "BSE"  →  breast_cancer
+   - "Kidney", "Kidney function", "CKD", "Renal"  →  kidney
+   - "AFR/CMP", "Albumin creatinine", "Alb/Cr ratio", "urine albumin", "bw/uA"  →  afr_cmp
+   - "Medication review", "Med review", "Medication management"  →  medication_review
+   - Anything unrecognized  →  generic
 
 Return ONLY a valid JSON object. No explanation, no markdown. Example:
 {
@@ -78,9 +88,9 @@ Return ONLY a valid JSON object. No explanation, no markdown. Example:
     "Plan ID": "ignore"
   },
   "gap_type_values": {
-    "COL": "colorectal_cancer_screening",
-    "PREV": "colorectal_cancer_screening",
-    "DM_A1C": "diabetes_hba1c"
+    "COL": "colorectal",
+    "PREV": "preventive_visit",
+    "HOSP FLU": "hospital_flu"
   }
 }
 """
@@ -90,14 +100,15 @@ Return ONLY a valid JSON object. No explanation, no markdown. Example:
 @dataclass
 class ParsedRow:
     """A normalized, validated patient row ready for campaign ingestion."""
-    phone_e164: str             # E.164 format, e.g. "+17875551234"
+    phone_e164: str              # E.164 format, e.g. "+17875551234"
     gap_type: GapType
-    language: str               # "en" | "es" | other BCP-47 code
+    language: str                # "en" | "es" | other BCP-47 code
     patient_name: Optional[str] = None   # Encrypted at campaign ingest
     patient_dob: Optional[str] = None    # Encrypted at campaign ingest
     provider_name: Optional[str] = None  # Plain text — Retell metadata
     payer: Optional[str] = None          # Plain text — Retell metadata
-    raw_row_number: int = 0     # 1-indexed row number in original file (for error reporting)
+    release_date: Optional[str] = None   # hospital_flu only: discharge date ISO string (YYYY-MM-DD)
+    raw_row_number: int = 0      # 1-indexed row number in original file (for error reporting)
 
 
 @dataclass
@@ -118,6 +129,7 @@ class ColumnMapping:
     dob_col: Optional[str]
     provider_col: Optional[str]
     payer_col: Optional[str]
+    release_date_col: Optional[str]   # hospital_flu discharge date column
     gap_type_values: dict[str, str]   # raw gap type string → GapType.value
 
 
@@ -205,6 +217,7 @@ def _build_column_mapping(claude_response: dict, header_row: list[str]) -> Colum
         dob_col=find_col("patient_dob"),
         provider_col=find_col("provider_name"),
         payer_col=find_col("payer"),
+        release_date_col=find_col("release_date"),
         gap_type_values=gap_type_vals,
     )
 
@@ -214,14 +227,14 @@ def _build_column_mapping(claude_response: dict, header_row: list[str]) -> Colum
 def map_gap_type(raw: str, gap_type_values: dict[str, str]) -> GapType:
     """
     Map a raw gap type string to a GapType enum value using Claude's mapping.
-    Falls back to GapType.OTHER if not found — never raises.
+    Falls back to GapType.GENERIC if not found — never raises.
     """
     normalized = gap_type_values.get(raw, raw)
     try:
         return GapType(normalized)
     except ValueError:
-        logger.warning(f"Unknown gap type value {raw!r} → defaulting to GapType.OTHER")
-        return GapType.OTHER
+        logger.warning(f"Unknown gap type value {raw!r} → defaulting to GapType.GENERIC")
+        return GapType.GENERIC
 
 
 # ── Delimiter detection ────────────────────────────────────────────────────────
@@ -345,6 +358,7 @@ def parse_file(
         raw_dob = row.get(mapping.dob_col, "").strip() if mapping.dob_col else None
         raw_provider = row.get(mapping.provider_col, "").strip() if mapping.provider_col else None
         raw_payer = row.get(mapping.payer_col, "").strip() if mapping.payer_col else None
+        raw_release_date = row.get(mapping.release_date_col, "").strip() if mapping.release_date_col else None
 
         try:
             phone_e164 = normalize_phone(raw_phone)
@@ -357,6 +371,12 @@ def parse_file(
             continue
 
         gap_type = map_gap_type(raw_gap, mapping.gap_type_values)
+
+        # medication_review is always excluded — never enters the campaign queue
+        if gap_type == GapType.MEDICATION_REVIEW:
+            logger.info(f"Row {idx}: medication_review excluded per taxonomy — skipping")
+            continue
+
         language = raw_lang if raw_lang else "en"
 
         parsed_rows.append(ParsedRow(
@@ -367,6 +387,7 @@ def parse_file(
             patient_dob=raw_dob or None,
             provider_name=raw_provider or None,
             payer=raw_payer or None,
+            release_date=raw_release_date or None,
             raw_row_number=idx,
         ))
 
