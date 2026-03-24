@@ -28,7 +28,7 @@ def _make_integration():
     return ci
 
 
-def _make_row(phone: str = "+17875551234", gap: GapType = GapType.COLORECTAL_CANCER_SCREENING):
+def _make_row(phone: str = "+17875551234", gap: GapType = GapType.COLORECTAL):
     return ParsedRow(
         phone_e164=phone,
         gap_type=gap,

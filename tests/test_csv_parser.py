@@ -33,10 +33,10 @@ MOCK_CLAUDE_RESPONSE = {
         "Plan ID": "ignore",
     },
     "gap_type_values": {
-        "COL": "colorectal_cancer_screening",
-        "DM_A1C": "diabetes_hba1c",
-        "HBP": "hypertension_control",
-        "PREV": "colorectal_cancer_screening",
+        "COL": "colorectal",
+        "DM_A1C": "kidney",
+        "HBP": "eye_exam",
+        "PREV": "preventive_visit",
     },
 }
 
@@ -91,18 +91,18 @@ class TestNormalizePhone:
 @pytest.mark.unit
 class TestMapGapType:
     def test_known_mapping(self):
-        mapping = {"COL": "colorectal_cancer_screening"}
-        assert map_gap_type("COL", mapping) == GapType.COLORECTAL_CANCER_SCREENING
+        mapping = {"COL": "colorectal"}
+        assert map_gap_type("COL", mapping) == GapType.COLORECTAL
 
     def test_direct_enum_value(self):
         # Raw value is already a valid GapType enum value
-        assert map_gap_type("diabetes_hba1c", {}) == GapType.DIABETES_HBA1C
+        assert map_gap_type("kidney", {}) == GapType.KIDNEY
 
-    def test_unknown_falls_back_to_other(self):
-        assert map_gap_type("UNKNOWN_MEASURE_XYZ", {}) == GapType.OTHER
+    def test_unknown_falls_back_to_generic(self):
+        assert map_gap_type("UNKNOWN_MEASURE_XYZ", {}) == GapType.GENERIC
 
-    def test_empty_falls_back_to_other(self):
-        assert map_gap_type("", {}) == GapType.OTHER
+    def test_empty_falls_back_to_generic(self):
+        assert map_gap_type("", {}) == GapType.GENERIC
 
 
 # ── _detect_delimiter ──────────────────────────────────────────────────────────
@@ -181,10 +181,10 @@ class TestParseCSV:
         assert len(rows) == 2
         assert len(errors) == 0
         assert rows[0].phone_e164 == "+17875551234"
-        assert rows[0].gap_type == GapType.COLORECTAL_CANCER_SCREENING
+        assert rows[0].gap_type == GapType.COLORECTAL
         assert rows[0].language == "es"
         assert rows[0].patient_name == "Juan Perez"
-        assert rows[1].gap_type == GapType.DIABETES_HBA1C
+        assert rows[1].gap_type == GapType.KIDNEY
 
     @patch("Clinic_app.services.csv_parser._get_anthropic_client")
     def test_bad_phone_goes_to_errors_not_raises(self, mock_get_client):
@@ -199,7 +199,7 @@ class TestParseCSV:
         assert "NOT_A_PHONE" in errors[0].reason or errors[0].row_number == 2
 
     @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_unrecognized_gap_type_maps_to_other(self, mock_get_client):
+    def test_unrecognized_gap_type_maps_to_generic(self, mock_get_client):
         mock_get_client.return_value = _make_mock_anthropic()
         csv_bytes = self._make_csv([
             {"Member Phone": "7875551234", "HEDIS Measure": "UNKNOWN_GAP", "Language": "en",
@@ -207,7 +207,7 @@ class TestParseCSV:
         ])
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 1
-        assert rows[0].gap_type == GapType.OTHER
+        assert rows[0].gap_type == GapType.GENERIC
 
     def test_empty_file_raises(self):
         with pytest.raises(ValueError, match="empty"):
@@ -266,7 +266,7 @@ class TestParseExcel:
         rows, errors = parse_file(xlsx_bytes, filename="patients.xlsx")
         assert len(rows) == 1
         assert rows[0].phone_e164 == "+17875551234"
-        assert rows[0].gap_type == GapType.COLORECTAL_CANCER_SCREENING
+        assert rows[0].gap_type == GapType.COLORECTAL
 
     def test_empty_xlsx_raises(self):
         import openpyxl, io

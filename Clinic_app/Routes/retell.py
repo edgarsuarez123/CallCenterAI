@@ -30,10 +30,18 @@ from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.models.campaign import Campaign
 from Clinic_app.data.models.campaign_contact import CampaignContact
 from Clinic_app.data.models.campaign_audit import CampaignAudit
-from Clinic_app.data.enums import BookingStatus, ContactStatus, CampaignStatus
+from Clinic_app.data.enums import (
+    BookingStatus,
+    ContactStatus,
+    CampaignStatus,
+    ORDER_BASED_GAP_TYPES,
+)
 from Clinic_app.common.encryption import encrypt_phi
 from Clinic_app.services.campaign_service import maybe_mark_campaign_completed
-from Clinic_app.services.call_summarizer import summarize_transcript_sync
+from Clinic_app.services.call_summarizer import (
+    extract_order_based_notes_sync,
+    summarize_transcript_sync,
+)
 from Clinic_app.services.patient import find_patient, create_patient
 from Clinic_app.services.availability import (
     get_available_slots,
@@ -1349,6 +1357,11 @@ def _extract_transcript_for_summary(call_obj: Dict[str, Any]) -> str:
     return ""
 
 
+def _gap_type_is_order_based(gap_type_str: str) -> bool:
+    """True if this gap uses order-based flow (kit/order; no EHR appointment)."""
+    return gap_type_str in {gt.value for gt in ORDER_BASED_GAP_TYPES}
+
+
 def _transcript_requests_human(transcript: str) -> bool:
     t = transcript.lower()
     return any(
@@ -1399,6 +1412,7 @@ async def _apply_hedis_call_ended(
 
     has_appt = bool(contact.ehr_appointment_id and str(contact.ehr_appointment_id).strip())
     outcome = _map_disconnection_to_outcome(webhook.disconnection_reason, has_appt)
+    is_order_based = contact.gap_type in {gt.value for gt in ORDER_BASED_GAP_TYPES}
     now = datetime.now(timezone.utc)
 
     if outcome in (
@@ -1426,9 +1440,14 @@ async def _apply_hedis_call_ended(
         contact.next_attempt_after = None
         campaign.booked_count = (campaign.booked_count or 0) + 1
     elif outcome == ContactStatus.DECLINED:
-        contact.status = ContactStatus.DECLINED.value
+        # Order-based gaps have no EHR appointment; normal hangup maps to DECLINED here.
+        # Optimistic ORDER_AGREED until Sprint C transcript extraction can set ORDER_DECLINED.
+        if is_order_based:
+            contact.status = ContactStatus.ORDER_AGREED.value
+        else:
+            contact.status = ContactStatus.DECLINED.value
+            campaign.failed_count = (campaign.failed_count or 0) + 1
         contact.next_attempt_after = None
-        campaign.failed_count = (campaign.failed_count or 0) + 1
     else:
         contact.status = outcome.value
         contact.next_attempt_after = None
@@ -1764,8 +1783,10 @@ async def webhook_call_analyzed(
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, str]:
     """
-    Post-call analysis: one-sentence Claude summary + CampaignAudit row for HEDIS campaigns.
-    Raw transcript is not persisted.
+    Post-call analysis: Claude summary + CampaignAudit row for HEDIS campaigns.
+
+    Order-based gaps use structured extraction (note stored encrypted); appointment-based
+    gaps use a one-sentence summary. Raw transcript is not persisted.
     """
     body_bytes = await request.body()
     await verify_retell_signature(request, body_bytes)
@@ -1799,23 +1820,48 @@ async def webhook_call_analyzed(
         return {"status": "ok", "error": "contact not found"}
 
     transcript = _extract_transcript_for_summary(call_obj)
-    try:
-        summary = await asyncio.to_thread(
-            summarize_transcript_sync,
-            transcript,
-            contact.gap_type,
-        )
-    except Exception as exc:
-        logger.error("call_analyzed Claude summary failed: %s", exc, exc_info=True)
-        summary = "Call summary unavailable."
+
+    summary: str
+    if _gap_type_is_order_based(contact.gap_type):
+        try:
+            notes = await asyncio.to_thread(
+                extract_order_based_notes_sync,
+                transcript,
+                contact.gap_type,
+            )
+        except Exception as exc:
+            logger.error(
+                "call_analyzed Claude order-notes extraction failed: %s",
+                exc,
+                exc_info=True,
+            )
+            notes = {
+                "patient_agreed": None,
+                "action_for_staff": "",
+                "note": "Call summary unavailable.",
+            }
+        summary = notes["note"]
+        pa = notes["patient_agreed"]
+        if pa is False and contact.status == ContactStatus.ORDER_AGREED.value:
+            contact.status = ContactStatus.ORDER_DECLINED.value
+        # pa is True: keep optimistic ORDER_AGREED from call_ended; pa is None: unchanged
+    else:
+        try:
+            summary = await asyncio.to_thread(
+                summarize_transcript_sync,
+                transcript,
+                contact.gap_type,
+            )
+        except Exception as exc:
+            logger.error("call_analyzed Claude summary failed: %s", exc, exc_info=True)
+            summary = "Call summary unavailable."
 
     pname = meta.get("patient_name")
     name_enc = encrypt_phi(str(pname)) if pname else None
     summary_enc = encrypt_phi(summary)
 
-    if (
-        contact.status == ContactStatus.DECLINED.value
-        and _transcript_requests_human(transcript)
+    if _transcript_requests_human(transcript) and contact.status not in (
+        ContactStatus.BOOKED.value,
     ):
         contact.status = ContactStatus.HUMAN_REQUESTED.value
 

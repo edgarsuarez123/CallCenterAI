@@ -24,9 +24,9 @@ class TestApptTypesPutRequest:
         from Clinic_app.Routes.admin import ApptTypesPutRequest
 
         m = ApptTypesPutRequest(
-            mapping={"colorectal_cancer_screening": "PREV", "diabetes_hba1c": "DM1"}
+            mapping={"colorectal": "FIT", "kidney": "DM1"}
         )
-        assert m.mapping["colorectal_cancer_screening"] == "PREV"
+        assert m.mapping["colorectal"] == "FIT"
 
 
 @pytest.mark.unit
@@ -38,7 +38,7 @@ class TestGetEhrConfigHandler:
         cid = uuid.uuid4()
         mock_row = MagicMock()
         mock_row.nextgen_url = "https://nextgen.example/"
-        mock_row.appt_type_mapping = {"colorectal_cancer_screening": "PREV"}
+        mock_row.appt_type_mapping = {"colorectal": "FIT"}
         mock_row.connection_verified_at = None
         mock_row.created_at = datetime.now(timezone.utc)
         mock_row.updated_at = datetime.now(timezone.utc)

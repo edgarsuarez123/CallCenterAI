@@ -2,7 +2,7 @@
 """
 Unit tests for Feature 2 enums.
 Validates that all enum values match the PRD spec and that critical
-members exist (e.g., GapType.OTHER fallback for Claude CSV parsing).
+members exist (e.g., GapType.GENERIC fallback for Claude CSV parsing).
 """
 import pytest
 from Clinic_app.data.enums import (

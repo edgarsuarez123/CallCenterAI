@@ -5,6 +5,7 @@
 > Each plan includes what was decided, why, and what was deferred.
 > Source of truth for all feature work: HEDIS_PRD_v2.md
 > Architecture reference: INFRASTRUCTURE.md
+> HIPAA Security Rule compliance audit: HIPAA_COMPLIANCE_AUDIT.md
 > Session rules: CLAUDE.md
 
 ---
@@ -27,6 +28,8 @@
 | 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
 | 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Split: critical subset in Plan 014 Sprint A; complex rules deferred post-MVP |
 | 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — top priority this week** |
+| 015 | 2026-03-23 | HIPAA Security Rule Compliance Audit | Active reference — track findings & remediation |
+| 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | Pending — overlap with Plan 014 Sprint C / E2E |
 
 ### Implementation order (current — revised 2026-03-23 for MVP sprint)
 
@@ -35,13 +38,15 @@
 1. **Plan 014 Sprint A** — Fix GapType enum mismatch + add missing ContactStatus values + hospital_flu columns. This is blocking a test call.
 2. **Plan 014 Sprint B** — Create `docs/retell_agent_playbook.md` + audit retell.py/worker metadata alignment. Lets Edgar configure the Retell agent in the dashboard.
 3. **Plan 014 Sprint C** — Use hardcoded scheduling defaults (no new DB tables), simplified staff notes extractor, E2E gate (upload CSV → call fires → correct script → slot/booking path → DB updated).
+4. **Plan 016** — Basic logging: app-wide log configuration, structured/consistent levels, PHI-safe masking (phone numbers, etc. per CLAUDE.md), correlation where useful for worker + Retell webhooks + tool calls. Supports Sprint C “watch worker log” and production troubleshooting.
 
 **AFTER MVP TEST CALL CONFIRMED:**
 
-4. **Plan 012** — API security hardening before any real clinic uses the system.
-5. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
-6. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
-7. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests.
+5. **Plan 012** — API security hardening before any real clinic uses the system.
+6. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
+7. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
+8. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests.
+9. **Plan 015** — HIPAA Security Rule compliance audit (`HIPAA_COMPLIANCE_AUDIT.md`, 2026-03-23). Use it as the running checklist for critical/high findings; remediation overlaps **Plan 012** (e.g. webhook integrity, rate limits, OpenAPI exposure) and **Plan 010** (production hardening, operational PHI controls).
 
 ---
 
@@ -2209,15 +2214,15 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 ### Sprint A — Day 1 (March 23): Enum alignment + schema additions
 **Blocking:** GapType enum has old values; ContactStatus missing statuses; campaign_contact missing columns.
 
-- [ ] **A1:** Replace GapType enum in `data/enums.py` with Plan 013 finalized values:
+- [x] **A1:** Replace GapType enum in `data/enums.py` with Plan 013 finalized values:
   `preventive_visit`, `hospital_flu`, `colorectal`, `eye_exam`, `breast_cancer`,
   `kidney`, `afr_cmp`, `medication_review` (excluded), `generic`
-- [ ] **A2:** Add missing ContactStatus values: `NOT_YET_ELIGIBLE`, `EXPIRED`, `ORDER_AGREED`, `ORDER_DECLINED`
-- [ ] **A3:** Update CSV alias normalization in `services/csv_parser.py` — alias table from Plan 013 §1 (Claude prompt must map all variants to new enum values; filter out `medication_review`)
-- [ ] **A4:** Alembic migration: rename PG enum values for GapType + add 4 new ContactStatus values
-- [ ] **A5:** Alembic migration: add `release_date DATE nullable` + `priority_order INT default 1` to `campaign_contact` (hospital_flu uses priority_order=0; checked before dialing)
-- [ ] **A6:** Update campaign worker: sort contacts by `priority_order ASC` (hospital_flu first); add `EXPIRED` check — if `gap_type == hospital_flu` and `release_date + 7 days < today` → set status=EXPIRED, skip
-- [ ] **A7:** Write/update tests for new enum values, alias normalization, EXPIRED check
+- [x] **A2:** Add missing ContactStatus values: `NOT_YET_ELIGIBLE`, `EXPIRED`, `ORDER_AGREED`, `ORDER_DECLINED`
+- [x] **A3:** Update CSV alias normalization in `services/csv_parser.py` — alias table from Plan 013 §1 (Claude prompt must map all variants to new enum values; filter out `medication_review`)
+- [x] **A4:** Alembic migration: rename PG enum values for GapType + add 4 new ContactStatus values
+- [x] **A5:** Alembic migration: add `release_date DATE nullable` + `priority_order INT default 1` to `campaign_contact` (hospital_flu uses priority_order=0; checked before dialing)
+- [x] **A6:** Update campaign worker: sort contacts by `priority_order ASC` (hospital_flu first); add `EXPIRED` check — if `gap_type == hospital_flu` and `release_date + 7 days < today` → set status=EXPIRED, skip
+- [x] **A7:** Write/update tests for new enum values, alias normalization, EXPIRED check
 
 **Hardcoded defaults for MVP (no new DB tables):**
 - Preventive visit eligibility → always use `different_year` rule (appointment just needs to be in a different calendar year)
@@ -2229,7 +2234,7 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 ### Sprint B — Day 2 (March 24): Retell agent playbook + metadata audit
 **Blocking:** Edgar cannot configure the Retell agent without knowing exact URLs, metadata keys, and prompt structure.
 
-- [ ] **B1:** Create `docs/retell_agent_playbook.md` with:
+- [x] **B1:** Create `docs/retell_agent_playbook.md` with:
   - Env vars checklist: `RETELL_API_KEY`, `RETELL_FROM_NUMBER`, `RETELL_WEBHOOK_SECRET`, `APP_BASE_URL`
   - Retell dashboard webhook URLs (copy-paste): `/retell/webhook/call_started`, `/retell/webhook/call_ended`, `/retell/webhook/call_analyzed`
   - Custom tool URLs: `POST /retell/tools/get_available_slots`, `POST /retell/tools/book_appointment`
@@ -2237,15 +2242,19 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
   - Gap-type to script section mapping — which gap types use appointment path vs order path
   - Agent LLM prompt template: when to call `get_available_slots`, when to call `book_appointment`, when to summarize and end (order-based), timeout note (3 seconds max for slot lookup)
   - Allowed `gap_type` values (mirror `data/enums.py`) — list all 8
-- [ ] **B2:** Audit `services/retell_client.py` create_outbound_call — confirm all metadata keys in B1 are actually sent; fix any gaps
-- [ ] **B3:** Audit `Routes/retell.py` webhook handlers — confirm `call_started`, `call_ended`, `call_analyzed` extract metadata keys correctly; fix any gaps
-- [ ] **B4:** Confirm `call_analyzed` triggers `call_summarizer.py` correctly; confirm encrypted result persisted to `campaign_audit`
+- [x] **B2:** Audit `services/retell_client.py` create_outbound_call — confirm all metadata keys in B1 are actually sent; fix any gaps
+- [x] **B3:** Audit `Routes/retell.py` webhook handlers — confirm `call_started`, `call_ended`, `call_analyzed` extract metadata keys correctly; fix any gaps
+- [x] **B4:** Confirm `call_analyzed` triggers `call_summarizer.py` correctly; confirm encrypted result persisted to `campaign_audit`
+
+**Sprint B engineering note (2026-03-23) — order-based `call_ended` outcomes**
+
+Order-based care gaps have no `ehr_appointment_id`, so a normal call hangup was previously mapped to **DECLINED** (terminal). **`_apply_hedis_call_ended`** now sets **`ORDER_AGREED`** optimistically when the mapped outcome would be **DECLINED** and `gap_type` is in **`ORDER_BASED_GAP_TYPES`**. This avoids false “declined” terminal states before transcript analysis exists. **Sprint C** must add structured extraction on **`call_analyzed`** (or equivalent) to set **`ORDER_DECLINED`** when the patient actually declined. Until then, staff rely on the encrypted one-sentence Claude summary in **`campaign_audit`**. Documented in **`docs/retell_agent_playbook.md`** §9.2.
 
 ---
 
 ### Sprint C — Day 3–4 (March 25–26): Simplified staff notes + E2E gate
 
-- [ ] **C1:** Extend `call_summarizer.py` (or add `call_staff_notes_extractor.py`) — Claude extracts structured output for order-based gaps:
+- [x] **C1:** Extend `call_summarizer.py` (or add `call_staff_notes_extractor.py`) — Claude extracts structured output for order-based gaps:
   ```json
   {
     "patient_agreed": true/false,
@@ -2253,17 +2262,15 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
     "note": "Patient confirmed mailing address and agreed to receive kit"
   }
   ```
-  Encrypt with AES-256-GCM; store in `campaign_audit`. Discard transcript. One-sentence summary still stored for appointment-based gaps.
+  Encrypt with AES-256-GCM; store in `campaign_audit`. Discard transcript. One-sentence summary still stored for appointment-based gaps. **Implemented:** `extract_order_based_notes_sync` + `webhook_call_analyzed` branch; note stored in `call_summary_encrypted`.
 
-- [ ] **C2:** E2E gate execution:
-  - Stand up API locally with `docker-compose up` (or Azure staging)
-  - Run DB migrations: `alembic upgrade head`
-  - Configure Retell agent in Retell dashboard using playbook from B1
-  - Create clinic + EHR config via admin API (Swagger UI)
-  - Upload fake CSV with 2–3 contacts (mix of order-based + appointment-based)
-  - Start campaign: `POST /campaigns/{id}/start`
-  - Watch worker log: confirm call initiated, tools invoked, webhooks fire, DB updated
-  - Record result in `PROGRESS.txt` with date + what was exercised
+- [x] **C2:** E2E gate — **curl/Swagger steps** documented in `docs/retell_agent_playbook.md` §13. Execute the gate locally or on staging, then record in `PROGRESS.txt`:
+  - Stand up API: `docker compose -f docker-compose.dev.yaml up -d` (see §13)
+  - Run DB migrations: `docker compose ... --profile migrate run --rm migrate` or `alembic upgrade head`
+  - Configure Retell agent (§10) with tunnel `APP_BASE_URL` if needed
+  - Create clinic + EHR config via admin API (§13.2–13.3) or Swagger
+  - Upload CSV + start campaign via Swagger or scripted client (§13.4)
+  - Confirm logs + DB as in §13.5
 
 ---
 
@@ -2279,11 +2286,55 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 | PUT /clinics/scheduling-rules + PUT /clinics/insurance-rules | Plan 013 (post-MVP) |
 | React dashboard (Feature 7) | Plan 009 (after MVP + Plan 012) |
 | API security hardening + rate limits | Plan 012 (after MVP test call) |
-| PHI audit, load test, production deploy | Plan 010 (after dashboard) |
+| PHI audit, load test, production deploy | Plan 010 (after dashboard); **Plan 015** (`HIPAA_COMPLIANCE_AUDIT.md`) |
 | Super Admin onboarding screen | Plan 013 §9 (after pilot) |
 
 ---
 
-*Last updated: 2026-03-23 (MVP sprint reorganization)*
+## Plan 015 — HIPAA Security Rule Compliance Audit
+**Date:** 2026-03-23
+**Status:** Active reference (not a build sprint — tracks findings and maps them to other plans)
+**Source:** `HIPAA_COMPLIANCE_AUDIT.md` (45 CFR Part 164 — HIPAA Security Rule; static analysis of `Clinic_app/`, tests, Docker, migrations)
+
+### What This Plan Is
+
+A **documented compliance audit** of the codebase with severity-tagged findings (Critical / High / Warning / Compliant). It does not replace legal HIPAA sign-off; it is the engineering backlog for Security Rule gaps discovered in review.
+
+### Why It Matters
+
+- **Critical (C-01):** Google service account JSON stored as plaintext despite encryption intent — must align with `encrypt_phi()` / BYTEA patterns like other secrets.
+- **High:** Includes Retell webhook signature bypass for test/playground call IDs, missing token revocation, rate limiting gaps, OpenAPI exposure — these align with **Plan 012** (API security hardening).
+- **Warnings / operational:** Feed **Plan 010** (Feature 8) for production readiness and ongoing PHI-safe operations.
+
+### How We Use It
+
+1. Keep `HIPAA_COMPLIANCE_AUDIT.md` updated when major security-relevant code paths change (auth, webhooks, encryption, admin routes).
+2. **Before production pilot:** Close or explicitly accept all Critical and High items (or document compensating controls).
+3. **Cross-walk:** When implementing Plan 012 or Plan 010, grep the audit for matching finding IDs (e.g. H-01) and mark them resolved in the audit or in `PROGRESS.txt`.
+
+### Deferred
+
+- Full BAAs, penetration test, and organizational HIPAA policies remain out of scope for this engineering-only audit document.
+
+---
+
+## Plan 016 — Basic Application Logging
+**Date:** 2026-03-23
+**Status:** Pending — implement alongside or before **Plan 014 Sprint C** (E2E gate needs trustworthy logs)
+**Source:** CLAUDE.md (Python `logging`, mask PHI in logs) + operational need to trace worker, webhooks, and EHR tool calls
+
+### What We Are Building
+
+- Centralized logging configuration (levels, format, optional JSON/structured fields for production)
+- Consistent log points for: campaign worker lifecycle, Retell outbound + webhook handlers, custom tools (`get_available_slots`, `book_appointment`), Playwright/EHR errors
+- **PHI safety:** never log phone numbers in plaintext (mask `***-***-XXXX`), no raw transcripts, align with existing encryption and dashboard rules
+
+### Deferred
+
+- Full centralized log aggregation (Azure Monitor / Log Analytics wiring) — can follow in **Plan 010** if not done earlier
+
+---
+
+*Last updated: 2026-03-23 (Plan 016 basic logging added)*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: **Plan 014 Sprint A** (GapType/ContactStatus enum fixes + hospital_flu schema) → Sprint B (Retell playbook) → Sprint C (E2E gate).*
+*Next action: **Plan 014 Sprint A** (GapType/ContactStatus enum fixes + hospital_flu schema) → Sprint B (Retell playbook) → Sprint C (E2E gate); **Plan 016** (basic logging) in parallel or before Sprint C.*

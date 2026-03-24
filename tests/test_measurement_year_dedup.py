@@ -60,17 +60,8 @@ class TestDedupStatusSets:
         assert ContactStatus.CALLING.value in _DEDUP_BLOCK_STATUSES
 
     def test_dedup_block_covers_all_relevant_statuses(self):
-        # All non-terminal statuses + terminal ones should block re-upload
-        expected = {
-            ContactStatus.BOOKED.value,
-            ContactStatus.EXHAUSTED.value,
-            ContactStatus.DECLINED.value,
-            ContactStatus.PENDING.value,
-            ContactStatus.CALLING.value,
-            ContactStatus.VOICEMAIL.value,
-            ContactStatus.NO_ANSWER.value,
-            ContactStatus.ERROR.value,
-        }
+        # Dedup blocks re-upload when any prior contact is terminal or still active
+        expected = _TERMINAL_STATUSES | _ACTIVE_STATUSES
         assert _DEDUP_BLOCK_STATUSES == expected
 
 
@@ -84,7 +75,7 @@ class TestCreateCampaignDedup:
     Uses a mock DB that simulates existing contacts.
     """
 
-    def _make_parsed_row(self, phone: str, gap_type: GapType = GapType.COLORECTAL_CANCER_SCREENING):
+    def _make_parsed_row(self, phone: str, gap_type: GapType = GapType.COLORECTAL):
         from Clinic_app.services.csv_parser import ParsedRow
         return ParsedRow(
             phone_e164=phone,
@@ -191,7 +182,7 @@ class TestCreateCampaignDedup:
 
         async def no_dup_for_second(db, clinic_id, phone_hash, gap_type, year):
             # Only the first gap_type has an existing contact
-            if gap_type == GapType.COLORECTAL_CANCER_SCREENING.value:
+            if gap_type == GapType.COLORECTAL.value:
                 m = MagicMock()
                 m.status = ContactStatus.BOOKED.value
                 return m
@@ -214,11 +205,11 @@ class TestCreateCampaignDedup:
                 name="Test",
                 measurement_year=2026,
                 parsed_rows=[
-                    self._make_parsed_row("+17875551234", GapType.COLORECTAL_CANCER_SCREENING),
-                    self._make_parsed_row("+17875551234", GapType.DIABETES_HBA1C),
+                    self._make_parsed_row("+17875551234", GapType.COLORECTAL),
+                    self._make_parsed_row("+17875551234", GapType.EYE_EXAM),
                 ],
                 clinic_integration=self._make_clinic_integration(),
             )
 
-        assert result.total_contacts == 1   # diabetes_hba1c created
+        assert result.total_contacts == 1   # eye_exam created
         assert len(result.skipped_contacts) == 1  # colorectal skipped
