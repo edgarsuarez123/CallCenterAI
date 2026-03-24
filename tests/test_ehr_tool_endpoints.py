@@ -96,7 +96,7 @@ class TestEhrBookAppointment:
         client = TestClient(app, raise_server_exceptions=False)
 
         mock_cfg = MagicMock()
-        mock_cfg.appt_type_mapping = {"colorectal_cancer_screening": "PREV"}
+        mock_cfg.appt_type_mapping = {"colorectal": "FIT"}
 
         with patch(
             "Clinic_app.Routes.retell._get_clinic_by_agent_id",
@@ -119,7 +119,7 @@ class TestEhrBookAppointment:
                     "chosen_slot": "2026-04-01T09:00:00-05:00",
                     "patient_name": "Jane Doe",
                     "patient_dob": "1980-01-15",
-                    "gap_type": "colorectal_cancer_screening",
+                    "gap_type": "colorectal",
                 },
             }
             r = client.post("/retell/tools/book_appointment", json=body)

@@ -125,7 +125,7 @@ class TestCampaignContactModel:
             clinic_id=uuid.uuid4(),
             phone_encrypted=b"\xde\xad\xbe\xef",
             phone_hash="b" * 64,
-            gap_type="colorectal_cancer_screening",
+            gap_type="colorectal",
         )
         assert isinstance(contact.phone_encrypted, bytes)
 
@@ -137,7 +137,7 @@ class TestCampaignContactModel:
             clinic_id=uuid.uuid4(),
             phone_encrypted=b"\x00",
             phone_hash=hash_value,
-            gap_type="depression_screening",
+            gap_type="breast_cancer",
         )
         assert len(contact.phone_hash) == 64
 
@@ -149,7 +149,7 @@ class TestCampaignContactModel:
             clinic_id=uuid.uuid4(),
             phone_encrypted=b"\x00",
             phone_hash="d" * 64,
-            gap_type="well_child_visit",
+            gap_type="preventive_visit",
             status="pending",
             attempt_count=0,
         )
@@ -231,7 +231,7 @@ class TestClinicEHRConfigModel:
 
     def test_appt_type_mapping_accepts_dict(self):
         from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
-        mapping = {"colorectal_cancer_screening": "PREV", "diabetes_hba1c": "DM_A1C"}
+        mapping = {"colorectal": "FIT", "kidney": "DM_A1C"}
         config = ClinicEHRConfig(
             clinic_id=uuid.uuid4(),
             nextgen_url="https://x.com",
@@ -239,7 +239,7 @@ class TestClinicEHRConfigModel:
             nextgen_password_encrypted=b"\x00",
             appt_type_mapping=mapping,
         )
-        assert config.appt_type_mapping["colorectal_cancer_screening"] == "PREV"
+        assert config.appt_type_mapping["colorectal"] == "FIT"
 
     def test_credentials_stored_as_bytes(self):
         from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig

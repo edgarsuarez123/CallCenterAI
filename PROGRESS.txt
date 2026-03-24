@@ -378,3 +378,66 @@ FILES MODIFIED:
 - tests/test_ehr_admin.py (created)
 - PROGRESS.txt (this entry)
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-23 — Plan 014 Sprint A completion + Sprint B execution
+================================================================================
+COMPLETED:
+- Sprint A: Reconciled tests with Plan 013 GapType (test_csv_parser, test_campaign_service,
+  test_measurement_year_dedup, test_campaign_routes, test_call_summarizer, test_enums docstring);
+  dedup test now asserts _DEDUP_BLOCK_STATUSES == _TERMINAL | _ACTIVE; campaign_service.py
+  already had NOT_YET_ELIGIBLE, EXPIRED, HUMAN_REQUESTED in _TERMINAL_STATUSES.
+- Sprint A: Updated test_new_models, test_ehr_admin, test_ehr_tool_endpoints for Plan 013 gap keys.
+- Sprint B: docs/retell_agent_playbook.md — section 7 Plan 013 taxonomy, appointment vs order-based;
+  section 9.2 optimistic ORDER_AGREED note; decision 4 aligned with Claude call_summarizer.
+- Sprint B: env.example — ANTHROPIC_API_KEY, APP_BASE_URL.
+- Sprint B: retell.py _apply_hedis_call_ended — order-based gaps get ORDER_AGREED on normal
+  hangup (mapper would yield DECLINED without EHR appt); PLAN.md engineering note added.
+- tests/test_hedis_webhooks.py — test_apply_hedis_call_ended_order_based_hangup_sets_order_agreed.
+
+SKIPPED / DEFERRED:
+- Full pytest suite: 154 tests passed for Sprint A/B touched modules; full suite on this host
+  reports unrelated failures (missing apscheduler import for main.py auth tests, Windows
+  timezone validation in clinic_settings, pre-existing retell signature mock issues).
+
+ERRORS / BLOCKERS:
+- None for Sprint A/B scope.
+
+NEXT SESSION SHOULD START WITH:
+- Plan 014 Sprint C: structured staff notes extractor + E2E gate; optionally pip install
+  project deps (apscheduler) and fix Windows tz tests if running full suite locally.
+
+FILES MODIFIED:
+- tests/test_csv_parser.py, test_campaign_service.py, test_measurement_year_dedup.py,
+  test_campaign_routes.py, test_call_summarizer.py, test_enums.py
+- tests/test_new_models.py, test_ehr_admin.py, test_ehr_tool_endpoints.py, test_hedis_webhooks.py
+- Clinic_app/Routes/retell.py
+- docs/retell_agent_playbook.md, env.example, PLAN.md
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-23 — Plan 014 Sprint C (staff notes extractor + E2E doc) + PLAN A/B checkboxes
+================================================================================
+COMPLETED:
+- PLAN.md: marked Sprint A (A1–A7) and Sprint B (B1–B4) complete; Sprint C C1/C2 updated.
+- call_summarizer.py: extract_order_based_notes_sync (Claude JSON: patient_agreed, action_for_staff, note); safe parse fallback.
+- retell.py: _gap_type_is_order_based; webhook_call_analyzed uses extractor for order-based gaps, ORDER_AGREED→ORDER_DECLINED when patient_agreed false; human-request phrases set HUMAN_REQUESTED except when already BOOKED.
+- tests: test_call_summarizer (3 new), test_hedis_webhooks (4 new call_analyzed cases); pytest 15 passed for these modules.
+- docs/retell_agent_playbook.md: §9.2/§9.3/§12 updated; new §13 E2E gate (docker-compose.dev, admin curl, Swagger note).
+
+SKIPPED / DEFERRED:
+- Full pytest suite on this host (pre-existing unrelated failures per prior sessions).
+
+ERRORS / BLOCKERS:
+- None.
+
+NEXT SESSION SHOULD START WITH:
+- Run full E2E gate per playbook §13 (live Retell + tunnel); log outcome in PROGRESS.txt.
+- Optional: Plan 016 structured logging.
+
+FILES MODIFIED:
+- Clinic_app/services/call_summarizer.py, Clinic_app/Routes/retell.py
+- tests/test_call_summarizer.py, tests/test_hedis_webhooks.py
+- docs/retell_agent_playbook.md, PLAN.md, PROGRESS.txt
+================================================================================

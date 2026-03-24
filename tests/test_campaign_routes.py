@@ -83,7 +83,7 @@ def _make_parsed_rows(n: int = 3):
     from Clinic_app.services.csv_parser import ParsedRow
     from Clinic_app.data.enums import GapType
     return [
-        ParsedRow(f"+1787555{1000 + i}", GapType.COLORECTAL_CANCER_SCREENING, "en", raw_row_number=i + 2)
+        ParsedRow(f"+1787555{1000 + i}", GapType.COLORECTAL, "en", raw_row_number=i + 2)
         for i in range(n)
     ]
 
@@ -296,7 +296,7 @@ class TestExportRoute:
         contact = MagicMock()
         contact.id = uuid.uuid4()
         contact.phone_hash = "abc123deadbeef"
-        contact.gap_type = "colorectal_cancer_screening"
+        contact.gap_type = "colorectal"
         contact.preferred_language = "en"
         contact.status = "pending"
         contact.attempt_count = 0

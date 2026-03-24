@@ -22,7 +22,8 @@ Operational guide for wiring **one Retell agent per clinic** to this FastAPI app
 | `RETELL_WEBHOOK_SECRET` | Shared secret for HMAC verification of incoming webhooks and tool requests (`x-retell-signature`). |
 | `RETELL_FROM_NUMBER` | Default outbound caller ID (E.164). Overridden per clinic by `ClinicIntegration.retell_outbound_number` when set. |
 | `APP_ENVIRONMENT` | `production` / `prod` → signature required for webhooks/tools; dev allows missing signature with warnings. |
-| `ANTHROPIC_API_KEY` | Used on `call_analyzed` to produce the one-sentence summary (`call_summarizer`). |
+| `APP_BASE_URL` | Public HTTPS origin for webhook/tool URLs (see §3). Not read by the app at runtime; used when configuring Retell. |
+| `ANTHROPIC_API_KEY` | Used on `call_analyzed` to produce the one-sentence Claude summary (`call_summarizer`); also used for CSV column mapping (`csv_parser`). |
 
 Database (per clinic, `ClinicIntegration`):
 
@@ -109,30 +110,37 @@ The worker sends the following on **every** HEDIS outbound call. All values are 
 
 ---
 
-## 7. Gap types (`GapType` enum)
+## 7. Gap types (`GapType` enum — Plan 013)
 
-Use these **exact** string values in CSV, DB, metadata, and `book_appointment` `gap_type` when mapping appointment types:
+Canonical source: `Clinic_app/data/enums.py`. Use these **exact** snake_case strings in CSV, DB, metadata, and tool args.
+
+**Appointment-based** (use NextGen: `get_available_slots` → `book_appointment`):
 
 | Value |
 |-------|
-| `colorectal_cancer_screening` |
-| `breast_cancer_screening` |
-| `cervical_cancer_screening` |
-| `diabetes_hba1c` |
-| `diabetes_eye_exam` |
-| `diabetes_nephropathy` |
-| `hypertension_control` |
-| `depression_screening` |
-| `well_child_visit` |
-| `adolescent_well_care` |
-| `adult_bmi_assessment` |
-| `medication_adherence_diabetes` |
-| `medication_adherence_hypertension` |
-| `other` |
+| `preventive_visit` |
+| `hospital_flu` |
 
-**Retell prompt:** Document each gap in plain language (what to say, compliance framing) and map utterances → the same canonical strings if the model fills tool arguments.
+**Order-based** (voice script + staff fulfillment; no EHR booking in this path for MVP):
 
-**NextGen appointment type:** Admin **gap_type → appointment type string** mapping lives in EHR config (`appt_type_mapping`). Values must match what Playwright selects in NextGen (often the **visible label** in the dropdown, not an opaque internal code). See `PLAN.md` Plan 011.
+| Value |
+|-------|
+| `colorectal` |
+| `eye_exam` |
+| `breast_cancer` |
+| `kidney` |
+| `afr_cmp` |
+| `generic` |
+
+**Excluded at CSV parse** (never queued for calling):
+
+| Value |
+|-------|
+| `medication_review` |
+
+**Retell prompt:** Branch script and tool usage from `gap_type`: appointment-based → slot lookup + book; order-based → confirm interest and next steps, then end without booking tools.
+
+**NextGen appointment type:** Admin **gap_type → appointment type string** mapping lives in EHR config (`appt_type_mapping`) for appointment-based gaps only. Values must match what Playwright selects in NextGen (often the **visible label** in the dropdown).
 
 ---
 
@@ -186,12 +194,17 @@ Creates `CallLog`, resolves clinic by `agent_id`. For HEDIS metadata, associates
 
 Updates `CampaignContact` status (voicemail, no answer, booked, declined, exhausted, retries, etc.) from `disconnection_reason` and whether `ehr_appointment_id` is set.
 
+**Order-based gaps:** There is no EHR appointment ID when the call ends normally. The handler sets **`ORDER_AGREED`** optimistically. On **`call_analyzed`**, structured extraction can set **`ORDER_DECLINED`** if the patient clearly declined (see §9.3).
+
 ### 9.3 `call_analyzed`
 
 Only processes rows where merged metadata has `call_type == "hedis_campaign"` and a valid `campaign_contact_id`.
 
 - Builds a short transcript string from `transcript`, `transcript_with_tool_calls`, or nested `call_analysis` fields (best effort).
-- Runs **Claude** one-sentence summary; encrypts and stores `CampaignAudit` (`call_summary_encrypted`, optional encrypted name).
+- **Appointment-based gaps:** runs **Claude** `summarize_transcript_sync` (one-sentence summary).
+- **Order-based gaps** (`ORDER_BASED_GAP_TYPES` in `data/enums.py`): runs **Claude** `extract_order_based_notes_sync` (JSON → `patient_agreed`, `action_for_staff`, `note`). The human-readable **`note`** is encrypted into `call_summary_encrypted`. If `patient_agreed` is **false** and the contact was **`ORDER_AGREED`**, status becomes **`ORDER_DECLINED`**.
+- If the transcript requests a human (same phrases as in code: “speak to a human”, etc.), contact status becomes **`HUMAN_REQUESTED`** unless the contact is already **`BOOKED`** (successful appointment).
+- Encrypts optional patient name and summary note; stores `CampaignAudit`.
 - **Does not** persist full transcript to the database (policy).
 
 ---
@@ -230,8 +243,75 @@ Recorded product / deployment choices so the playbook stays grounded in how the 
 
 3. **Inbound vs outbound** — **Outbound HEDIS only** for now. **Inbound** calling and legacy calendar routes are **not** in scope; ignore `/retell/schedule`, `/retell/confirm_booking`, and `/retell/availability` for this pilot unless that changes later.
 
-4. **Post-call notes and cost (Plan 011)** — **Start with Retell’s post-call summary** (cheapest path). **If** it is not good enough for staff ops, **add Claude** that reads **that summary** and extracts **only the fields we need** (not necessarily the full transcript). Escalate input to transcript only if summaries remain insufficient and policy allows.
+4. **Post-call summary** — **`call_analyzed`**: appointment-based gaps use a **one-sentence** Claude summary (`summarize_transcript_sync`); order-based gaps use **structured extraction** (`extract_order_based_notes_sync`); the stored note is **encrypted** in `campaign_audit.call_summary_encrypted`; the **raw transcript is not stored**.
 
 ---
 
-*Last updated: 2026-03-23 — maintained next to code changes in `Clinic_app/Routes/retell.py` and campaign worker.*
+## 13. E2E gate (local) — Plan 014 Sprint C
+
+Use this checklist to run a **full path** test: API + DB + Redis + (optional) Retell. Replace placeholders (`YOUR_*`, `CLINIC_ID`, `JWT`, etc.) with real values. **`ADMIN_API_KEY`** matches `X-Admin-Key` on admin routes. Campaign upload/start requires a **scoped JWT** with **admin** role — easiest path is **Swagger UI** at `http://localhost:8000/docs` (Authorize → call `/campaigns/upload` and `/campaigns/{id}/start`). The curl examples below use admin-only steps; use Swagger for JWT-protected routes if you prefer not to paste tokens.
+
+### 13.1 Stack and migrations
+
+```bash
+# From repo root — start Postgres, Redis, app (hot-reload)
+docker compose -f docker-compose.dev.yaml up -d
+
+# Run Alembic (optional profile; run once after schema changes)
+docker compose -f docker-compose.dev.yaml --profile migrate run --rm migrate
+```
+
+Ensure `.env` (or container env) sets `PHI_ENCRYPTION_KEY`, `JWT_SECRET_KEY`, `RETELL_*`, `ANTHROPIC_API_KEY`, `ADMIN_API_KEY`, and `REDIS_URL=redis://redis:6379` when using Docker network names.
+
+### 13.2 Create clinic and integration (admin API)
+
+```bash
+set BASE=http://localhost:8000
+set ADMIN_KEY=YOUR_ADMIN_API_KEY
+
+curl -s -X POST "%BASE%/admin/clinics" ^
+  -H "Content-Type: application/json" ^
+  -H "X-Admin-Key: %ADMIN_KEY%" ^
+  -d "{\"name\":\"E2E Clinic\",\"tier\":\"basic\",\"status\":\"active\",\"license_token\":\"e2e-license-token-001\"}"
+```
+
+Save `clinic_id` from `data.id` in the JSON response as `CLINIC_ID`.
+
+**Integration** (requires valid E.164 `retell_did` and minimal Google service account JSON shape — see `IntegrationCreateRequest` in `Clinic_app/Routes/admin.py`):
+
+```bash
+curl -s -X POST "%BASE%/admin/clinics/CLINIC_ID/integration" ^
+  -H "Content-Type: application/json" ^
+  -H "X-Admin-Key: %ADMIN_KEY%" ^
+  -d "{\"retell_agent_id\":\"YOUR_RETELL_AGENT_ID\",\"retell_did\":\"+15551234567\",\"google_service_account_json\":\"{\\\"type\\\":\\\"service_account\\\",\\\"project_id\\\":\\\"p\\\",\\\"private_key_id\\\":\\\"x\\\",\\\"private_key\\\":\\\"-----BEGIN PRIVATE KEY-----\\\\nMII\\\\n-----END PRIVATE KEY-----\\\\n\\\",\\\"client_email\\\":\\\"a@p.iam.gserviceaccount.com\\\"}\",\"default_appointment_length_minutes\":30,\"default_capacity\":10}"
+```
+
+### 13.3 NextGen EHR config (admin API)
+
+```bash
+curl -s -X POST "%BASE%/admin/clinics/CLINIC_ID/ehr-config" ^
+  -H "Content-Type: application/json" ^
+  -H "X-Admin-Key: %ADMIN_KEY%" ^
+  -d "{\"nextgen_url\":\"https://your-nextgen-host/\",\"nextgen_username\":\"user\",\"nextgen_password\":\"pass\"}"
+```
+
+Optional: `PUT /admin/clinics/{clinic_id}/appt-types` with `{"mapping":{"preventive_visit":"CODE",...}}` so slot lookup maps gap types to NextGen codes.
+
+### 13.4 Campaign CSV upload and start (JWT — Swagger recommended)
+
+Prepare a small CSV with columns your parser expects (see `csv_parser` / PRD), including at least one **order-based** row (e.g. `colorectal`) and one **appointment-based** row (e.g. `preventive_visit`).
+
+In Swagger: **POST `/campaigns/upload`** — form fields `file`, `name`, `measurement_year`; then **POST `/campaigns/{id}/start`**.
+
+### 13.5 What to watch
+
+- **Logs:** worker should log outbound `create-phone-call`; during the call, Retell should hit **`/retell/tools/*`** and webhooks **`/retell/webhook/call_*`** (200 responses).
+- **DB:** `campaign_contact.status` transitions; after hangup + analysis, **`campaign_audit`** rows with encrypted summary; order-based **`ORDER_DECLINED`** when the patient declined (see §9.3).
+
+### 13.6 Sign-off
+
+Record date and what you exercised in **`PROGRESS.txt`** per `PLAN.md` Plan 014.
+
+---
+
+*Last updated: 2026-03-23 — Plan 014 Sprint C: §9.3 order-based extraction; §13 E2E gate.*
