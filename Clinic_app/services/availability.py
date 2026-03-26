@@ -46,26 +46,29 @@ FALLBACK_END = "17:00"
 
 async def _get_existing_booking_ids(
     db: AsyncSession,
+    clinic_id: UUID,
     provider_id: UUID,
     booking_ids: Set[UUID]
 ) -> Set[UUID]:
     """
     Check which booking_ids exist in DB as TENTATIVE or CONFIRMED.
-    
+
     Args:
         db: Database session
+        clinic_id: Clinic UUID (tenant isolation)
         provider_id: Provider UUID
         booking_ids: Set of booking UUIDs to check
-        
+
     Returns:
         Set of booking_ids that exist in DB as TENTATIVE or CONFIRMED
     """
     if not booking_ids:
         return set()
-    
+
     result = await db.execute(
         select(Booking.id).where(
             and_(
+                Booking.clinic_id == clinic_id,
                 Booking.provider_id == provider_id,
                 Booking.id.in_(booking_ids),
                 cast(Booking.status, String).in_([BookingStatus.TENTATIVE.value, BookingStatus.CONFIRMED.value])
@@ -326,7 +329,7 @@ async def is_slot_available(
                         pass  # Invalid UUID, skip
     
     # 5. Check which GCal booking_ids exist in DB (to avoid double-counting)
-    existing_booking_ids = await _get_existing_booking_ids(db, provider.id, gcal_booking_ids)
+    existing_booking_ids = await _get_existing_booking_ids(db, clinic_id, provider.id, gcal_booking_ids)
     
     # 6. Count GCal events that DON'T have matching DB bookings (orphaned/manual events)
     patient_count_gcal = 0
@@ -497,7 +500,7 @@ async def get_available_slots(
     
     # Check which GCal booking_ids exist in DB (to avoid double-counting)
     # Also get all DB booking IDs in the window to check against GCal events
-    existing_booking_ids = await _get_existing_booking_ids(db, provider.id, gcal_booking_ids)
+    existing_booking_ids = await _get_existing_booking_ids(db, clinic_id, provider.id, gcal_booking_ids)
     
     # Get all DB booking IDs in the window (not just from GCal events) for comprehensive matching
     all_db_booking_ids_in_window = {b.id for b in db_bookings}

@@ -105,7 +105,6 @@ class TestPlaywrightEHRServiceContract:
             provider_name="Dr. Smith",
             slot_start="2026-04-01T09:00:00-05:00",
             patient_name="John Doe",
-            patient_dob="1980-01-15",
             appt_type_code="PREV",
         )
 
@@ -130,7 +129,6 @@ class TestPlaywrightEHRServiceContract:
             provider_name="Dr. Smith",
             slot_start="2026-04-01T09:00:00-05:00",
             patient_name="John Doe",
-            patient_dob="1980-01-15",
             appt_type_code="PREV",
         )
 

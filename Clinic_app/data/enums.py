@@ -92,8 +92,7 @@ class GapType(str, Enum):
     Excluded (filtered at CSV parse — never enters campaign queue):
       medication_review
 
-    Fallback:
-      generic — any unrecognized CSV value
+    Unrecognized gap strings in CSV produce a parse error for that row (no fallback type).
     """
     PREVENTIVE_VISIT = "preventive_visit"    # Annual preventive / wellness visit
     HOSPITAL_FLU = "hospital_flu"            # Hospital follow-up within 7 days of discharge
@@ -103,7 +102,6 @@ class GapType(str, Enum):
     KIDNEY = "kidney"                        # Kidney function lab
     AFR_CMP = "afr_cmp"                      # Albumin/creatinine ratio + urinalysis
     MEDICATION_REVIEW = "medication_review"  # Excluded — filtered at parse, never called
-    GENERIC = "generic"                      # Unrecognized gap type — order-based script
 
 
 # Gap types that are appointment-based (Playwright books in NextGen EHR)
@@ -119,6 +117,5 @@ ORDER_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
     GapType.BREAST_CANCER,
     GapType.KIDNEY,
     GapType.AFR_CMP,
-    GapType.GENERIC,
 })
 

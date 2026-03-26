@@ -1,7 +1,10 @@
+import logging
 from fastapi import APIRouter
 from datetime import datetime, timezone
 from sqlalchemy import text
 from Clinic_app.common.database import AsyncSessionLocal
+
+logger = logging.getLogger(__name__)
 
 health_router = APIRouter()
 
@@ -15,7 +18,8 @@ async def health_check():
         async with AsyncSessionLocal() as session:
             await session.execute(text("SELECT 1"))
     except Exception as e:
-        db_status = f"disconnected: {str(e)}"
+        logger.error(f"Health check database error: {e}", exc_info=True)
+        db_status = "disconnected"
     
     # Determine overall status
     overall_status = "healthy" if db_status == "connected" else "unhealthy"

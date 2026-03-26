@@ -62,7 +62,7 @@ object that:
 2. For gap_type values found in the data rows, provides a "gap_type_values" mapping
    from raw strings to one of these standard codes:
    preventive_visit, hospital_flu, colorectal, eye_exam, breast_cancer,
-   kidney, afr_cmp, medication_review, generic
+   kidney, afr_cmp, medication_review
 
    Alias guide (non-exhaustive):
    - "Preventive visit", "Annual wellness", "AWV", "Yearly checkup"  →  preventive_visit
@@ -73,7 +73,7 @@ object that:
    - "Kidney", "Kidney function", "CKD", "Renal"  →  kidney
    - "AFR/CMP", "Albumin creatinine", "Alb/Cr ratio", "urine albumin", "bw/uA"  →  afr_cmp
    - "Medication review", "Med review", "Medication management"  →  medication_review
-   - Anything unrecognized  →  generic
+   - If a raw label does not fit any code above, omit it from gap_type_values (do not invent codes).
 
 Return ONLY a valid JSON object. No explanation, no markdown. Example:
 {
@@ -148,7 +148,7 @@ def normalize_phone(raw: str) -> str:
         digits = "1" + digits
     if len(digits) == 11 and digits.startswith("1"):
         return "+" + digits
-    raise ValueError(f"Cannot normalize phone to E.164: {raw!r} → {digits!r}")
+    raise ValueError("Cannot normalize phone number to E.164 format")
 
 
 # ── Claude API call ────────────────────────────────────────────────────────────
@@ -224,17 +224,20 @@ def _build_column_mapping(claude_response: dict, header_row: list[str]) -> Colum
 
 # ── Gap type mapping ───────────────────────────────────────────────────────────
 
-def map_gap_type(raw: str, gap_type_values: dict[str, str]) -> GapType:
+def map_gap_type(raw: str, gap_type_values: dict[str, str]) -> Optional[GapType]:
     """
     Map a raw gap type string to a GapType enum value using Claude's mapping.
-    Falls back to GapType.GENERIC if not found — never raises.
+
+    Returns None if the cell is empty/whitespace or the value is not a known GapType.
     """
+    if not (raw or "").strip():
+        return None
     normalized = gap_type_values.get(raw, raw)
     try:
         return GapType(normalized)
     except ValueError:
-        logger.warning(f"Unknown gap type value {raw!r} → defaulting to GapType.GENERIC")
-        return GapType.GENERIC
+        logger.warning("Unknown gap type value %r — row will be recorded as parse error", raw)
+        return None
 
 
 # ── Delimiter detection ────────────────────────────────────────────────────────
@@ -366,11 +369,22 @@ def parse_file(
             parse_errors.append(ParseError(
                 row_number=idx,
                 reason=str(exc),
-                raw_data=dict(row),
             ))
             continue
 
         gap_type = map_gap_type(raw_gap, mapping.gap_type_values)
+        if gap_type is None:
+            parse_errors.append(
+                ParseError(
+                    row_number=idx,
+                    reason=(
+                        "Missing or unrecognized gap type"
+                        if not raw_gap.strip()
+                        else f"Unrecognized gap type: {raw_gap!r}"
+                    ),
+                )
+            )
+            continue
 
         # medication_review is always excluded — never enters the campaign queue
         if gap_type == GapType.MEDICATION_REVIEW:

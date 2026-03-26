@@ -50,11 +50,14 @@ def valid_key_base64():
 
 
 @pytest.fixture(autouse=True)
-def reset_encryption_key():
-    """Reset encryption key cache before each test."""
+def reset_key_caches(valid_key_base64):
+    """Reset encryption/hash key caches and inject both env keys before each test."""
     encryption_module._encryption_key = None
-    yield
+    encryption_module._hash_key = None
+    with patch.dict(os.environ, {"PHI_HASH_KEY": valid_key_base64}):
+        yield
     encryption_module._encryption_key = None
+    encryption_module._hash_key = None
 
 
 @pytest.fixture
@@ -76,7 +79,7 @@ def mock_patient(sample_patient_id, sample_clinic_id, valid_key_base64):
         patient.id = sample_patient_id
         patient.clinic_id = sample_clinic_id
         patient.name_token = encrypt_phi("John Doe")
-        patient.dob_token = encrypt_phi("1990-05-15")
+        # dob_token removed — PHI Rule #2: DOB not stored in DB
         patient.phone_token = encrypt_phi("+15551234567")
         patient.email_token = encrypt_phi("john@example.com")
         patient.name_dob_hash = _compute_name_dob_hash("John Doe", "1990-05-15")
@@ -485,11 +488,11 @@ class TestCreatePatient:
                 language="en"
             )
         
-        # Check that PHI fields are bytes (encrypted)
+        # Check that PHI fields are bytes (encrypted) — dob_token removed per PHI Rule #2
         assert isinstance(result.name_token, bytes)
-        assert isinstance(result.dob_token, bytes)
         assert isinstance(result.phone_token, bytes)
         assert isinstance(result.email_token, bytes)
+        assert isinstance(result.phone_hash, str) and len(result.phone_hash) == 64
     
     @pytest.mark.asyncio
     async def test_create_stores_hash(self, mock_db_session, sample_clinic_id, valid_key_base64):

@@ -215,7 +215,6 @@ class PlaywrightEHRService:
         provider_name: str,
         slot_start: str,
         patient_name: str,
-        patient_dob: str,
         appt_type_code: str,
     ) -> dict[str, Any]:
         """
@@ -230,7 +229,7 @@ class PlaywrightEHRService:
                 await self._navigate_to_scheduler(page, clinic_id)
                 await self._select_provider_dropdown(page, clinic_id, provider_name)
                 await self._fill_booking_form(
-                    page, clinic_id, patient_name, patient_dob, appt_type_code
+                    page, clinic_id, patient_name, appt_type_code
                 )
                 appt_id = await self._submit_booking_and_get_id(page, clinic_id)
                 if appt_id:
@@ -510,7 +509,6 @@ class PlaywrightEHRService:
         page: Any,
         clinic_id: UUID,
         patient_name: str,
-        patient_dob: str,
         appt_type_code: str,
     ) -> None:
         form_r = await page.query_elements(
@@ -518,7 +516,6 @@ class PlaywrightEHRService:
             {
                 appointment_booking_form {
                     patient_name_field
-                    date_of_birth_field
                     appointment_type_dropdown
                     provider_dropdown
                     appointment_date_field
@@ -532,8 +529,6 @@ class PlaywrightEHRService:
             raise RuntimeError("Booking form not found")
         if form.patient_name_field:
             await form.patient_name_field.fill(patient_name)
-        if form.date_of_birth_field:
-            await form.date_of_birth_field.fill(patient_dob)
         if form.appointment_type_dropdown:
             try:
                 await form.appointment_type_dropdown.select_option(value=appt_type_code)

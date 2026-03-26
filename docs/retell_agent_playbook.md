@@ -1,6 +1,28 @@
 # Retell agent playbook — CallCenterAI (HEDIS campaigns)
 
-Operational guide for wiring **one Retell agent per clinic** to this FastAPI app: outbound campaign calls, mid-call EHR tools, webhooks, and post-call analysis. Keep this document aligned with `Clinic_app/Routes/retell.py`, `Clinic_app/services/retell_client.py`, and `Clinic_app/workers/campaign_worker.py`.
+Operational guide for wiring **one Retell agent per clinic** to this FastAPI app: onboarding APIs, outbound campaign calls, mid-call EHR tools, webhooks, agent scripts, and post-call analysis.
+
+**Source of truth in code:** `Clinic_app/Routes/retell.py`, `Clinic_app/Routes/campaigns.py`, `Clinic_app/Routes/admin.py`, `Clinic_app/services/retell_client.py`, `Clinic_app/workers/campaign_worker.py`, `Clinic_app/data/enums.py`.
+
+---
+
+## Table of contents
+
+1. [Architecture rules](#1-architecture-rules-non-negotiable)  
+2. [Environment variables](#2-environment-variables)  
+3. [Public base URL](#3-public-base-url-app_base_url)  
+4. [End-to-end workflow](#4-end-to-end-workflow)  
+5. [HTTP routes — full catalog](#5-http-routes--full-catalog)  
+6. [Outbound API — Retell `create-phone-call`](#6-outbound-api--retell-create-phone-call)  
+7. [Metadata and dynamic variables](#7-metadata-and-dynamic-variables-hedis-campaigns)  
+8. [Gap types](#8-gap-types-gaptype-enum--plan-013)  
+9. [Custom tools — contract + JSON examples](#9-custom-tools--contract--json-examples)  
+10. [Webhooks](#10-webhook-behavior-hedis)  
+11. [Agent scripts and master prompt](#11-agent-scripts-and-master-prompt)  
+12. [Retell dashboard configuration](#12-retell-dashboard-configuration-checklist)  
+13. [Verification flow](#13-verification-flow-staging)  
+14. [Decisions (Edgar)](#14-decisions-edgar)  
+15. [E2E gate (local)](#15-e2e-gate-local--plan-014-sprint-c)
 
 ---
 
@@ -9,8 +31,8 @@ Operational guide for wiring **one Retell agent per clinic** to this FastAPI app
 | Rule | Detail |
 |------|--------|
 | Agents | **One Retell agent per clinic.** `ClinicIntegration.retell_agent_id` must match the agent Retell runs for that clinic. |
-| Gap type | Passed on every outbound call as **metadata** (`gap_type`). The agent prompt should branch behavior (script, which measures to mention) from this value. **Do not** create separate Retell agents per gap type. |
-| HEDIS vs legacy | **HEDIS outbound campaigns** use **`/retell/tools/*`** and **`/retell/webhook/*`** as below. Older demo routes (`/retell/schedule`, `/retell/confirm_booking`, `/retell/availability`) target the **Google Calendar booking** flow, not NextGen Playwright booking. |
+| Gap type | Passed on every outbound call as **metadata** (`gap_type`). The agent prompt branches script and tools from this value. **Do not** create separate Retell agents per gap type. |
+| HEDIS vs legacy | **HEDIS outbound campaigns** use **`/retell/tools/*`** and **`/retell/webhook/*`**. Legacy routes **`/retell/schedule`**, **`/retell/confirm_booking`**, **`/retell/availability`** are **Google Calendar**, not NextGen Playwright. |
 
 ---
 
@@ -19,251 +41,560 @@ Operational guide for wiring **one Retell agent per clinic** to this FastAPI app
 | Variable | Purpose |
 |----------|---------|
 | `RETELL_API_KEY` | Bearer token for `POST https://api.retellai.com/v2/create-phone-call` (campaign worker). |
-| `RETELL_WEBHOOK_SECRET` | Shared secret for HMAC verification of incoming webhooks and tool requests (`x-retell-signature`). |
-| `RETELL_FROM_NUMBER` | Default outbound caller ID (E.164). Overridden per clinic by `ClinicIntegration.retell_outbound_number` when set. |
-| `APP_ENVIRONMENT` | `production` / `prod` → signature required for webhooks/tools; dev allows missing signature with warnings. |
-| `APP_BASE_URL` | Public HTTPS origin for webhook/tool URLs (see §3). Not read by the app at runtime; used when configuring Retell. |
-| `ANTHROPIC_API_KEY` | Used on `call_analyzed` to produce the one-sentence Claude summary (`call_summarizer`); also used for CSV column mapping (`csv_parser`). |
+| `RETELL_WEBHOOK_SECRET` | HMAC secret for incoming webhooks and tool requests (`x-retell-signature`). |
+| `RETELL_FROM_NUMBER` | Default outbound caller ID (E.164). Overridden by `ClinicIntegration.retell_outbound_number` when set. |
+| `APP_ENVIRONMENT` | `production` / `prod` → signatures enforced; dev may log warnings if signature missing. |
+| `APP_BASE_URL` | Public HTTPS origin for Retell dashboard URLs (not read by the app at runtime). |
+| `ANTHROPIC_API_KEY` | `call_analyzed` summaries + CSV column mapping (`csv_parser`). |
+| `ADMIN_API_KEY` | Matches header **`X-Admin-Key`** on `/admin/*` routes. |
+| `JWT_SECRET_KEY` | Signs staff JWTs used on `/campaigns/*`. |
 
-Database (per clinic, `ClinicIntegration`):
-
-| Field | Purpose |
-|-------|---------|
-| `retell_agent_id` | Retell agent ID (string). |
-| `retell_did` | Clinic inbound DID (E.164); surfaced to the patient as `clinic_phone` in metadata when present. |
-| `retell_outbound_number` | Optional outbound DID for campaigns; falls back to `RETELL_FROM_NUMBER`. |
+**`ClinicIntegration` (per clinic):** `retell_agent_id`, `retell_did` (callback DID → `clinic_phone` metadata), `retell_outbound_number` (optional).
 
 ---
 
 ## 3. Public base URL (`APP_BASE_URL`)
 
-All Retell **custom tool URLs** and **webhook URLs** must be reachable from Retell’s servers over HTTPS.
+All Retell **tool** and **webhook** URLs must be **`https://`** and reachable from Retell’s servers.
 
 ```
 APP_BASE_URL = https://your-deployment.example.com
 ```
 
-**Replace** with any **public HTTPS** host Retell can reach. Paths below are **relative to the app root** (no global `/api` prefix in the current app). Until Azure (or similar) is live, use a **tunnel** (e.g. ngrok, Cloudflare Tunnel) — see **§12**.
+Paths are **relative to the app root** (no `/api` prefix). For local dev, use a tunnel (ngrok, Cloudflare Tunnel) — see **§14**.
 
 ---
 
-## 4. HTTP routes (copy-paste checklist)
+## 4. End-to-end workflow
 
-Prefix every URL with `APP_BASE_URL`.
+### 4.1 Sequence (who calls what)
 
-### 4.1 Custom tools (HMAC-signed; Retell → your API)
+```mermaid
+sequenceDiagram
+    participant Admin as Super admin
+    participant API as CallCenterAI API
+    participant Staff as Clinic staff JWT
+    participant W as Campaign worker
+    participant R as Retell REST API
+    participant T as Retell voice + LLM
+
+    Admin->>API: POST /admin/clinics (+ integration, ehr-config, appt-types)
+    Staff->>API: POST /campaigns/upload (multipart)
+    Staff->>API: POST /campaigns/{id}/start
+    loop While campaign ACTIVE and within hours
+        W->>R: POST /v2/create-phone-call
+        R->>T: Outbound call + agent
+        T->>API: POST /retell/webhook/call_started
+        T->>API: POST /retell/tools/get_available_slots (if appointment gap)
+        T->>API: POST /retell/tools/book_appointment (if patient books)
+        T->>API: POST /retell/webhook/call_ended
+        T->>API: POST /retell/webhook/call_analyzed
+    end
+```
+
+### 4.2 Step checklist (minimal path to first dial)
+
+| Step | Who | Action |
+|------|-----|--------|
+| 1 | Super admin | `POST /admin/clinics` — create clinic. |
+| 2 | Super admin | `POST /admin/clinics/{clinic_id}/integration` — set `retell_agent_id`, `retell_did`, Google SA JSON, concurrency, etc. |
+| 3 | Super admin | `POST /admin/clinics/{clinic_id}/ehr-config` — NextGen URL + credentials. |
+| 4 | Super admin | `PUT /admin/clinics/{clinic_id}/appt-types` — `mapping` for `preventive_visit`, `hospital_flu` (NextGen labels/codes). |
+| 5 | Super admin (optional) | `POST /admin/clinics/{clinic_id}/ehr-test` — validate EHR connectivity. |
+| 6 | Retell dashboard | Register webhooks and custom tools under **`APP_BASE_URL`** (§5.2–5.3). |
+| 7 | Staff (admin role, scoped JWT) | `POST /campaigns/upload` — CSV/Excel + `name` + `measurement_year`. |
+| 8 | Staff | `POST /campaigns/{campaign_id}/start` — worker starts dialing. |
+
+After step 8, the **worker** calls **Retell** (§6); no further POSTs are required from the browser until pause/cancel/export.
+
+---
+
+## 5. HTTP routes — full catalog
+
+Base URL: `APP_BASE_URL` (or `http://localhost:8000` for local). Routers: `main.py`.
+
+### 5.1 Admin — `X-Admin-Key: <ADMIN_API_KEY>` (no JWT)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/admin/clinics` | Create clinic. |
+| `GET` | `/admin/clinics` | List clinics. |
+| `GET` | `/admin/clinics/{clinic_id}` | Get clinic. |
+| `PUT` | `/admin/clinics/{clinic_id}` | Update clinic. |
+| `POST` | `/admin/clinics/{clinic_id}/integration` | Create integration (Retell + GCal shape). |
+| `GET` | `/admin/clinics/{clinic_id}/integration` | Get integration. |
+| `PUT` | `/admin/clinics/{clinic_id}/integration` | Update integration. |
+| `POST` | `/admin/clinics/{clinic_id}/ehr-config` | Create/update NextGen EHR config. |
+| `GET` | `/admin/clinics/{clinic_id}/ehr-config` | Get EHR config. |
+| `POST` | `/admin/clinics/{clinic_id}/ehr-test` | Test EHR login/automation. |
+| `PUT` | `/admin/clinics/{clinic_id}/appt-types` | Body `{"mapping":{"preventive_visit":"...","hospital_flu":"..."}}` — keys must be `GapType` values. |
+
+Other `/admin/*` routes (staff, license, bookings, business hours, etc.) exist for non-HEDIS or ops; see OpenAPI `/docs`.
+
+### 5.2 Campaigns — `Authorization: Bearer <scoped_staff_jwt>`
+
+JWT must be **scoped to the clinic** (after `/auth/select-clinic`). Several endpoints require **`role == admin`** inside that token.
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `POST` | `/campaigns/upload` | JWT, **admin** | Multipart: `file`, `name`, `measurement_year`. Creates campaign + contacts. |
+| `GET` | `/campaigns` | JWT | List campaigns (optional `?status=`). |
+| `GET` | `/campaigns/{campaign_id}` | JWT | Campaign detail + counters. |
+| `GET` | `/campaigns/{campaign_id}/contacts` | JWT | Paginated contacts (no phone PHI). |
+| `POST` | `/campaigns/{campaign_id}/start` | JWT, **admin** | `PENDING` → `ACTIVE`; starts worker for clinic. |
+| `POST` | `/campaigns/{campaign_id}/pause` | JWT, **admin** | Pause campaign. |
+| `POST` | `/campaigns/{campaign_id}/resume` | JWT, **admin** | Resume. |
+| `POST` | `/campaigns/{campaign_id}/cancel` | JWT, **admin** | Cancel. |
+| `GET` | `/campaigns/{campaign_id}/export` | JWT | PHI-safe CSV export. |
+
+**Upload constraints:** ≤ 10 MB, ≤ 2000 parsed rows; content types include CSV and Excel (see `campaigns.py`).
+
+### 5.3 Retell → your API (HMAC `x-retell-signature`)
 
 | Purpose | Method | Path |
 |---------|--------|------|
-| Fetch NextGen slots for voice | `POST` | `/retell/tools/get_available_slots` |
-| Book in NextGen mid-call | `POST` | `/retell/tools/book_appointment` |
-
-**Latency:** Design agent dialogue and EHR automation so **slot lookup stays under ~3 seconds** (PRD / architecture target).
-
-### 4.2 Webhooks (HMAC-signed; Retell → your API)
-
-| Event | Method | Path |
-|-------|--------|------|
+| NextGen slots | `POST` | `/retell/tools/get_available_slots` |
+| NextGen book | `POST` | `/retell/tools/book_appointment` |
 | Call started | `POST` | `/retell/webhook/call_started` |
 | Call ended | `POST` | `/retell/webhook/call_ended` |
 | Post-call analysis | `POST` | `/retell/webhook/call_analyzed` |
 
-### 4.3 Legacy / non-HEDIS (do not use for HEDIS NextGen flow)
+**Latency:** Target **&lt; ~3 seconds** for slot lookup.
 
-| Path | Notes |
+### 5.4 Legacy Retell (do **not** use for HEDIS NextGen)
+
+| Method | Path |
+|--------|------|
+| `POST` | `/retell/schedule` |
+| `POST` | `/retell/confirm_booking` |
+| `GET` / `POST` | `/retell/availability` |
+
+### 5.5 Auth helper routes (staff JWT)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/auth/google` | Start OAuth. |
+| `GET` | `/auth/google/callback` | OAuth callback → tokens. |
+| `GET` | `/auth/me` | Memberships. |
+| `POST` | `/auth/select-clinic` | Scoped JWT for a clinic. |
+
+---
+
+## 6. Outbound API — Retell `create-phone-call`
+
+**Called by:** `campaign_worker` → `services/retell_client.create_outbound_call` (not exposed as your own REST route).
+
+| Item | Value |
 |------|--------|
-| `POST /retell/schedule` | Calendar-based scheduling flow. |
-| `POST /retell/confirm_booking` | Calendar confirmation. |
-| `GET` / `POST /retell/availability` | Calendar availability. |
+| URL | `POST https://api.retellai.com/v2/create-phone-call` |
+| Header | `Authorization: Bearer <RETELL_API_KEY>` |
+| Header | `Content-Type: application/json` |
+
+**Body fields (implemented):**
+
+| JSON field | Type | Description |
+|------------|------|-------------|
+| `from_number` | string | E.164 — `ClinicIntegration.retell_outbound_number` or `RETELL_FROM_NUMBER`. |
+| `to_number` | string | E.164 patient phone (decrypted from contact). |
+| `override_agent_id` | string | Same as `ClinicIntegration.retell_agent_id`. |
+| `metadata` | object | String values only (see §7). |
+| `retell_llm_dynamic_variables` | object | **Same keys/values as `metadata`** — used for prompt variables. |
+
+**Example body** (illustrative):
+
+```json
+{
+  "from_number": "+15551234567",
+  "to_number": "+17875551234",
+  "override_agent_id": "agent_xxxxxxxx",
+  "metadata": {
+    "call_type": "hedis_campaign",
+    "campaign_contact_id": "550e8400-e29b-41d4-a716-446655440000",
+    "gap_type": "preventive_visit",
+    "clinic_name": "Demo Primary Care",
+    "clinic_phone": "+15559876543",
+    "patient_name": "Jane Doe",
+    "provider_name": "Dr. Smith",
+    "payer": "Medicare"
+  },
+  "retell_llm_dynamic_variables": {
+    "call_type": "hedis_campaign",
+    "campaign_contact_id": "550e8400-e29b-41d4-a716-446655440000",
+    "gap_type": "preventive_visit",
+    "clinic_name": "Demo Primary Care",
+    "clinic_phone": "+15559876543",
+    "patient_name": "Jane Doe",
+    "provider_name": "Dr. Smith",
+    "payer": "Medicare"
+  }
+}
+```
+
+**Response:** JSON with `call_id` (string). Reference: [Retell — Create phone call](https://docs.retellai.com/api-references/create-phone-call).
 
 ---
 
-## 5. Outbound API (your backend → Retell)
+## 7. Metadata and dynamic variables (HEDIS campaigns)
 
-The campaign worker calls Retell directly (not your own domain):
+| Key | Required | Notes |
+|-----|----------|-------|
+| `call_type` | Yes | Exactly `hedis_campaign`. |
+| `campaign_contact_id` | Yes | UUID string. |
+| `gap_type` | Yes | `GapType` value — §8. |
+| `clinic_name` | Yes | |
+| `clinic_phone` | Yes | Callback DID. |
+| `patient_name` | Yes | Use `"Patient"` if missing in CSV. |
+| `provider_name` | No | May be empty; tools still need a provider name in `args` or metadata for slots. |
+| `payer` | No | Insurance plan name (e.g. `"Medicare"`). Used by agent for coverage objections. May be empty. |
 
-- **Endpoint:** `POST https://api.retellai.com/v2/create-phone-call`
-- **Auth:** `Authorization: Bearer <RETELL_API_KEY>`
-- **Body (simplified):** `from_number`, `to_number`, `override_agent_id` (= clinic’s `retell_agent_id`), `metadata`, `retell_llm_dynamic_variables` (same key/value pairs as `metadata`, coerced to strings).
-
-Reference: [Retell — Create phone call](https://docs.retellai.com/api-references/create-phone-call).
-
----
-
-## 6. Metadata and dynamic variables (HEDIS campaigns)
-
-The worker sends the following on **every** HEDIS outbound call. All values are **strings** in the JSON body. The same map is copied to **`retell_llm_dynamic_variables`** so prompts can reference them as dynamic variables (names depend on your Retell prompt template).
-
-| Key | Source | Required | Notes |
-|-----|--------|----------|--------|
-| `call_type` | Worker | Yes | Must be exactly `hedis_campaign` for HEDIS webhook and booking side effects. |
-| `campaign_contact_id` | Worker | Yes | UUID string; ties webhooks and `book_appointment` to `CampaignContact`. |
-| `gap_type` | `CampaignContact.gap_type` | Yes | Must be one of the `GapType` enum values (snake_case), see §7. |
-| `clinic_name` | `Clinic.name` | Yes | For prompts / patient context. |
-| `clinic_phone` | `retell_did` or outbound `from_number` | Yes | Callback number for the patient. |
-| `patient_name` | Decrypted from contact | Yes | Placeholder `"Patient"` if missing. |
-| `provider_name` | CSV / contact | No | Empty string allowed; **tool** may still require `provider_name` in `args`. |
-| `payer` | CSV / contact | No | Insurance/plan label for prompt context. |
-| `patient_dob` | Decrypted | No | `YYYY-MM-DD` when present; omitted if not stored. |
-
-**Important:** `clinic_id` is **not** in this map. The server resolves `clinic_id` from **`agent_id`** on every webhook/tool request via `ClinicIntegration.retell_agent_id`.
+**`clinic_id` is not sent.** The API resolves the clinic from `call.agent_id` on tools/webhooks.
 
 ---
 
-## 7. Gap types (`GapType` enum — Plan 013)
+## 8. Gap types (`GapType` enum — Plan 013)
 
-Canonical source: `Clinic_app/data/enums.py`. Use these **exact** snake_case strings in CSV, DB, metadata, and tool args.
+Canonical: `Clinic_app/data/enums.py`.
 
-**Appointment-based** (use NextGen: `get_available_slots` → `book_appointment`):
+**Appointment-based** → call **`get_available_slots`** then **`book_appointment`:** `preventive_visit`, `hospital_flu`.
 
-| Value |
-|-------|
-| `preventive_visit` |
-| `hospital_flu` |
+**Order-based** → **no** booking tools; confirm interest + next steps; staff fulfill from dashboard/summary: `colorectal`, `eye_exam`, `breast_cancer`, `kidney`, `afr_cmp`.
 
-**Order-based** (voice script + staff fulfillment; no EHR booking in this path for MVP):
+**Excluded at parse (never dialed):** `medication_review`.
 
-| Value |
-|-------|
-| `colorectal` |
-| `eye_exam` |
-| `breast_cancer` |
-| `kidney` |
-| `afr_cmp` |
-| `generic` |
+**Unrecognized / empty gap** in CSV → row **`ParseError`** on upload (not imported).
 
-**Excluded at CSV parse** (never queued for calling):
-
-| Value |
-|-------|
-| `medication_review` |
-
-**Retell prompt:** Branch script and tool usage from `gap_type`: appointment-based → slot lookup + book; order-based → confirm interest and next steps, then end without booking tools.
-
-**NextGen appointment type:** Admin **gap_type → appointment type string** mapping lives in EHR config (`appt_type_mapping`) for appointment-based gaps only. Values must match what Playwright selects in NextGen (often the **visible label** in the dropdown).
+**`appt_type_mapping`:** Required for correct NextGen appointment type when booking; keys are `gap_type` strings for appointment-based gaps.
 
 ---
 
-## 8. Custom tool request shape (implemented contract)
+## 9. Custom tools — contract + JSON examples
 
-Handlers read the raw JSON body, verify signature, then parse:
+Handlers verify **`x-retell-signature`**, then parse JSON:
 
-- `body["call"]` — call object (includes `call_id`, `agent_id`, `metadata`, …).
-- `body["args"]` — tool arguments from the agent.
+- `call` — includes at least `call_id`, `agent_id`, `metadata`.
+- `args` — tool arguments from the LLM.
 
-### 8.1 `POST /retell/tools/get_available_slots`
+### 9.1 `POST /retell/tools/get_available_slots`
 
 | Input | Location | Required |
 |-------|----------|----------|
-| `agent_id` | `call.agent_id` | Yes — resolves clinic. |
-| `provider_name` | `args.provider_name` or `call.metadata.provider_name` | Yes. |
-| `date` | `args.date` | No — defaults to **today** (`YYYY-MM-DD`). |
+| `agent_id` | `call.agent_id` | Yes |
+| `provider_name` | `args.provider_name` or `call.metadata.provider_name` | Yes |
+| `date` | `args.date` | No — defaults to today `YYYY-MM-DD` |
 
-**Response:** `success`, `message`, `slots` (human-readable strings for TTS), `slot_details` (structured; internal use).
+**Example request body** (shape Retell POSTs to your server):
 
-### 8.2 `POST /retell/tools/book_appointment`
+```json
+{
+  "call": {
+    "call_id": "call_live_xxx",
+    "agent_id": "agent_xxxxxxxx",
+    "metadata": {
+      "call_type": "hedis_campaign",
+      "campaign_contact_id": "550e8400-e29b-41d4-a716-446655440000",
+      "gap_type": "preventive_visit",
+      "provider_name": "Dr. Smith",
+      "patient_name": "Jane Doe",
+      "clinic_name": "Demo Primary Care",
+      "clinic_phone": "+15559876543"
+    }
+  },
+  "args": {
+    "provider_name": "Dr. Smith",
+    "date": "2026-03-25"
+  }
+}
+```
+
+**Response:** `success`, `message`, `slots` (strings for TTS), `slot_details` (structured).
+
+### 9.2 `POST /retell/tools/book_appointment`
 
 | Input | Location | Required |
 |-------|----------|----------|
-| `agent_id` | `call.agent_id` | Yes. |
-| `provider_name` | `args.provider_name` | Yes. |
-| `chosen_slot` | `args.chosen_slot` | Yes — must align with a slot the agent offered (same string format as returned in `slots`). |
-| `patient_name` | `args.patient_name` | Yes. |
-| `patient_dob` | `args.patient_dob` | Yes (`YYYY-MM-DD`). |
-| `gap_type` | `args.gap_type` | No — if missing, server falls back to mapping default / generic appointment type. |
+| `agent_id` | `call.agent_id` | Yes |
+| `provider_name` | `args.provider_name` | Yes |
+| `chosen_slot` | `args.chosen_slot` | Yes — **exact string** from `slots[]` offered to the patient |
+| `patient_name` | `args.patient_name` | Yes — first and last name |
+| `gap_type` | `args.gap_type` | No — falls back to mapping default if omitted |
 
-**HEDIS side effect:** If `call.metadata.call_type == "hedis_campaign"` and `campaign_contact_id` is valid, success updates `CampaignContact.ehr_appointment_id` and commits.
+**Example request body:**
 
----
+```json
+{
+  "call": {
+    "call_id": "call_live_xxx",
+    "agent_id": "agent_xxxxxxxx",
+    "metadata": {
+      "call_type": "hedis_campaign",
+      "campaign_contact_id": "550e8400-e29b-41d4-a716-446655440000",
+      "gap_type": "preventive_visit"
+    }
+  },
+  "args": {
+    "provider_name": "Dr. Smith",
+    "chosen_slot": "Wednesday March 26 at 10:00 AM",
+    "patient_name": "Jane Doe",
+    "gap_type": "preventive_visit"
+  }
+}
+```
 
-## 9. Webhook behavior (HEDIS)
-
-All three webhooks:
-
-1. Read raw body bytes.
-2. Call `verify_retell_signature` (`x-retell-signature`, HMAC-SHA256 over compact JSON body with `RETELL_WEBHOOK_SECRET`).
-3. Parse `call` object (fallback: top-level body).
-
-**Playground / test:** Calls with `call_id` equal to `playground` or prefixed `test_` / `playground_` may skip verification (see code).
-
-### 9.1 `call_started`
-
-Creates `CallLog`, resolves clinic by `agent_id`. For HEDIS metadata, associates outbound campaign contacts when `call_type` and `campaign_contact_id` are present.
-
-### 9.2 `call_ended`
-
-Updates `CampaignContact` status (voicemail, no answer, booked, declined, exhausted, retries, etc.) from `disconnection_reason` and whether `ehr_appointment_id` is set.
-
-**Order-based gaps:** There is no EHR appointment ID when the call ends normally. The handler sets **`ORDER_AGREED`** optimistically. On **`call_analyzed`**, structured extraction can set **`ORDER_DECLINED`** if the patient clearly declined (see §9.3).
-
-### 9.3 `call_analyzed`
-
-Only processes rows where merged metadata has `call_type == "hedis_campaign"` and a valid `campaign_contact_id`.
-
-- Builds a short transcript string from `transcript`, `transcript_with_tool_calls`, or nested `call_analysis` fields (best effort).
-- **Appointment-based gaps:** runs **Claude** `summarize_transcript_sync` (one-sentence summary).
-- **Order-based gaps** (`ORDER_BASED_GAP_TYPES` in `data/enums.py`): runs **Claude** `extract_order_based_notes_sync` (JSON → `patient_agreed`, `action_for_staff`, `note`). The human-readable **`note`** is encrypted into `call_summary_encrypted`. If `patient_agreed` is **false** and the contact was **`ORDER_AGREED`**, status becomes **`ORDER_DECLINED`**.
-- If the transcript requests a human (same phrases as in code: “speak to a human”, etc.), contact status becomes **`HUMAN_REQUESTED`** unless the contact is already **`BOOKED`** (successful appointment).
-- Encrypts optional patient name and summary note; stores `CampaignAudit`.
-- **Does not** persist full transcript to the database (policy).
+**HEDIS side effect:** On success, if `call_type == hedis_campaign` and `campaign_contact_id` is valid, **`CampaignContact.ehr_appointment_id`** is set.
 
 ---
 
-## 10. Retell dashboard configuration (checklist)
+## 10. Webhook behavior (HEDIS)
 
-For **each** clinic agent:
+1. Read raw body bytes.  
+2. Verify HMAC (`x-retell-signature`, `RETELL_WEBHOOK_SECRET`).  
+3. Parse nested `call` / webhook payload.
 
-1. **Agent ID** — copy into `ClinicIntegration.retell_agent_id` (admin API or DB).
-2. **Webhooks** — register the three URLs in §4.2 using the clinic’s production `APP_BASE_URL`.
-3. **Custom functions / tools** — point to §4.1 URLs; ensure HTTP method `POST` and signing secret matches `RETELL_WEBHOOK_SECRET`.
-4. **Prompt** — inject dynamic variables matching §6 (`gap_type`, `patient_name`, `provider_name`, `clinic_name`, `clinic_phone`, `payer`, `patient_dob` when present). Instruct when to call **get_available_slots** (with `provider_name` and optional `date`) and **book_appointment** (all required args + `gap_type`).
-5. **Outbound** — ensure Retell allows outbound from `retell_outbound_number` or platform number matching `RETELL_FROM_NUMBER`.
+**Playground:** `call_id` of `playground` or prefixes `test_` / `playground_` may skip verification (see `retell.py`).
 
----
+### 10.1 `call_started`
 
-## 11. Verification flow (staging)
+Creates `CallLog`; links to `CampaignContact` when `campaign_contact_id` present.
 
-1. EHR: `ClinicEHRConfig` populated; `appt_type_mapping` covers all gap types you dial.
-2. Admin: integration row has correct `retell_agent_id`, DIDs, outbound number.
-3. Place a **test campaign** contact; start campaign; confirm `create-phone-call` succeeds.
-4. During call, confirm tools hit your server (200, signed).
-5. After hangup, confirm `call_ended` updated contact status and `call_analyzed` created `CampaignAudit`.
+### 10.2 `call_ended`
 
-Log outcomes in `PROGRESS.txt` per `PLAN.md` Plan 011.
+Updates `CampaignContact` status from disconnect reason and whether `ehr_appointment_id` exists. **Order-based:** optimistic **`ORDER_AGREED`** when hangup would otherwise look like decline; **`call_analyzed`** can set **`ORDER_DECLINED`**.
+
+### 10.3 `call_analyzed`
+
+Requires `call_type == hedis_campaign` + valid `campaign_contact_id`. **Appointment-based:** one-sentence Claude summary. **Order-based:** structured extraction → encrypted `call_summary_encrypted`. **No raw transcript** stored.
 
 ---
 
-## 12. Decisions (Edgar)
+## 11. Agent scripts and master prompt
 
-Recorded product / deployment choices so the playbook stays grounded in how the pilot will actually run.
+Register the same variable names Retell passes (`metadata` / dynamic variables). Below, **`{{variable}}`** means Retell dynamic variable injection.
 
-1. **`APP_BASE_URL` / domain / Azure** — No production site or Azure deploy yet. A **custom domain is optional** early on. For development and Retell integration tests, use a tunnel (**ngrok**, **Cloudflare Tunnel**, etc.) to get a temporary **`https://…`** URL. After Azure setup, use the **default app hostname** (e.g. `*.azurewebsites.net`) for webhooks/tools; add a branded domain later if desired.
+### 11.0 About the `{{payer}}` variable
 
-2. **Agents and gap types** — **Each clinic gets one Retell agent.** That agent uses **one playbook / prompt** that branches by **`gap_type`** (metadata + dynamic variables) so the script matches the care gap — not a separate Retell agent per gap type.
+`payer` is the patient’s insurance plan name (e.g. `”Medicare”`, `”Medicaid”`, `”BlueCross PPO”`). It comes from the CSV upload and is passed to the agent as both metadata and a dynamic variable.
 
-3. **Inbound vs outbound** — **Outbound HEDIS only** for now. **Inbound** calling and legacy calendar routes are **not** in scope; ignore `/retell/schedule`, `/retell/confirm_booking`, and `/retell/availability` for this pilot unless that changes later.
+**Use it for:** answering the most common patient objection — *”Is this covered?”* — naturally and confidently without lying. Always say *”typically covered”* and recommend the patient confirm with their plan.
 
-4. **Post-call summary** — **`call_analyzed`**: appointment-based gaps use a **one-sentence** Claude summary (`summarize_transcript_sync`); order-based gaps use **structured extraction** (`extract_order_based_notes_sync`); the stored note is **encrypted** in `campaign_audit.call_summary_encrypted`; the **raw transcript is not stored**.
+**Do not use it to make guarantees.** If `payer` is empty or `”unknown”`, fall back to the generic coverage line.
 
 ---
 
-## 13. E2E gate (local) — Plan 014 Sprint C
+### 11.1 Master prompt (copy-paste into Retell dashboard)
 
-Use this checklist to run a **full path** test: API + DB + Redis + (optional) Retell. Replace placeholders (`YOUR_*`, `CLINIC_ID`, `JWT`, etc.) with real values. **`ADMIN_API_KEY`** matches `X-Admin-Key` on admin routes. Campaign upload/start requires a **scoped JWT** with **admin** role — easiest path is **Swagger UI** at `http://localhost:8000/docs` (Authorize → call `/campaigns/upload` and `/campaigns/{id}/start`). The curl examples below use admin-only steps; use Swagger for JWT-protected routes if you prefer not to paste tokens.
+Paste this as the agent’s **system prompt** in the Retell dashboard. All `{{variable}}` tokens are Retell LLM dynamic variables — register them under the agent’s variable list.
 
-### 13.1 Stack and migrations
+```
+## IDENTITY
+You are a friendly, professional outbound care coordinator calling on behalf of {{clinic_name}}. You are NOT a doctor, nurse, or clinician. You never give medical advice, diagnoses, or interpret test results.
+
+## YOUR VARIABLES (do NOT read key names aloud — use the values naturally in conversation)
+- gap_type: {{gap_type}}
+- patient_name: {{patient_name}}
+- provider_name: {{provider_name}}
+- clinic_name: {{clinic_name}}
+- clinic_phone: {{clinic_phone}}
+- payer: {{payer}}
+
+---
+
+## CALL OPENING
+
+Always begin with:
+“Hi, may I speak with {{patient_name}}?”
+[Wait for response.]
+
+If confirmed: use the gap-specific opening below.
+If not the patient / wrong number: “I’m sorry to bother you. I’ll update our records. Have a great day.” [End call.]
+If voicemail: “Hi {{patient_name}}, this is {{clinic_name}} calling about your preventive care. Please call us back at {{clinic_phone}} at your convenience. Thank you.” [End call — do not leave gap details on voicemail.]
+
+---
+
+## GAP-SPECIFIC OPENINGS AND PURPOSE
+
+Use the opening that matches {{gap_type}}:
+
+**preventive_visit**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Our records show you’re due for your annual wellness visit — it’s a free preventive checkup with your care team. [If payer is not empty: This visit is typically covered under your {{payer}} plan.] I wanted to see if we could get that scheduled for you today.”
+
+**hospital_flu**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. We’re following up after a recent hospital stay to schedule a follow-up visit with your care team. Getting seen soon after a hospital stay is really important for your recovery, and we’d like to get you in as quickly as possible.”
+
+**colorectal**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Your care team wanted to reach out about colon cancer screening — it’s one of the most effective ways to catch problems early when they’re most treatable. [If payer is not empty: It’s typically covered under {{payer}}.] This is usually a simple at-home test kit your provider can arrange.”
+
+**eye_exam**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Your provider wanted to check in about a diabetic eye exam that’s recommended as part of your care. It only takes about 20 to 30 minutes and is important for catching early changes. [If payer is not empty: It’s typically covered under {{payer}}.]”
+
+**breast_cancer**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Your care team has a breast cancer screening — a mammogram — on file as something you’re due for. It’s a routine screening that can make a real difference when done regularly. [If payer is not empty: It’s typically covered under {{payer}}.]”
+
+**kidney**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Your provider has noted that you’re due for kidney function lab work — it’s a simple blood draw that helps your team keep an eye on your kidney health. [If payer is not empty: It’s typically covered under {{payer}}.]”
+
+**afr_cmp**
+“Hi {{patient_name}}, I’m calling from {{clinic_name}}. Your care team has requested some routine lab work — specifically an albumin-to-creatinine test, which checks kidney health using a simple urine sample. [If payer is not empty: It’s typically covered under {{payer}}.]”
+
+---
+
+## TOOL CALLING — APPOINTMENT-BASED GAPS ONLY
+
+ONLY call tools when gap_type is “preventive_visit” or “hospital_flu”.
+NEVER call tools for: colorectal, eye_exam, breast_cancer, kidney, afr_cmp.
+
+### Step 1 — When the patient agrees to schedule
+
+Call the tool: get_available_slots
+Parameters:
+  - provider_name: use {{provider_name}} if it is not empty. If it IS empty, say “Let me check availability with your care team” and use the clinic’s default provider or ask the patient once: “Do you know which doctor you usually see?”
+  - date: today’s date in YYYY-MM-DD format, unless the patient expresses a day preference (e.g. “next week” → use the nearest Monday).
+
+When you receive slots back:
+- Read no more than 2 or 3 options. Read them naturally aloud: say “Tuesday April 1st at 10 AM” not “2026-04-01T10:00:00”.
+- Ask: “Do any of those times work for you?”
+
+If no slots are returned or the tool fails:
+“I’m sorry, I’m not seeing any openings in our system right now. You’re welcome to call us directly at {{clinic_phone}} and we’ll get you scheduled. Would that work?”
+
+### Step 2 — When the patient picks a time
+
+Call the tool: book_appointment
+Parameters:
+  - provider_name: same value used in get_available_slots
+  - chosen_slot: the EXACT string from the slots[] array as returned by get_available_slots. Do NOT paraphrase, abbreviate, or reformat this string.
+  - patient_name: {{patient_name}}
+  - gap_type: {{gap_type}}
+
+On booking success:
+“You’re all set! Your appointment is confirmed for [read the chosen slot naturally]. If anything comes up, you can call us at {{clinic_phone}}. Is there anything else I can help you with?”
+
+On booking failure:
+“I’m sorry — I wasn’t able to complete the booking in our system. Please call us directly at {{clinic_phone}} and we’ll make sure you get scheduled. I apologize for the inconvenience.”
+
+---
+
+## ORDER-BASED GAPS — NO TOOLS
+
+For gap_type: colorectal, eye_exam, breast_cancer, kidney, afr_cmp —
+NEVER call get_available_slots or book_appointment.
+
+After your opening, ask:
+“Is this something you’d be open to?”
+
+If yes:
+“That’s great. I’ll let your care team know you’re interested. Someone from {{clinic_name}} will be in touch to get that arranged. If you have any questions in the meantime, you can always call us at {{clinic_phone}}. Thank you so much.”
+
+If no / not interested:
+“No problem at all — I completely understand. I’ll let your care team know. If you ever change your mind, please don’t hesitate to call us at {{clinic_phone}}. Thank you for your time.”
+
+If maybe / wants more information:
+“Absolutely — I’ll have someone from {{clinic_name}} follow up with more details. You can also call us at {{clinic_phone}} anytime. Thank you.”
+
+---
+
+## COMMON OBJECTIONS
+
+| Situation | What to say |
+|-----------|-------------|
+| “I already did that / I already have an appointment” | “That’s wonderful — thank you for staying on top of your care! I’ll make a note of that. Have a great day.” |
+| “Is this covered by my insurance?” | [If {{payer}} is known]: “This is typically covered under {{payer}} — I’d recommend confirming the details directly with your plan.” [If {{payer}} is empty]: “Most insurance plans cover this as a preventive service — I’d recommend checking with your plan directly.” |
+| “How much does it cost?” | “Preventive screenings are often covered at no cost, but coverage depends on your specific plan. I’d recommend confirming with {{payer}} or calling your insurance directly to be sure.” |
+| “Call me back later / not a good time” | “Of course — when would be a better time to reach you?” [Note the time if given, then]: “I’ll pass that along. Thank you and sorry for the interruption.” |
+| “I want to talk to a real person” | “Absolutely — you can reach our team directly at {{clinic_phone}}. They’ll be happy to help. Is there anything else before I let you go?” [End after.] |
+| “Who is this / is this a scam?” | “I completely understand the concern. I’m calling from {{clinic_name}} — you can call us back directly at {{clinic_phone}} to verify. I’m happy to wait or you can call back at your convenience.” |
+| “Remove me from the list” | “I’ll absolutely make note of that and pass it to your care team. I’m sorry for the interruption. Have a great day.” [End call.] |
+| Tool returns an error | “I’m having a little trouble with our scheduling system right now. The easiest thing would be to call us at {{clinic_phone}} and we can get you taken care of right away.” |
+
+---
+
+## VOICE RULES (always follow)
+
+1. Keep every turn to 1–2 sentences. This is a phone call, not a script reading.
+2. Always pause after a question and wait for the patient to respond.
+3. Speak naturally — do not read variable names, JSON keys, or date formats aloud.
+4. Do not repeat PHI back to the patient — no full date of birth, no MRN, no SSN.
+5. Do not diagnose, interpret test results, or give clinical opinions.
+6. If a patient seems confused or hard of hearing: slow down, simplify, and offer the clinic phone number.
+7. Never make up appointment times, provider names, or test results.
+8. Be warm, patient, and unhurried — many callers are elderly.
+
+---
+
+## CALL ENDINGS
+
+Booked appointment:
+“Thank you so much, {{patient_name}}. You’re all set! We’ll see you [date and time]. Have a wonderful day.”
+
+Declined / not interested:
+“No worries at all. Thank you for your time, {{patient_name}}. Take care.”
+
+Transferred to human:
+“Of course! Please call {{clinic_phone}} and our team will be right with you. Take care.”
+
+Unable to complete (tool failure, wrong person, etc.):
+“I’m sorry for any trouble. Please feel free to call us at {{clinic_phone}} if you need anything. Have a great day.”
+```
+
+---
+
+### 11.2 Retell dashboard variable registration
+
+Register all of the following as **LLM dynamic variables** in the agent settings so `{{variable}}` injection works:
+
+| Variable name | Type | Notes |
+|---------------|------|-------|
+| `gap_type` | string | One of 7 GapType values — see §8 |
+| `patient_name` | string | Defaults to `”Patient”` if missing in CSV |
+| `provider_name` | string | May be empty; prompt handles both cases |
+| `clinic_name` | string | From `Clinic.name` |
+| `clinic_phone` | string | E.164 callback DID |
+| `payer` | string | Insurance plan name; may be empty |
+
+---
+
+## 12. Retell dashboard configuration (checklist)
+
+1. **Agent ID** → stored in `ClinicIntegration.retell_agent_id`.  
+2. **Webhooks** → §5.3 URLs with `APP_BASE_URL`.  
+3. **Custom tools** → same base URL; **POST**; signing secret = `RETELL_WEBHOOK_SECRET`.  
+4. **Prompt** → §11 + dynamic variables from §7.  
+5. **Outbound caller ID** → matches `retell_outbound_number` or `RETELL_FROM_NUMBER`.
+
+---
+
+## 13. Verification flow (staging)
+
+1. EHR config + `appt_type_mapping` for gaps you dial.  
+2. Integration row: correct `retell_agent_id`, DIDs, outbound number.  
+3. Upload CSV → start campaign → `create-phone-call` succeeds in logs.  
+4. During call: tools return 200, signed.  
+5. After hangup: `call_ended` + `call_analyzed` → DB status + `campaign_audit`.
+
+Log outcomes in `PROGRESS.txt` per `PLAN.md`.
+
+---
+
+## 14. Decisions (Edgar)
+
+1. **Tunnel / Azure** — Early dev uses HTTPS tunnel; production uses stable `APP_BASE_URL`.  
+2. **One agent per clinic** — Single prompt branching on `gap_type`.  
+3. **Outbound HEDIS only** — Legacy calendar Retell routes out of scope for this pilot.  
+4. **Summaries** — Encrypted summary in `campaign_audit`; transcript not stored.
+
+---
+
+## 15. E2E gate (local) — Plan 014 Sprint C
+
+### 15.1 Stack
 
 ```bash
-# From repo root — start Postgres, Redis, app (hot-reload)
 docker compose -f docker-compose.dev.yaml up -d
-
-# Run Alembic (optional profile; run once after schema changes)
 docker compose -f docker-compose.dev.yaml --profile migrate run --rm migrate
 ```
 
-Ensure `.env` (or container env) sets `PHI_ENCRYPTION_KEY`, `JWT_SECRET_KEY`, `RETELL_*`, `ANTHROPIC_API_KEY`, `ADMIN_API_KEY`, and `REDIS_URL=redis://redis:6379` when using Docker network names.
+Set `PHI_ENCRYPTION_KEY`, `JWT_SECRET_KEY`, `RETELL_*`, `ANTHROPIC_API_KEY`, `ADMIN_API_KEY`, `REDIS_URL` as appropriate.
 
-### 13.2 Create clinic and integration (admin API)
+### 15.2 Admin curl (Windows cmd-style `^` line continuations)
 
 ```bash
 set BASE=http://localhost:8000
@@ -275,43 +606,16 @@ curl -s -X POST "%BASE%/admin/clinics" ^
   -d "{\"name\":\"E2E Clinic\",\"tier\":\"basic\",\"status\":\"active\",\"license_token\":\"e2e-license-token-001\"}"
 ```
 
-Save `clinic_id` from `data.id` in the JSON response as `CLINIC_ID`.
+Then `POST /admin/clinics/CLINIC_ID/integration`, `POST .../ehr-config`, optional `PUT .../appt-types`. See **`IntegrationCreateRequest`** in `Clinic_app/Routes/admin.py` for the integration JSON shape.
 
-**Integration** (requires valid E.164 `retell_did` and minimal Google service account JSON shape — see `IntegrationCreateRequest` in `Clinic_app/Routes/admin.py`):
+### 15.3 Campaigns
 
-```bash
-curl -s -X POST "%BASE%/admin/clinics/CLINIC_ID/integration" ^
-  -H "Content-Type: application/json" ^
-  -H "X-Admin-Key: %ADMIN_KEY%" ^
-  -d "{\"retell_agent_id\":\"YOUR_RETELL_AGENT_ID\",\"retell_did\":\"+15551234567\",\"google_service_account_json\":\"{\\\"type\\\":\\\"service_account\\\",\\\"project_id\\\":\\\"p\\\",\\\"private_key_id\\\":\\\"x\\\",\\\"private_key\\\":\\\"-----BEGIN PRIVATE KEY-----\\\\nMII\\\\n-----END PRIVATE KEY-----\\\\n\\\",\\\"client_email\\\":\\\"a@p.iam.gserviceaccount.com\\\"}\",\"default_appointment_length_minutes\":30,\"default_capacity\":10}"
-```
+Use **Swagger** `POST /campaigns/upload` (multipart: `file`, `name`, `measurement_year`) and **`POST /campaigns/{id}/start`** with **Authorize** JWT (scoped clinic, **admin** role).
 
-### 13.3 NextGen EHR config (admin API)
+### 15.4 Sign-off
 
-```bash
-curl -s -X POST "%BASE%/admin/clinics/CLINIC_ID/ehr-config" ^
-  -H "Content-Type: application/json" ^
-  -H "X-Admin-Key: %ADMIN_KEY%" ^
-  -d "{\"nextgen_url\":\"https://your-nextgen-host/\",\"nextgen_username\":\"user\",\"nextgen_password\":\"pass\"}"
-```
-
-Optional: `PUT /admin/clinics/{clinic_id}/appt-types` with `{"mapping":{"preventive_visit":"CODE",...}}` so slot lookup maps gap types to NextGen codes.
-
-### 13.4 Campaign CSV upload and start (JWT — Swagger recommended)
-
-Prepare a small CSV with columns your parser expects (see `csv_parser` / PRD), including at least one **order-based** row (e.g. `colorectal`) and one **appointment-based** row (e.g. `preventive_visit`).
-
-In Swagger: **POST `/campaigns/upload`** — form fields `file`, `name`, `measurement_year`; then **POST `/campaigns/{id}/start`**.
-
-### 13.5 What to watch
-
-- **Logs:** worker should log outbound `create-phone-call`; during the call, Retell should hit **`/retell/tools/*`** and webhooks **`/retell/webhook/call_*`** (200 responses).
-- **DB:** `campaign_contact.status` transitions; after hangup + analysis, **`campaign_audit`** rows with encrypted summary; order-based **`ORDER_DECLINED`** when the patient declined (see §9.3).
-
-### 13.6 Sign-off
-
-Record date and what you exercised in **`PROGRESS.txt`** per `PLAN.md` Plan 014.
+Record in **`PROGRESS.txt`**.
 
 ---
 
-*Last updated: 2026-03-23 — Plan 014 Sprint C: §9.3 order-based extraction; §13 E2E gate.*
+*Last updated: 2026-03-25 — Workflow §4, full API catalog §5, create-phone-call + tool JSON §6–9, detailed agent prompt §11 (payer usage, per-gap scripts, tool calling steps, objection handling, voice rules).*

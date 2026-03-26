@@ -33,7 +33,7 @@ async def run_booking_reaper() -> None:
             logger.info(f"Booking reaper: found {len(expired)} expired hold(s)")
             for booking in expired:
                 try:
-                    await expire_booking(db, booking.id)
+                    await expire_booking(db, booking.id, booking.clinic_id)
                     await db.commit()
                     logger.info(f"Booking reaper: expired booking {booking.id}")
                 except Exception as exc:

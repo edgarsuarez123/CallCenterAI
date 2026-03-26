@@ -356,54 +356,62 @@ class TestBookingToDict:
 
 class TestVerifyRetellSignature:
     """Tests for verify_retell_signature function."""
-    
+
+    def _make_request(self, signature_header: str | None) -> Mock:
+        """Build a synchronous mock request with the given x-retell-signature header."""
+        mock_request = Mock()
+        mock_request.headers.get = Mock(side_effect=lambda key, default=None: (
+            signature_header if key.lower() == "x-retell-signature" else default
+        ))
+        return mock_request
+
     @pytest.mark.asyncio
     async def test_verify_signature_valid(self):
         """Test valid signature passes verification."""
+        import json as _json
         secret = "test_secret"
         body = b'{"test": "data"}'
-        expected_sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-        
-        mock_request = AsyncMock()
-        mock_request.body = AsyncMock(return_value=body)
-        
-        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": secret}):
+        # The function normalizes JSON to compact form before hashing
+        normalized = _json.dumps(_json.loads(body), separators=(",", ":"), ensure_ascii=False)
+        expected_sig = hmac.new(secret.encode(), normalized.encode("utf-8"), hashlib.sha256).hexdigest()
+        mock_request = self._make_request(expected_sig)
+
+        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": secret, "APP_ENVIRONMENT": "production"}):
             # Should not raise
-            await verify_retell_signature(mock_request, expected_sig)
-    
+            await verify_retell_signature(mock_request, body)
+
     @pytest.mark.asyncio
     async def test_verify_signature_invalid(self):
         """Test invalid signature raises HTTPException."""
         secret = "test_secret"
         body = b'{"test": "data"}'
-        
-        mock_request = AsyncMock()
-        mock_request.body = AsyncMock(return_value=body)
-        
-        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": secret}):
+        mock_request = self._make_request("invalid_signature")
+
+        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": secret, "APP_ENVIRONMENT": "production"}):
             with pytest.raises(HTTPException) as exc_info:
-                await verify_retell_signature(mock_request, "invalid_signature")
+                await verify_retell_signature(mock_request, body)
             assert exc_info.value.status_code == 401
-    
+
     @pytest.mark.asyncio
     async def test_verify_signature_missing(self):
-        """Test missing signature raises HTTPException."""
-        mock_request = AsyncMock()
-        
-        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": "secret"}):
+        """Test missing signature raises HTTPException in production."""
+        mock_request = self._make_request(None)
+
+        with patch.dict(os.environ, {"RETELL_WEBHOOK_SECRET": "secret", "APP_ENVIRONMENT": "production"}):
             with pytest.raises(HTTPException) as exc_info:
-                await verify_retell_signature(mock_request, None)
+                await verify_retell_signature(mock_request, b'{"test": "data"}')
             assert exc_info.value.status_code == 401
-    
+
     @pytest.mark.asyncio
     async def test_verify_signature_skipped_when_no_secret(self):
-        """Test signature verification skipped when no secret configured."""
-        mock_request = AsyncMock()
-        
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("RETELL_WEBHOOK_SECRET", None)
-            # Should not raise when secret not configured
-            await verify_retell_signature(mock_request, None)
+        """Test signature verification skipped when no secret configured (non-production)."""
+        mock_request = self._make_request(None)
+
+        env = {k: v for k, v in os.environ.items() if k != "RETELL_WEBHOOK_SECRET"}
+        env.pop("APP_ENVIRONMENT", None)
+        with patch.dict(os.environ, env, clear=True):
+            # Should not raise when secret not configured in non-production
+            await verify_retell_signature(mock_request, b'{"test": "data"}')
 
 
 # ============================================================================

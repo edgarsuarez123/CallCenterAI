@@ -319,11 +319,14 @@ async def create_provider(
 @provider_router.get("/providers/{provider_id}", response_model=APIResponse)
 async def get_provider(
     provider_id: UUID,
+    clinic_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
-    """Get provider by ID."""
+    """Get provider by ID. Optionally scope to a clinic_id for tenant isolation."""
     provider = await db.get(Provider, provider_id)
     if not provider:
+        raise_not_found("Provider", provider_id)
+    if clinic_id and provider.clinic_id != clinic_id:
         raise_not_found("Provider", provider_id)
     
     return APIResponse(
@@ -336,11 +339,14 @@ async def get_provider(
 async def update_provider(
     provider_id: UUID,
     request: ProviderUpdateRequest,
+    clinic_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
-    """Update provider."""
+    """Update provider. Optionally scope to a clinic_id for tenant isolation."""
     provider = await db.get(Provider, provider_id)
     if not provider:
+        raise_not_found("Provider", provider_id)
+    if clinic_id and provider.clinic_id != clinic_id:
         raise_not_found("Provider", provider_id)
     
     try:
@@ -428,11 +434,14 @@ async def list_providers(
 async def block_time(
     provider_id: UUID,
     request: BlockTimeRequest,
+    clinic_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
-    """Block time periods for a provider."""
+    """Block time periods for a provider. Optionally scope to a clinic_id for tenant isolation."""
     provider = await db.get(Provider, provider_id)
     if not provider:
+        raise_not_found("Provider", provider_id)
+    if clinic_id and provider.clinic_id != clinic_id:
         raise_not_found("Provider", provider_id)
     
     try:
@@ -504,11 +513,14 @@ async def block_time(
 async def unblock_time(
     provider_id: UUID,
     request: UnblockTimeRequest,
+    clinic_id: Optional[UUID] = None,
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
-    """Unblock time periods for a provider."""
+    """Unblock time periods for a provider. Optionally scope to a clinic_id for tenant isolation."""
     provider = await db.get(Provider, provider_id)
     if not provider:
+        raise_not_found("Provider", provider_id)
+    if clinic_id and provider.clinic_id != clinic_id:
         raise_not_found("Provider", provider_id)
     
     try:

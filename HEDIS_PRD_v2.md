@@ -186,7 +186,7 @@ Two paths for credential entry during clinic onboarding:
 | A1C, HbA1c, Diabetes lab, Blood sugar test, Hemoglobin A1C | `a1c` | Diabetes A1C script |
 | Colonoscopy, Colorectal screening, CRC, Colon cancer screen | `colorectal` | Colorectal screening script |
 | Blood pressure, BP follow-up, Hypertension check | `bp_control` | BP control script |
-| Any unrecognized value | `generic` | Generic HEDIS outreach script |
+| Any unrecognized value | — | Row skipped — parse error on upload (see §21) |
 
 ---
 
@@ -250,7 +250,7 @@ Retell AI accounts on Pay-As-You-Go include **20 concurrent calls**. Additional 
 | `campaign_contact_id` | UUID from `CampaignContact` table | Webhook correlation — links call back to contact record |
 | `patient_name` | From CSV parse — **NOT stored in DB** | Agent addresses patient by name during call |
 | `patient_dob` | From CSV parse — **NOT stored in DB** | Agent may confirm identity if needed |
-| `gap_type` | Enum: `annual_visit` / `mammogram` / `a1c` / `colorectal` / `bp_control` / `generic` | Agent selects correct script branch |
+| `gap_type` | Canonical values in §21 / `Clinic_app/data/enums.py` (`GapType`) | Agent selects correct script branch |
 | `provider_name` | From CSV parse | Agent tells patient they're scheduling with their provider |
 | `payer` | Insurance plan name | Agent may reference payer context in script |
 | `clinic_name` | From `Clinic` record | Agent introduces itself as calling from this clinic |
@@ -266,7 +266,8 @@ Retell AI accounts on Pay-As-You-Go include **20 concurrent calls**. Additional 
 | `a1c` | Hi, I'm calling from [clinic] about your diabetes care... | Your A1C blood test is due — it's a quick lab visit, usually 15 minutes, no fasting required. | Would you like to come in for your A1C check? |
 | `colorectal` | Hi, I'm calling from [clinic] about your cancer screening... | You're due for colorectal cancer screening. We have multiple options including a simple stool test. | Can I help schedule your screening? |
 | `bp_control` | Hi, I'm calling from [clinic] about your blood pressure follow-up... | Your last visit noted your blood pressure needs a follow-up check. It's a quick 20-minute visit. | Would you like to come in for a blood pressure check? |
-| `generic` | Hi, I'm calling from [clinic] about your preventive care... | Our records show you have a care item due this year. Your provider would like to see you. | Can I schedule an appointment for you? |
+
+*Legacy rows above (`annual_visit`, `mammogram`, etc.) are illustrative; the implemented taxonomy is **§21** — there is no `generic` gap type.*
 
 ### 9.4 Call Outcome Handling
 
@@ -656,7 +657,7 @@ Retell AI accounts on Pay-As-You-Go include **20 concurrent calls**. Additional 
 | NextGen UI update breaks AgentQL selectors | Medium | Medium | AgentQL semantic queries survive most UI changes. Monitor weekly. Keep selector cache TTL at 24 hours to force re-discovery. |
 | Retell account hits 20 concurrent call limit | Low (early) | Medium | 3 calls/clinic limit means 6 clinics max before hitting 20. Buy extra slots ($8/slot) as clinic count grows. |
 | Patient calls back on voicemail number | Medium | Low | Inbound handling deferred. Retell inbound on that number can play a "please call the clinic at X" message as a stopgap. |
-| Claude API misidentifies gap type from CSV | Low | Medium | Gap type detection includes fallback to `'generic'`. Log all parse results. Super Admin can review and correct `gap_type` before starting. |
+| Claude API misidentifies gap type from CSV | Low | Medium | Unrecognized labels produce a per-row parse error on upload (row skipped). Log parse results. Fix CSV or mapping and re-upload before starting. |
 | NextGen appt type codes wrong at pilot clinic | High (first run) | Medium | Test booking with a dummy patient during onboarding before live campaign. |
 | Staff sees PHI on dashboard without secure login | Low | High | Google OAuth required before any dashboard access. HTTPS enforced on all routes. JWT scoped to clinic. |
 | Call summary quality poor from Claude | Low | Low | Summary prompt is simple and well-constrained. Review first 20 summaries manually during pilot and adjust prompt if needed. |
@@ -720,11 +721,9 @@ Retell AI accounts on Pay-As-You-Go include **20 concurrent calls**. Additional 
 |---|---|
 | `medication_review` | Removed at CSV parse — never dialed |
 
-### Fallback
+### Unrecognized gap labels
 
-| Enum value | Action |
-|---|---|
-| `generic` | Any unrecognized CSV value — order-based script |
+Rows whose gap type cannot be mapped to a canonical enum value are **not** imported; they appear as parse errors on upload (same as invalid phone numbers).
 
 **There is NO `a1c` gap type.** What appeared as A1C in earlier notes was the preventive visit timing rule.
 
@@ -742,7 +741,7 @@ Claude's CSV parser must map all known clinic CSV variations to canonical enum v
 | Kidney, Kidney function, CKD, Renal | `kidney` |
 | AFR/CMP, Albumin creatinine, Alb/Cr ratio, urine albumin, bw/uA | `afr_cmp` |
 | Medication review, Med review, Medication management | `medication_review` → EXCLUDE |
-| Anything else | `generic` |
+| Anything else | Parse error — row skipped (no dial) |
 
 ---
 

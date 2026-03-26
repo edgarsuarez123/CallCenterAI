@@ -23,7 +23,7 @@ class TestGapTypeEnum:
     def test_plan_013_values_present(self):
         expected = {
             "preventive_visit", "hospital_flu", "colorectal", "eye_exam",
-            "breast_cancer", "kidney", "afr_cmp", "medication_review", "generic",
+            "breast_cancer", "kidney", "afr_cmp", "medication_review",
         }
         assert {g.value for g in GapType} == expected
 
@@ -38,7 +38,6 @@ class TestGapTypeEnum:
         assert GapType.BREAST_CANCER in ORDER_BASED_GAP_TYPES
         assert GapType.KIDNEY in ORDER_BASED_GAP_TYPES
         assert GapType.AFR_CMP in ORDER_BASED_GAP_TYPES
-        assert GapType.GENERIC in ORDER_BASED_GAP_TYPES
         assert GapType.PREVENTIVE_VISIT not in ORDER_BASED_GAP_TYPES
 
     def test_no_a1c_value(self):
@@ -84,7 +83,9 @@ class TestGapTypeAliasMapping:
     """
 
     def _alias(self, raw: str, normalized: str) -> GapType:
-        return map_gap_type(raw, {raw: normalized})
+        g = map_gap_type(raw, {raw: normalized})
+        assert g is not None
+        return g
 
     def test_preventive_visit_aliases(self):
         for alias, norm in [
@@ -125,8 +126,8 @@ class TestGapTypeAliasMapping:
         assert self._alias("Medication review", "medication_review") == GapType.MEDICATION_REVIEW
         assert self._alias("Med review", "medication_review") == GapType.MEDICATION_REVIEW
 
-    def test_unknown_falls_back_to_generic(self):
-        assert map_gap_type("UnknownGapXYZ", {}) == GapType.GENERIC
+    def test_unknown_returns_none(self):
+        assert map_gap_type("UnknownGapXYZ", {}) is None
 
     def test_direct_enum_value_recognized(self):
         """If Claude returns the exact enum value string, no mapping needed."""

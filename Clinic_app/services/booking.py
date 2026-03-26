@@ -73,22 +73,24 @@ async def _create_audit_entry(
 
 async def _count_slot_bookings(
     db: AsyncSession,
+    clinic_id: UUID,
     provider_id: UUID,
     slot_start: datetime,
     slot_end: datetime
 ) -> int:
     """
     Count TENTATIVE/CONFIRMED bookings that overlap with a slot.
-    
+
     Uses overlap logic (consistent with availability service) to count
     all bookings that overlap with the requested slot time range.
-    
+
     Args:
         db: Database session
+        clinic_id: Clinic UUID (tenant isolation)
         provider_id: Provider UUID
         slot_start: Slot start datetime
         slot_end: Slot end datetime
-        
+
     Returns:
         Count of existing bookings that overlap with the slot
     """
@@ -96,6 +98,7 @@ async def _count_slot_bookings(
         select(func.count(Booking.id))
         .where(
             and_(
+                Booking.clinic_id == clinic_id,
                 Booking.provider_id == provider_id,
                 Booking.slot_start < slot_end,
                 Booking.slot_end > slot_start,
@@ -182,7 +185,7 @@ async def create_tentative_booking(
     provider = await _get_provider(db, provider_id, clinic_id)
     
     # 2. Check capacity with row locking
-    existing_count = await _count_slot_bookings(db, provider_id, slot_start, slot_end)
+    existing_count = await _count_slot_bookings(db, clinic_id, provider_id, slot_start, slot_end)
     
     if existing_count >= provider.capacity:
         logger.warning(
@@ -582,24 +585,31 @@ async def get_booking_by_id(
 
 async def expire_booking(
     db: AsyncSession,
-    booking_id: UUID
+    booking_id: UUID,
+    clinic_id: UUID
 ) -> Booking:
     """
     Expire a tentative booking (called by the reaper worker).
-    
+
     Args:
         db: Database session
         booking_id: Booking UUID
-        
+        clinic_id: Clinic UUID (tenant isolation guard)
+
     Returns:
         Expired (canceled) Booking record
-        
+
     Raises:
         ValueError: If booking not found or not tentative
     """
     logger.info(f"Expiring tentative booking: booking_id={booking_id}")
-    
-    booking = await db.get(Booking, booking_id)
+
+    result = await db.execute(
+        select(Booking).where(
+            and_(Booking.id == booking_id, Booking.clinic_id == clinic_id)
+        )
+    )
+    booking = result.scalar_one_or_none()
     
     if not booking:
         raise ValueError("Booking not found")

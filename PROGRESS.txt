@@ -441,3 +441,152 @@ FILES MODIFIED:
 - tests/test_call_summarizer.py, tests/test_hedis_webhooks.py
 - docs/retell_agent_playbook.md, PLAN.md, PROGRESS.txt
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-25 — HIPAA Audit Fixes (Plan 015) + Plan 016 Logging
+================================================================================
+COMPLETED:
+HIPAA Audit — Plan 015 (all critical/high/medium addressed):
+  C1: Retell HMAC playground bypass moved inside development-only block
+  C2: Global exception handler sanitized — generic message to client, str(exc) to log only
+  C3: Patient name removed from retell.py schedule log (logs contact_id instead)
+  C4: Phone masked in csv_parser ValueError (no raw phone in error)
+  H1: dob_token removed from Patient model (PHI Rule #2 — DOB never in DB)
+  H2: patient_dob_encrypted removed from CampaignContact; campaign_worker no longer injects DOB metadata
+  H3: clinic_id filter added to _count_slot_bookings() and expire_booking() in booking.py
+  H4: clinic_id filter added to _get_existing_booking_ids() in availability.py
+  H5: GET /retell/availability now requires verify_admin_api_key
+  H6: phone_hash column added to Patient model; patient.py writes HMAC hash on create/update
+  H7: Health endpoint DB error details hidden — "disconnected" only, full error to log
+  H8: Staging HMAC enforcement tightened — no bypass unless APP_ENVIRONMENT=development/local
+  M1: hmac.compare_digest() replaces string comparison in auth.py
+  M3: Provider routes accept optional clinic_id; validate ownership
+  M4: hash_phi() (HMAC-SHA256, PHI_HASH_KEY) added to encryption.py; all PHI hashing updated
+  M5: Google Calendar path traversal blocked — JSON-only input enforced
+  M6: ParseError.raw_data PHI removed — no dict(row) stored
+  M8: Confirm-booking log sanitized — logs call_id/booking_id/status only
+  M9: FastAPI docs disabled in production (APP_ENVIRONMENT=production|prod)
+  Alembic migration: b8c9d0e1f2a3 (Patient drop dob_token, add phone_hash)
+  Tests fixed: test_booking, test_retell, test_patient, test_measurement_year_dedup, test_campaign_service
+  env.example updated with PHI_HASH_KEY
+
+Plan 016 — Basic Application Logging:
+  Created Clinic_app/common/logging_utils.py (mask_phone_e164, mask_phone_in_string)
+  campaign_worker.py: removed private _mask_phone_e164, added 4 diagnostic log lines
+    (outside calling hours, at concurrency capacity, no eligible contact, pre-dial)
+  call_summarizer.py: added 6 logger.info() calls (empty transcript, pre-Claude, success
+    for both summarize_transcript_sync and extract_order_based_notes_sync)
+  Created tests/test_logging_utils.py — 11 unit tests, all pass
+  test_campaign_worker.py: updated test_mask_phone_e164 to use shared import
+  PLAN.md Plan 016 updated to Complete with deferred items documented
+  14/14 tests pass for logging_utils + campaign_worker
+
+SKIPPED / DEFERRED:
+  M2: CORS + rate limiting + security headers — deferred to Plan 012 (after MVP test call)
+  M7: google_service_account_json Text vs BYTEA — not yet investigated
+  Plan 016 deferred items: JSON logging, correlation IDs, dictConfig, Azure Monitor — Plan 010
+  Pre-existing test failures unrelated to this work (apscheduler import, Windows tz, retell CallEnded field)
+
+ERRORS / BLOCKERS:
+  test_campaign_worker.py::test_mask_phone_e164 failed on first run — private _mask_phone_e164
+  was removed; fixed by updating test to import from shared logging_utils module.
+
+NEXT SESSION SHOULD START WITH:
+- Execute Plan 014 Sprint C E2E gate per docs/retell_agent_playbook.md §13:
+  1. docker compose -f docker-compose.dev.yaml up -d
+  2. alembic upgrade head
+  3. Configure Retell agent dashboard (webhook URLs + tool URLs from §10)
+  4. Create clinic + EHR config via Swagger
+  5. Upload fake HEDIS CSV + start campaign
+  6. Watch logs + confirm DB (contact → BOOKED or ORDER_AGREED, campaign_audit row)
+
+FILES MODIFIED:
+  Clinic_app/common/logging_utils.py (NEW)
+  Clinic_app/common/encryption.py (hash_phi)
+  Clinic_app/common/auth.py (hmac.compare_digest)
+  Clinic_app/Routes/retell.py (C1, C3, H5, H8, M8)
+  Clinic_app/Routes/health.py (H7)
+  Clinic_app/Routes/provider.py (M3)
+  Clinic_app/main.py (C2, M9)
+  Clinic_app/services/csv_parser.py (C4, M6)
+  Clinic_app/services/booking.py (H3)
+  Clinic_app/services/availability.py (H4)
+  Clinic_app/services/patient.py (M4, H6 write)
+  Clinic_app/services/call_summarizer.py (Plan 016 logging)
+  Clinic_app/services/campaign_service.py (M4 hash_phone)
+  Clinic_app/services/google_calendar.py (M5)
+  Clinic_app/workers/campaign_worker.py (H2, Plan 016)
+  Clinic_app/data/models/patient.py (H1, H6)
+  Clinic_app/data/models/campaign_contact.py (H2)
+  Clinic_app/alembic/versions/b8c9d0e1f2a3_patient_drop_dob_add_phone_hash.py (NEW)
+  tests/test_logging_utils.py (NEW)
+  tests/test_booking.py, test_retell.py, test_patient.py
+  tests/test_measurement_year_dedup.py, test_campaign_service.py, test_campaign_worker.py
+  env.example, PLAN.md, PROGRESS.txt
+================================================================================
+
+================================================================================
+SESSION: 2026-03-25 — Retell agent prompt, patient_dob removal, local test guide, Plan 017
+================================================================================
+COMPLETED:
+- docs/retell_agent_playbook.md §11 replaced with full production prompt:
+    §11.0: payer variable explanation
+    §11.1: master system prompt — per-gap openings for all 7 gap types, tool calling
+           steps (get_available_slots → book_appointment), order-based no-tool rules,
+           objection handling table (coverage, wrong person, busy, not interested),
+           voice rules, call endings
+    §11.2: LLM dynamic variable registration table (gap_type, patient_name,
+           provider_name, clinic_name, clinic_phone, payer, call_type, campaign_contact_id)
+- patient_dob removed from the entire booking flow:
+    Clinic_app/services/playwright_ehr.py: removed from book_appointment() and
+      _fill_booking_form() signatures, removed date_of_birth_field from AgentQL query
+    Clinic_app/Routes/retell.py: removed patient_dob from ehr_book_appointment handler,
+      updated validation + error message
+    docs/retell_agent_playbook.md §6, §7, §9.2: removed patient_dob from all references
+    tests/test_ehr_tool_endpoints.py: removed patient_dob from test args
+    tests/test_playwright_validation.py: removed patient_dob from mock call signatures
+- docs/local_test_guide.md created — step-by-step local E2E test guide covering:
+    Docker startup, ngrok tunnel, Retell dashboard config (prompt, variables, 2 custom
+    functions, 3 webhooks), clinic + integration creation via Swagger, EHR config (Step 8b),
+    Google Sheets → .xlsx patient file (Test A: colorectal, Test B: preventive_visit),
+    JWT generation Python one-liner (bypasses Google OAuth for local dev),
+    campaign upload + start, Test A/B expected log output + verification checklists,
+    troubleshooting table
+- Clarified Retell summarization vs Claude summarization:
+    _extract_transcript_for_summary() already reads call_analysis.call_summary (Retell's
+    own summary) as fallback — Claude reads that text and extracts patient_agreed from it.
+    patient_agreed is required to drive ORDER_AGREED / ORDER_DECLINED contact status.
+- Plan 017 added to PLAN.md: no-Claude local test mode
+    Step 1: direct header mapping fallback in csv_parser.py (skip Claude if headers are
+      standard/recognizable)
+    Step 2: Retell summary fallback in webhook_call_analyzed (if ANTHROPIC_API_KEY not set,
+      store Retell's call_summary directly, skip structured extraction)
+
+SKIPPED / DEFERRED:
+- Plan 017 implementation (plan written, not coded — implement before E2E gate if no Claude key)
+- M2: CORS + rate limiting + security headers — Plan 012
+- M7: google_service_account_json Text vs BYTEA — not investigated
+
+ERRORS / BLOCKERS:
+- None
+
+NEXT SESSION SHOULD START WITH:
+Option A (no ANTHROPIC_API_KEY yet): implement Plan 017 first (~1 hour), then run E2E gate
+Option B (have ANTHROPIC_API_KEY): skip Plan 017, go straight to E2E gate:
+  1. docker compose -f docker-compose.dev.yaml up -d
+  2. docker compose -f docker-compose.dev.yaml --profile migrate run --rm migrate
+  3. Configure Retell agent per docs/local_test_guide.md §6 (prompt + variables + functions + webhooks)
+  4. Create clinic + integration via Swagger (Steps 7–8)
+  5. Generate JWT (Step 10), upload .xlsx + start campaign (Steps 11–12)
+  6. Watch logs, answer the test call, verify contact status in Swagger
+
+FILES MODIFIED:
+- docs/retell_agent_playbook.md
+- docs/local_test_guide.md (NEW)
+- Clinic_app/services/playwright_ehr.py
+- Clinic_app/Routes/retell.py
+- tests/test_ehr_tool_endpoints.py
+- tests/test_playwright_validation.py
+- PLAN.md (Plan 017 added, Plan 016 status updated in index)
+- PROGRESS.txt (this entry)
+================================================================================
