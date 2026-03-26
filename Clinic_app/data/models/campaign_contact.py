@@ -25,11 +25,11 @@ class CampaignContact(Base):
     campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False, index=True)
     clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)  # Denormalized for tenant isolation
 
-    # PHI — phone + optional name/DOB for Retell metadata at dial time
+    # PHI — phone + optional name for Retell metadata at dial time
+    # DOB is never stored (PHI Rule #2) — Retell agent does not require DOB for identity
     phone_encrypted = Column(BYTEA, nullable=False)          # AES-256-GCM encrypted E.164 phone number
-    phone_hash = Column(String(64), nullable=False)          # SHA-256 hash for dedup without decryption
+    phone_hash = Column(String(64), nullable=False)          # HMAC-SHA256 hash for dedup without decryption
     patient_name_encrypted = Column(BYTEA, nullable=True)    # AES-256-GCM — decrypt only at dial
-    patient_dob_encrypted = Column(BYTEA, nullable=True)     # AES-256-GCM — decrypt only at dial
 
     provider_name = Column(String, nullable=True)              # From CSV — Retell metadata
     payer = Column(String, nullable=True)                      # Insurance plan name — Retell metadata

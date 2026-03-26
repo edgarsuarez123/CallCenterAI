@@ -98,11 +98,11 @@ class TestMapGapType:
         # Raw value is already a valid GapType enum value
         assert map_gap_type("kidney", {}) == GapType.KIDNEY
 
-    def test_unknown_falls_back_to_generic(self):
-        assert map_gap_type("UNKNOWN_MEASURE_XYZ", {}) == GapType.GENERIC
+    def test_unknown_returns_none(self):
+        assert map_gap_type("UNKNOWN_MEASURE_XYZ", {}) is None
 
-    def test_empty_falls_back_to_generic(self):
-        assert map_gap_type("", {}) == GapType.GENERIC
+    def test_empty_returns_none(self):
+        assert map_gap_type("", {}) is None
 
 
 # ── _detect_delimiter ──────────────────────────────────────────────────────────
@@ -199,15 +199,17 @@ class TestParseCSV:
         assert "NOT_A_PHONE" in errors[0].reason or errors[0].row_number == 2
 
     @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_unrecognized_gap_type_maps_to_generic(self, mock_get_client):
+    def test_unrecognized_gap_type_is_parse_error(self, mock_get_client):
         mock_get_client.return_value = _make_mock_anthropic()
         csv_bytes = self._make_csv([
             {"Member Phone": "7875551234", "HEDIS Measure": "UNKNOWN_GAP", "Language": "en",
              "Member Name": "", "DOB": "", "Plan ID": ""},
         ])
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
-        assert len(rows) == 1
-        assert rows[0].gap_type == GapType.GENERIC
+        assert len(rows) == 0
+        assert len(errors) == 1
+        assert errors[0].row_number == 2
+        assert "Unrecognized gap type" in errors[0].reason
 
     def test_empty_file_raises(self):
         with pytest.raises(ValueError, match="empty"):

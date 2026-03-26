@@ -10,7 +10,6 @@ Core responsibilities:
   - Tenant-isolated queries (clinic_id filter on every query)
 """
 
-import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -23,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import func, select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from Clinic_app.common.encryption import encrypt_phi
+from Clinic_app.common.encryption import encrypt_phi, hash_phi
 from Clinic_app.data.enums import CampaignStatus, ContactStatus, GapType
 from Clinic_app.data.models.campaign import Campaign
 from Clinic_app.data.models.campaign_contact import CampaignContact
@@ -85,8 +84,8 @@ class CampaignCreateResult:
 # ── Phone hashing ──────────────────────────────────────────────────────────────
 
 def hash_phone(phone_e164: str) -> str:
-    """SHA-256 hash of an E.164 phone number. Used for dedup without decryption."""
-    return hashlib.sha256(phone_e164.encode("utf-8")).hexdigest()
+    """HMAC-SHA256 of an E.164 phone number using PHI_HASH_KEY. Used for dedup without decryption."""
+    return hash_phi(phone_e164)
 
 
 # ── Dedup query ────────────────────────────────────────────────────────────────
@@ -192,10 +191,10 @@ async def create_campaign(
             ))
             continue
 
-        # Encrypt phone and optional PHI fields for dial-time metadata
+        # Encrypt phone and optional name for dial-time metadata
+        # DOB is never stored — PHI Rule #2
         phone_encrypted = encrypt_phi(row.phone_e164)
         name_enc = encrypt_phi(row.patient_name) if row.patient_name else None
-        dob_enc = encrypt_phi(row.patient_dob) if row.patient_dob else None
 
         # hospital_flu contacts get priority 0 (called first); all others get 1
         is_hospital_flu = row.gap_type == GapType.HOSPITAL_FLU
@@ -217,7 +216,6 @@ async def create_campaign(
             phone_encrypted=phone_encrypted,
             phone_hash=phone_hash,
             patient_name_encrypted=name_enc,
-            patient_dob_encrypted=dob_enc,
             provider_name=row.provider_name,
             payer=row.payer,
             gap_type=gap_type_val,

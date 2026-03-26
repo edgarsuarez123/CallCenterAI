@@ -4,11 +4,26 @@ Unit tests for services/campaign_service.py.
 DB is mocked — no real database required.
 """
 
+import base64
+import os
 import uuid
 from datetime import datetime, timezone
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, call
+
+import Clinic_app.common.encryption as encryption_module
+
+_TEST_HASH_KEY = base64.b64encode(os.urandom(32)).decode()
+
+
+@pytest.fixture(autouse=True)
+def reset_hash_key():
+    """Inject PHI_HASH_KEY and reset cache for every test in this module."""
+    encryption_module._hash_key = None
+    with patch.dict(os.environ, {"PHI_HASH_KEY": _TEST_HASH_KEY}):
+        yield
+    encryption_module._hash_key = None
 
 from fastapi import HTTPException
 

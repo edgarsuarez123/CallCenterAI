@@ -29,7 +29,8 @@
 | 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Split: critical subset in Plan 014 Sprint A; complex rules deferred post-MVP |
 | 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — top priority this week** |
 | 015 | 2026-03-23 | HIPAA Security Rule Compliance Audit | Active reference — track findings & remediation |
-| 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | Pending — overlap with Plan 014 Sprint C / E2E |
+| 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | ✅ Complete (2026-03-25) |
+| 017 | 2026-03-25 | No-Claude local test mode (direct header mapping + Retell summary fallback) | Pending — before E2E gate |
 
 ### Implementation order (current — revised 2026-03-23 for MVP sprint)
 
@@ -42,7 +43,10 @@
 
 **AFTER MVP TEST CALL CONFIRMED:**
 
-5. **Plan 012** — API security hardening before any real clinic uses the system.
+5. **Plan 012** — API security hardening before any real clinic uses the system. Includes **M2 (CORS + rate limiting + security headers)** from the HIPAA audit — three sub-tasks:
+   - **CORS:** Add `CORSMiddleware` with explicit allowed origins list (required before any web dashboard is built)
+   - **Rate limiting:** Add `slowapi` throttle on auth endpoints and Retell webhooks (prevents DB exhaustion)
+   - **Security headers:** One middleware pass setting `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` on all responses
 6. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
 7. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
 8. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests.
@@ -1940,10 +1944,9 @@ A comprehensive set of business logic decisions was finalized covering: HEDIS ga
 |---|---|
 | `medication_review` | Filtered out — never called |
 
-#### Fallback
-| Enum value | Action |
-|---|---|
-| `generic` | Any unrecognized gap type value — order-based script |
+#### Unrecognized gap labels
+
+Rows that cannot be mapped to a canonical `GapType` produce a **parse error** on CSV upload (row skipped), not a fallback enum.
 
 **There is NO `a1c` gap type.** What appeared as A1C in notes was the preventive visit timing rule.
 
@@ -1959,7 +1962,7 @@ A comprehensive set of business logic decisions was finalized covering: HEDIS ga
 | Kidney, Kidney function, CKD, Renal | `kidney` |
 | AFR/CMP, Albumin creatinine, Alb/Cr ratio, urine albumin, bw/uA | `afr_cmp` |
 | Medication review, Med review, Medication management | `medication_review` (EXCLUDED) |
-| Anything else | `generic` |
+| Anything else | Parse error — row skipped |
 
 ---
 
@@ -2172,7 +2175,7 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 ### Implementation Steps (Plan 013)
 
 - [ ] Resolve open question: `updated_by = null vs. Super Admin staff record`
-- [ ] Add `GapType` enum values to `data/enums.py` (ensure all 8 values + `generic` present; remove any `a1c` reference)
+- [ ] Add `GapType` enum values to `data/enums.py` (8 values; no `generic` fallback; remove any `a1c` reference)
 - [ ] Update CSV parser alias normalization map in `services/csv_parser.py` (or equivalent)
 - [ ] Alembic: create `clinic_insurance_rules` table
 - [ ] Alembic: create `clinic_scheduling_rules` table
@@ -2216,7 +2219,7 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 
 - [x] **A1:** Replace GapType enum in `data/enums.py` with Plan 013 finalized values:
   `preventive_visit`, `hospital_flu`, `colorectal`, `eye_exam`, `breast_cancer`,
-  `kidney`, `afr_cmp`, `medication_review` (excluded), `generic`
+  `kidney`, `afr_cmp`, `medication_review` (excluded)
 - [x] **A2:** Add missing ContactStatus values: `NOT_YET_ELIGIBLE`, `EXPIRED`, `ORDER_AGREED`, `ORDER_DECLINED`
 - [x] **A3:** Update CSV alias normalization in `services/csv_parser.py` — alias table from Plan 013 §1 (Claude prompt must map all variants to new enum values; filter out `medication_review`)
 - [x] **A4:** Alembic migration: rename PG enum values for GapType + add 4 new ContactStatus values
@@ -2320,21 +2323,95 @@ A **documented compliance audit** of the codebase with severity-tagged findings 
 
 ## Plan 016 — Basic Application Logging
 **Date:** 2026-03-23
-**Status:** Pending — implement alongside or before **Plan 014 Sprint C** (E2E gate needs trustworthy logs)
-**Source:** CLAUDE.md (Python `logging`, mask PHI in logs) + operational need to trace worker, webhooks, and EHR tool calls
+**Status:** ✅ Complete (2026-03-25)
+**Goal:** Add diagnostic logging so Edgar can trace the full E2E flow during the March 27 test call.
 
-### What We Are Building
+### What Was Built
 
-- Centralized logging configuration (levels, format, optional JSON/structured fields for production)
-- Consistent log points for: campaign worker lifecycle, Retell outbound + webhook handlers, custom tools (`get_available_slots`, `book_appointment`), Playwright/EHR errors
-- **PHI safety:** never log phone numbers in plaintext (mask `***-***-XXXX`), no raw transcripts, align with existing encryption and dashboard rules
+- [x] **L1:** Created `Clinic_app/common/logging_utils.py` — shared PHI masking: `mask_phone_e164()` + `mask_phone_in_string()`
+- [x] **L2:** `campaign_worker.py` — removed private `_mask_phone_e164`, imported shared utility; added 4 diagnostic `logger.info()` calls at silent decision branches (outside calling hours, at concurrency capacity, no eligible contact, pre-dial with contact_id + gap_type + masked phone)
+- [x] **L3:** `call_summarizer.py` — added 6 `logger.info()` calls: empty transcript, pre-Claude-call, and success for both `summarize_transcript_sync` and `extract_order_based_notes_sync`
+- [x] **L4:** Created `tests/test_logging_utils.py` — 11 unit tests for masking utility (all pass)
+- [x] **L5:** `test_campaign_worker.py` — updated `test_mask_phone_e164` to import from shared utility
 
-### Deferred
+### Deferred to Plan 010 (Hardening)
 
-- Full centralized log aggregation (Azure Monitor / Log Analytics wiring) — can follow in **Plan 010** if not done earlier
+| Item | Reason |
+|------|--------|
+| JSON structured logging | Production concern, not needed for E2E test |
+| Request correlation IDs / trace IDs | Non-trivial to add mid-request; Plan 010 |
+| Reformatting f-string logs to %-style | Opportunistic — not blocking |
+| Azure Monitor / Log Analytics integration | Plan 010 |
+| Log-level config via `LOG_LEVEL` env var | Plan 010 |
+| `mask_phone_in_string` wired into existing code | Utility available; apply opportunistically |
+| `logging.dictConfig` replacing `basicConfig` | Plan 010 |
 
 ---
 
-*Last updated: 2026-03-23 (Plan 016 basic logging added)*
+---
+
+## Plan 017 — No-Claude Local Test Mode
+**Date:** 2026-03-25
+**Status:** Pending
+**Goal:** Allow the full E2E flow to run without `ANTHROPIC_API_KEY` so Edgar can test locally before obtaining an Anthropic key or BAA.
+
+### Context
+
+Two places in the codebase require Claude:
+1. **`csv_parser.py`** — calls Claude once per upload to normalize column headers (e.g. "Pt Name" → `patient_name`)
+2. **`call_summarizer.py`** — calls Claude after `call_analyzed` webhook to extract `patient_agreed` and store encrypted summary
+
+For local testing with a well-formatted Google Sheet and non-critical outcome tracking, both can be bypassed safely.
+
+### What to Build
+
+#### Step 1 — Direct header mapping fallback in `csv_parser.py`
+
+Add `_try_direct_header_mapping(header_row, sample_rows) -> Optional[dict]` that:
+- Normalizes each header to lowercase + strips spaces/underscores
+- Matches against a hard-coded alias table covering all common column names:
+  - phone: `phone`, `phone number`, `member phone`, `patient phone`, `cell`, `mobile`, `telephone`
+  - gap_type: `gap type`, `gap_type`, `gap`, `measure`, `hedis measure`, `care gap`
+  - patient_name: `member name`, `patient name`, `patient_name`, `name`, `full name`
+  - language: `language`, `lang`, `preferred language`
+  - provider_name: `provider`, `provider name`, `provider_name`, `pcp`, `physician`, `doctor`
+  - payer: `payer`, `insurance`, `plan`, `health plan`, `insurer`
+  - release_date: `release date`, `discharge date`, `release_date`
+- For gap_type values: if the cell value already matches a `GapType` enum value exactly (case-insensitive), use it directly — no mapping needed
+- Returns a `dict` in the same shape as Claude's response if `phone` and `gap_type` columns are found; returns `None` if required columns can't be identified
+- In `parse_file()`: call `_try_direct_header_mapping()` first; only call Claude if it returns `None`
+
+Log line when direct mapping succeeds: `"Direct header mapping succeeded — skipping Claude column normalization"`
+Log line when falling back to Claude: `"Direct header mapping failed — calling Claude for column normalization"`
+
+#### Step 2 — Retell summary fallback in `retell.py` `webhook_call_analyzed`
+
+If `ANTHROPIC_API_KEY` is not set:
+- Use `_extract_transcript_for_summary(call_obj)` result directly as the summary string (this already reads `call_analysis.call_summary` from Retell's payload)
+- For order-based gaps (colorectal, mammography, etc.): store the raw summary, log a warning that `patient_agreed` could not be extracted, leave contact status as set by `_apply_hedis_call_ended` (which already handles the ANSWERED/BOOKED/DECLINED logic from the call_ended webhook)
+- For appointment-based gaps: store the raw summary — no change in behavior
+- Log line: `"ANTHROPIC_API_KEY not set — using Retell call_summary directly (no structured extraction)"`
+
+**What this means for testing:**
+- Test A (colorectal): call summary will be Retell's generic text instead of Claude's structured JSON. Contact status will still be set by `_apply_hedis_call_ended` based on call outcome.
+- Test B (preventive_visit): no behavior change — summary is one sentence anyway.
+
+### Files to Change
+
+| File | Change |
+|------|--------|
+| `Clinic_app/services/csv_parser.py` | Add `_try_direct_header_mapping()`, update `parse_file()` to call it first |
+| `Clinic_app/Routes/retell.py` | In `webhook_call_analyzed`: check for `ANTHROPIC_API_KEY` before calling summarizer |
+| `tests/test_csv_parser.py` | Add tests for direct mapping with standard headers |
+
+### Explicitly Deferred
+
+- Removing `anthropic` package from requirements (still needed for full prod path — just optional at runtime)
+- Structured `patient_agreed` extraction from Retell summary text (post-MVP if needed)
+- Making `ANTHROPIC_API_KEY` optional in `call_summarizer.py` itself (currently raises — keep raising, just bypass the import in the webhook handler)
+
+---
+
+*Last updated: 2026-03-25 (Plan 017 added)*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: **Plan 014 Sprint A** (GapType/ContactStatus enum fixes + hospital_flu schema) → Sprint B (Retell playbook) → Sprint C (E2E gate); **Plan 016** (basic logging) in parallel or before Sprint C.*
+*Next action: **Plan 017** (optional, run first if no Claude key) → **Plan 014 Sprint C E2E gate** per `docs/local_test_guide.md`.*

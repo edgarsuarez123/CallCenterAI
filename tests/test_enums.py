@@ -1,8 +1,7 @@
 # tests/test_enums.py
 """
 Unit tests for Feature 2 enums.
-Validates that all enum values match the PRD spec and that critical
-members exist (e.g., GapType.GENERIC fallback for Claude CSV parsing).
+Validates that all enum values match the PRD spec.
 """
 import pytest
 from Clinic_app.data.enums import (
@@ -68,10 +67,6 @@ class TestContactStatus:
 
 @pytest.mark.unit
 class TestGapType:
-    def test_generic_fallback_exists(self):
-        """GapType.GENERIC must exist — prevents CSV parsing from throwing on unknown values."""
-        assert GapType.GENERIC.value == "generic"
-
     def test_is_str_enum(self):
         assert isinstance(GapType.COLORECTAL, str)
         assert GapType.COLORECTAL == "colorectal"
@@ -81,13 +76,13 @@ class TestGapType:
         expected = {
             "preventive_visit", "hospital_flu",
             "colorectal", "eye_exam", "breast_cancer",
-            "kidney", "afr_cmp", "medication_review", "generic",
+            "kidney", "afr_cmp", "medication_review",
         }
         assert {g.value for g in GapType} == expected
 
     def test_count(self):
-        """9 gap types total per Plan 013 taxonomy."""
-        assert len(GapType) == 9
+        """8 gap types total (medication_review excluded at parse; no generic fallback)."""
+        assert len(GapType) == 8
 
     def test_values_are_snake_case(self):
         """All values must be snake_case — used as JSONB keys in clinic_ehr_config."""

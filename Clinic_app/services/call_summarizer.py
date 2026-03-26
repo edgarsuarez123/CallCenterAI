@@ -127,8 +127,14 @@ def summarize_transcript_sync(transcript: str, gap_type: str) -> str:
     """
     text = (transcript or "").strip()
     if not text:
+        logger.info("summarize_transcript_sync: empty transcript gap_type=%s", gap_type)
         return "Call completed; no usable transcript."
 
+    logger.info(
+        "summarize_transcript_sync: calling Claude gap_type=%s transcript_len=%d",
+        gap_type,
+        len(text),
+    )
     client = _get_anthropic_client()
     user_msg = (
         f"Care gap type (HEDIS measure code): {gap_type}\n\n"
@@ -141,7 +147,13 @@ def summarize_transcript_sync(transcript: str, gap_type: str) -> str:
         messages=[{"role": "user", "content": user_msg}],
     )
     out = response.content[0].text.strip()
-    return out if out else "Call completed; summary unavailable."
+    result = out if out else "Call completed; summary unavailable."
+    logger.info(
+        "summarize_transcript_sync: success gap_type=%s summary_len=%d",
+        gap_type,
+        len(result),
+    )
+    return result
 
 
 @retry(
@@ -159,12 +171,20 @@ def extract_order_based_notes_sync(transcript: str, gap_type: str) -> OrderNotes
     """
     text = (transcript or "").strip()
     if not text:
+        logger.info(
+            "extract_order_based_notes_sync: empty transcript gap_type=%s", gap_type
+        )
         return {
             "patient_agreed": None,
             "action_for_staff": "",
             "note": "Call completed; no usable transcript.",
         }
 
+    logger.info(
+        "extract_order_based_notes_sync: calling Claude gap_type=%s transcript_len=%d",
+        gap_type,
+        len(text),
+    )
     client = _get_anthropic_client()
     user_msg = (
         f"Care gap type (HEDIS measure code): {gap_type}\n\n"
@@ -183,4 +203,10 @@ def extract_order_based_notes_sync(transcript: str, gap_type: str) -> OrderNotes
             "extract_order_based_notes_sync: could not parse JSON from Claude response"
         )
         return _normalize_order_notes(_FALLBACK_UNAVAILABLE)
-    return _normalize_order_notes(parsed)
+    result = _normalize_order_notes(parsed)
+    logger.info(
+        "extract_order_based_notes_sync: success gap_type=%s patient_agreed=%s",
+        gap_type,
+        result.get("patient_agreed"),
+    )
+    return result

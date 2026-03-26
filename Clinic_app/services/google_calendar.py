@@ -95,30 +95,16 @@ class GoogleCalendarService:
         if not integration:
             raise GoogleCalendarAuthError(f"ClinicIntegration not found for clinic_id: {clinic_id}")
         
-        # Parse service account JSON
+        # Parse service account JSON — must be a JSON object, never a file path (M5: path traversal prevention)
         json_str = integration.google_service_account_json
-        
-        # Check if it's a file path (check patterns first, then existence)
-        is_file_path = (
-            json_str.startswith('/') or 
-            json_str.startswith('C:\\') or 
-            json_str.startswith('.') or
-            (os.path.exists(json_str) and os.path.isfile(json_str))
-        )
-        
-        if is_file_path:
-            # It's a file path
-            try:
-                with open(json_str, 'r') as f:
-                    json_data = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError) as e:
-                raise GoogleCalendarAuthError(f"Failed to read service account JSON file: {e}")
-        else:
-            # It's a JSON string
-            try:
-                json_data = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                raise GoogleCalendarAuthError(f"Invalid service account JSON string: {e}")
+        if not json_str or not json_str.strip().startswith("{"):
+            raise GoogleCalendarAuthError(
+                "google_service_account_json must contain JSON content, not a file path"
+            )
+        try:
+            json_data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            raise GoogleCalendarAuthError(f"Invalid service account JSON: {e}")
         
         # Validate JSON structure
         if not GoogleCalendarService._validate_service_account_json(json_data):

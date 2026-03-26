@@ -36,6 +36,7 @@ from Clinic_app.data.enums import (
     CampaignStatus,
     ORDER_BASED_GAP_TYPES,
 )
+from Clinic_app.common.auth import verify_admin_api_key
 from Clinic_app.common.encryption import encrypt_phi
 from Clinic_app.services.campaign_service import maybe_mark_campaign_completed
 from Clinic_app.services.call_summarizer import (
@@ -341,6 +342,8 @@ async def verify_retell_signature(
     # Get environment mode
     app_env = os.environ.get("APP_ENVIRONMENT", "").lower()
     is_production = app_env in ["production", "prod"]
+    # Only bypass signature enforcement in explicit local development; staging enforces it
+    is_development = app_env in ["development", "dev", "local", ""]
     
     # Get webhook secret (API key with webhook badge)
     webhook_secret = os.environ.get("RETELL_WEBHOOK_SECRET", "")
@@ -352,104 +355,87 @@ async def verify_retell_signature(
         request.headers.get("X-RETELL-SIGNATURE")
     )
     
-    # Check if this is a playground/test call (skip verification)
-    # Playground calls may have call_id="playground" or no signature header
-    try:
-        if body_bytes:
-            body_json = json.loads(body_bytes.decode('utf-8'))
-            # Check multiple possible locations for call_id
-            call_id = (
-                body_json.get("call_id") or  # Top level
-                body_json.get("call", {}).get("call_id") or  # Nested in "call" object
-                ""
-            )
-            if call_id == "playground" or call_id.startswith("test_") or call_id.startswith("playground_"):
-                logger.info(f"Skipping signature verification for playground/test call: {call_id}")
-                return
-    except (json.JSONDecodeError, UnicodeDecodeError, KeyError, AttributeError):
-        pass
-    
-    # Production: Require signature header
-    if is_production:
+    # Skip verification for playground/test calls — development only (H8: not for staging)
+    if is_development:
+        try:
+            if body_bytes:
+                body_json = json.loads(body_bytes.decode('utf-8'))
+                call_id = (
+                    body_json.get("call_id") or
+                    body_json.get("call", {}).get("call_id") or
+                    ""
+                )
+                if call_id == "playground" or call_id.startswith("test_") or call_id.startswith("playground_"):
+                    logger.info(f"Skipping signature verification for playground/test call: {call_id}")
+                    return
+        except (json.JSONDecodeError, UnicodeDecodeError, KeyError, AttributeError):
+            pass
+
+    # Require signature header in production and staging
+    if not is_development:
         if not x_retell_signature_raw:
-            logger.error("Missing x-retell-signature header in production - rejecting request")
+            logger.error("Missing x-retell-signature header — rejecting request")
             raise HTTPException(
                 status_code=401,
                 detail={"code": "MISSING_SIGNATURE", "message": "Missing signature header"}
             )
-        
         if not webhook_secret:
-            logger.error("RETELL_WEBHOOK_SECRET not configured in production - rejecting request")
+            logger.error("RETELL_WEBHOOK_SECRET not configured — rejecting request")
             raise HTTPException(
                 status_code=500,
                 detail={"code": "CONFIGURATION_ERROR", "message": "Webhook secret not configured"}
             )
-    
-    # Testing/Development: Allow requests without signature (for playground/testing)
+
+    # Development: allow requests without signature (for local testing)
     if not x_retell_signature_raw:
-        if not is_production:
-            logger.warning("Missing x-retell-signature header - allowing request (non-production mode)")
-            return
-        # Production case already handled above
-    
+        logger.warning("Missing x-retell-signature header — allowing request (development mode)")
+        return
+
     if not webhook_secret:
-        if not is_production:
-            logger.warning("RETELL_WEBHOOK_SECRET not configured - skipping signature verification (non-production mode)")
-            return
-        # Production case already handled above
-    
+        logger.warning("RETELL_WEBHOOK_SECRET not configured — skipping signature verification (development mode)")
+        return
+
     # Verify signature
     x_retell_signature = x_retell_signature_raw.strip()
-    
-    # Format body for signature verification (matches Retell SDK's JSON.stringify)
-    # Retell SDK uses: JSON.stringify(req.body) which produces compact JSON
+
+    # Normalize body to compact JSON (matches Retell SDK's JSON.stringify behavior)
     try:
         body_json = json.loads(body_bytes.decode('utf-8'))
-        # Use JSON.stringify equivalent: compact JSON with no spaces, sorted keys for consistency
-        # Note: Python's json.dumps doesn't sort keys by default, but Retell may not require it
-        # Using separators=(",", ":") matches JSON.stringify behavior
         body_for_signature = json.dumps(body_json, separators=(",", ":"), ensure_ascii=False)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        # If body isn't valid JSON, this is an error
         logger.error(f"Invalid JSON in request body: {str(e)}")
-        if is_production:
+        if not is_development:
             raise HTTPException(
                 status_code=400,
                 detail={"code": "INVALID_JSON", "message": "Invalid JSON in request body"}
             )
-        # In non-production, allow it
         body_for_signature = body_bytes.decode('utf-8', errors='replace')
-    
+
     # Compute expected signature using HMAC-SHA256
-    # Retell SDK: HMAC-SHA256(JSON.stringify(body), api_key) as hex digest
     expected = hmac.new(
         webhook_secret.encode('utf-8'),
         body_for_signature.encode('utf-8'),
         hashlib.sha256
     ).hexdigest()
-    
-    # Verify signature using constant-time comparison
+
+    # Verify using constant-time comparison
     if not hmac.compare_digest(expected, x_retell_signature):
-        # Production: Always reject invalid signatures
-        if is_production:
+        if not is_development:
             logger.error(
-                f"Invalid Retell signature in production - rejecting request. "
+                f"Invalid Retell signature — rejecting request. "
                 f"Expected: {expected[:16]}..., Got: {x_retell_signature[:16]}..."
             )
             raise HTTPException(
                 status_code=401,
                 detail={"code": "INVALID_SIGNATURE", "message": "Invalid signature"}
             )
-        
-        # Testing/Development: Log warning but allow (for testing scenarios)
+        # Development only: log and allow
         logger.warning(
-            f"Signature verification failed in {app_env} mode - allowing request (non-production). "
+            f"Signature mismatch in development mode — allowing. "
             f"Expected: {expected[:16]}..., Got: {x_retell_signature[:16]}..."
         )
-        logger.debug(f"Body length: {len(body_for_signature)}, Signature header: {x_retell_signature_raw[:50]}...")
         return
-    
-    # Signature is valid
+
     logger.debug("Retell signature verification successful")
 
 
@@ -537,8 +523,7 @@ async def schedule(
     )
     
     logger.info(
-        f"Schedule POST request: agent_id={agent_id}, clinic_id={clinic_id}, "
-        f"intent={intent}, patient_name={patient_name}"
+        f"Schedule POST request: agent_id={agent_id}, clinic_id={clinic_id}, intent={intent}"
     )
     
     try:
@@ -1014,13 +999,16 @@ async def confirm_booking_endpoint(
     call_obj = body.get("call", {})
     args = body.get("args", {})
     
-    # Log the received request for debugging
-    logger.info(f"Confirm booking request body: {json.dumps(body, default=str)}")
+    # Log non-PHI fields only
+    logger.info(
+        f"Confirm booking request: call_id={call_obj.get('call_id')}, "
+        f"agent_id={call_obj.get('agent_id')}, booking_id={args.get('booking_id')}"
+    )
     
     # Extract agent_id from call object and look up clinic_id
     agent_id = call_obj.get("agent_id")
     if not agent_id:
-        logger.warning(f"Missing agent_id in Retell request for confirm_booking. Body: {json.dumps(body, default=str)}")
+        logger.warning("Missing agent_id in Retell request for confirm_booking")
         return ConfirmResponse(
             success=False,
             message="Missing agent_id in request"
@@ -1204,11 +1192,12 @@ async def get_availability(
     date: Optional[str] = None,
     provider_id: Optional[UUID] = None,
     provider_name: Optional[str] = None,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_api_key),
 ) -> AvailabilityResponse:
     """
-    Get available appointment slots (GET - for RESTful API).
-    Called by Retell AI to offer available times to patients.
+    Get available appointment slots (GET - admin/internal use only).
+    Retell AI uses the POST version; this endpoint requires an admin API key.
     """
     return await _get_availability_internal(db, clinic_id, date, provider_id, provider_name)
 
@@ -1544,13 +1533,12 @@ async def ehr_book_appointment(
     provider_name = args.get("provider_name")
     chosen_slot = args.get("chosen_slot")
     patient_name = args.get("patient_name")
-    patient_dob = args.get("patient_dob")
     gap_type = args.get("gap_type")
 
-    if not all([provider_name, chosen_slot, patient_name, patient_dob]):
+    if not all([provider_name, chosen_slot, patient_name]):
         return EhrBookAppointmentResponse(
             success=False,
-            message="Missing required fields: provider_name, chosen_slot, patient_name, patient_dob",
+            message="Missing required fields: provider_name, chosen_slot, patient_name",
         )
 
     mapping = cfg.appt_type_mapping if isinstance(cfg.appt_type_mapping, dict) else {}
@@ -1563,7 +1551,6 @@ async def ehr_book_appointment(
             provider_name,
             chosen_slot,
             patient_name,
-            patient_dob,
             appt_code,
         )
     except Exception as e:

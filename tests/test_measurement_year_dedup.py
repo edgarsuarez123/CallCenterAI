@@ -5,11 +5,13 @@ Tests the _find_duplicate_contact function and the create_campaign dedup behavio
 All DB calls are mocked.
 """
 
-import hashlib
+import base64
+import os
 import uuid
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import Clinic_app.common.encryption as encryption_module
 from Clinic_app.data.enums import ContactStatus, GapType
 from Clinic_app.services.campaign_service import (
     hash_phone,
@@ -18,16 +20,23 @@ from Clinic_app.services.campaign_service import (
     _ACTIVE_STATUSES,
 )
 
+# Stable test key for HMAC hashing
+_TEST_HASH_KEY = base64.b64encode(os.urandom(32)).decode()
+
+
+@pytest.fixture(autouse=True)
+def reset_hash_key():
+    """Inject PHI_HASH_KEY and reset cache around every test."""
+    encryption_module._hash_key = None
+    with patch.dict(os.environ, {"PHI_HASH_KEY": _TEST_HASH_KEY}):
+        yield
+    encryption_module._hash_key = None
+
 
 # ── hash_phone ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.unit
 class TestHashPhone:
-    def test_sha256_of_e164(self):
-        phone = "+17875551234"
-        expected = hashlib.sha256(phone.encode("utf-8")).hexdigest()
-        assert hash_phone(phone) == expected
-
     def test_different_phones_different_hashes(self):
         assert hash_phone("+17875551234") != hash_phone("+17875559999")
 
@@ -38,6 +47,16 @@ class TestHashPhone:
         result = hash_phone("+17875551234")
         assert len(result) == 64
         assert all(c in "0123456789abcdef" for c in result)
+
+    def test_different_key_different_hash(self):
+        """HMAC output changes when the key changes — confirms keyed hashing."""
+        phone = "+17875551234"
+        h1 = hash_phone(phone)
+        encryption_module._hash_key = None
+        alt_key = base64.b64encode(os.urandom(32)).decode()
+        with patch.dict(os.environ, {"PHI_HASH_KEY": alt_key}):
+            h2 = hash_phone(phone)
+        assert h1 != h2
 
 
 # ── Dedup status sets ──────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 import logging
 
@@ -66,12 +67,13 @@ async def lifespan(app: FastAPI):
 
 
 # Create FastAPI app
+_is_production = os.environ.get("APP_ENVIRONMENT", "").lower() in ("production", "prod")
 app = FastAPI(
     title="CallCenterAI API",
     description="API for Call Center AI operations",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
     lifespan=lifespan,
 )
 
@@ -121,7 +123,6 @@ async def general_exception_handler(request, exc: Exception):
         status_code=500,
         content={
             "error": "Internal server error",
-            "detail": str(exc),
         },
     )
 

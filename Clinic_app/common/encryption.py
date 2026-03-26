@@ -8,6 +8,8 @@ Phase 1: Uses environment variable for encryption key
 Phase 2: Will migrate to Azure Key Vault
 """
 
+import hmac as _hmac
+import hashlib
 import os
 import base64
 import logging
@@ -215,4 +217,55 @@ def decrypt_phi(encrypted: bytes) -> str:
     except Exception as e:
         logger.error(f"Decryption failed: {str(e)}", exc_info=True)
         raise DecryptionError(f"Failed to decrypt PHI: {str(e)}")
+
+
+# ── Keyed HMAC hashing ────────────────────────────────────────────────────────
+
+_hash_key: Optional[bytes] = None
+
+
+def _get_hash_key() -> bytes:
+    """
+    Load PHI_HASH_KEY from environment (base64 or hex, min 32 bytes).
+
+    Separate from the encryption key (key separation principle).
+    Generate with: python -c "import os, base64; print(base64.b64encode(os.urandom(32)).decode())"
+    """
+    global _hash_key
+    if _hash_key is not None:
+        return _hash_key
+
+    key_str = os.getenv("PHI_HASH_KEY")
+    if not key_str:
+        raise EncryptionKeyError(
+            "PHI_HASH_KEY environment variable is required for PHI hashing."
+        )
+
+    try:
+        key_bytes = base64.b64decode(key_str, validate=True)
+    except Exception:
+        try:
+            key_bytes = bytes.fromhex(key_str)
+        except Exception as e:
+            raise EncryptionKeyError(f"PHI_HASH_KEY must be base64 or hex: {e}")
+
+    if len(key_bytes) < 32:
+        raise EncryptionKeyError("PHI_HASH_KEY must be at least 32 bytes.")
+
+    _hash_key = key_bytes
+    return _hash_key
+
+
+def hash_phi(value: str) -> str:
+    """
+    HMAC-SHA256 of a PHI value using PHI_HASH_KEY.
+
+    Use this for ALL dedup hashes (phone numbers, name+DOB combos).
+    A keyed HMAC prevents offline rainbow-table attacks against stored hashes.
+
+    Returns a 64-character lowercase hex string.
+    """
+    key = _get_hash_key()
+    digest = _hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+    return digest
 

@@ -118,7 +118,6 @@ class TestEhrBookAppointment:
                     "provider_name": "Dr. X",
                     "chosen_slot": "2026-04-01T09:00:00-05:00",
                     "patient_name": "Jane Doe",
-                    "patient_dob": "1980-01-15",
                     "gap_type": "colorectal",
                 },
             }

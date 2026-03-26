@@ -6,6 +6,7 @@ The key is passed via the X-Admin-Key request header and compared
 against the ADMIN_API_KEY environment variable.
 """
 
+import hmac
 import os
 import logging
 
@@ -30,7 +31,7 @@ async def verify_admin_api_key(api_key: str = Security(_api_key_header)) -> None
             status_code=500,
             detail={"code": "CONFIGURATION_ERROR", "message": "Admin API key not configured"},
         )
-    if not api_key or api_key != expected:
+    if not api_key or not hmac.compare_digest(api_key, expected):
         logger.warning("Unauthorized admin request — invalid or missing X-Admin-Key")
         raise HTTPException(
             status_code=401,

@@ -28,6 +28,7 @@ from Clinic_app.services.campaign_service import (
     expire_overdue_hospital_flu_contacts,
     get_next_eligible_contact,
 )
+from Clinic_app.common.logging_utils import mask_phone_e164
 from Clinic_app.services.retell_client import RetellClientError, create_outbound_call
 
 logger = logging.getLogger(__name__)
@@ -36,12 +37,6 @@ INTER_CALL_GAP_SECONDS = 5
 NO_CONTACT_SLEEP_SECONDS = 10
 AT_CAPACITY_SLEEP_SECONDS = 3
 CALLING_HOURS_POLL_SECONDS = 60
-
-
-def _mask_phone_e164(e164: str) -> str:
-    digits = "".join(c for c in e164 if c.isdigit())
-    last4 = digits[-4:] if len(digits) >= 4 else "****"
-    return f"***-***-{last4}"
 
 
 def _parse_hhmm(hhmm: str) -> tuple[int, int]:
@@ -203,12 +198,26 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
                         camp.calling_hours_start,
                         camp.calling_hours_end,
                     ):
+                        logger.info(
+                            "Outside calling hours clinic_id=%s window=%s-%s — sleeping %ds",
+                            clinic_id,
+                            camp.calling_hours_start,
+                            camp.calling_hours_end,
+                            CALLING_HOURS_POLL_SECONDS,
+                        )
                         await asyncio.sleep(CALLING_HOURS_POLL_SECONDS)
                         continue
 
                     limit = integration.campaign_concurrency_limit
                     active_calls = await count_calling_contacts(db, clinic_id)
                     if active_calls >= limit:
+                        logger.info(
+                            "At concurrency capacity clinic_id=%s active_calls=%d limit=%d — sleeping %ds",
+                            clinic_id,
+                            active_calls,
+                            limit,
+                            AT_CAPACITY_SLEEP_SECONDS,
+                        )
                         await asyncio.sleep(AT_CAPACITY_SLEEP_SECONDS)
                         continue
 
@@ -217,6 +226,11 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
 
                     contact = await get_next_eligible_contact(db, clinic_id)
                     if contact is None:
+                        logger.info(
+                            "No eligible contact found clinic_id=%s — sleeping %ds",
+                            clinic_id,
+                            NO_CONTACT_SLEEP_SECONDS,
+                        )
                         await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
                         continue
 
@@ -232,11 +246,6 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
                     patient_name = (
                         decrypt_phi(contact.patient_name_encrypted)
                         if contact.patient_name_encrypted
-                        else ""
-                    )
-                    patient_dob = (
-                        decrypt_phi(contact.patient_dob_encrypted)
-                        if contact.patient_dob_encrypted
                         else ""
                     )
 
@@ -265,9 +274,15 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
                         "provider_name": contact.provider_name or "",
                         "payer": contact.payer or "",
                     }
-                    if patient_dob:
-                        metadata["patient_dob"] = patient_dob
 
+                    logger.info(
+                        "Dialing contact_id=%s campaign_id=%s gap_type=%s attempt=%d to=%s",
+                        contact.id,
+                        contact.campaign_id,
+                        contact.gap_type,
+                        (contact.attempt_count or 0) + 1,
+                        mask_phone_e164(phone),
+                    )
                     try:
                         call_id = await create_outbound_call(
                             agent_id=integration.retell_agent_id,
@@ -307,7 +322,7 @@ async def _clinic_worker_loop(clinic_id: UUID) -> None:
                         "Outbound call placed retell_call_id=%s clinic_id=%s to=%s",
                         call_id,
                         clinic_id,
-                        _mask_phone_e164(phone),
+                        mask_phone_e164(phone),
                     )
 
                 await asyncio.sleep(INTER_CALL_GAP_SECONDS)

@@ -5,7 +5,6 @@ Provides functions for finding and creating patients with encrypted PHI.
 Uses hash-based lookup (name+DOB) for efficient patient identification.
 """
 
-import hashlib
 import logging
 import re
 from typing import Optional
@@ -16,7 +15,7 @@ from sqlalchemy import select
 
 from Clinic_app.data.models.patient import Patient
 from Clinic_app.data.models.clinic import Clinic
-from Clinic_app.common.encryption import encrypt_phi, decrypt_phi, EncryptionError, DecryptionError
+from Clinic_app.common.encryption import encrypt_phi, hash_phi, EncryptionError
 from Clinic_app.Routes.admin import validate_e164_phone
 
 logger = logging.getLogger(__name__)
@@ -33,29 +32,12 @@ VALID_LANGUAGES = ["en", "es"]
 
 def _compute_name_dob_hash(name: str, dob: str) -> str:
     """
-    Compute SHA-256 hash of normalized name and DOB for efficient lookup.
-    
-    Args:
-        name: Patient name (will be normalized)
-        dob: Date of birth (will be normalized)
-        
-    Returns:
-        64-character hex string (SHA-256 hash)
+    HMAC-SHA256 of normalized name+DOB using PHI_HASH_KEY. Used for patient lookup.
+
+    Keyed HMAC prevents offline enumeration of name/DOB combinations.
     """
-    # Normalize name: lowercase and strip whitespace
-    normalized_name = name.lower().strip()
-    
-    # Normalize DOB: strip whitespace
-    normalized_dob = dob.strip()
-    
-    # Combine with pipe separator
-    combined = f"{normalized_name}|{normalized_dob}"
-    
-    # Compute SHA-256 hash
-    hash_bytes = hashlib.sha256(combined.encode('utf-8')).digest()
-    hash_hex = hash_bytes.hex()
-    
-    return hash_hex
+    normalized = f"{name.lower().strip()}|{dob.strip()}"
+    return hash_phi(normalized)
 
 
 async def _validate_patient_inputs(
@@ -159,32 +141,11 @@ async def find_patient(
     if not patient:
         logger.info(f"Patient not found for hash in clinic {clinic_id}")
         return None
-    
-    # Decrypt and verify match (defense against hash collisions)
-    try:
-        decrypted_name = decrypt_phi(patient.name_token)
-        decrypted_dob = decrypt_phi(patient.dob_token)
-        
-        # Compare (case-insensitive for name, exact match for DOB)
-        normalized_input_name = name.lower().strip()
-        normalized_decrypted_name = decrypted_name.lower().strip()
-        normalized_input_dob = dob.strip()
-        normalized_decrypted_dob = decrypted_dob.strip()
-        
-        if normalized_input_name == normalized_decrypted_name and normalized_input_dob == normalized_decrypted_dob:
-            logger.info(f"Patient found and verified: {patient.id} in clinic {clinic_id}")
-            return patient
-        else:
-            # Hash collision detected
-            logger.warning(
-                f"Hash collision detected for clinic {clinic_id} (hash: {name_dob_hash[:8]}...). "
-                "Name/DOB mismatch after decryption."
-            )
-            return None
-            
-    except DecryptionError as e:
-        logger.error(f"Failed to decrypt patient PHI for verification: {str(e)}")
-        raise DecryptionError(f"Failed to decrypt patient data for verification: {str(e)}")
+
+    # name_dob_hash match is sufficient — SHA-256 collision probability is negligible.
+    # dob_token was removed (PHI Rule #2: DOB must not be stored in DB).
+    logger.info(f"Patient found: {patient.id} in clinic {clinic_id}")
+    return patient
 
 
 async def create_patient(
@@ -233,19 +194,20 @@ async def create_patient(
     # Encrypt PHI
     try:
         name_token = encrypt_phi(name)
-        dob_token = encrypt_phi(dob)
         phone_token = encrypt_phi(phone)
         email_token = encrypt_phi(email) if email and email.strip() else None
     except EncryptionError as e:
         logger.error(f"Failed to encrypt patient PHI: {str(e)}")
         raise EncryptionError(f"Failed to encrypt patient data: {str(e)}")
-    
+
+    phone_hash = hash_phi(phone)
+
     # Create new Patient record
     patient = Patient(
         clinic_id=clinic_id,
         name_token=name_token,
-        dob_token=dob_token,
         phone_token=phone_token,
+        phone_hash=phone_hash,
         email_token=email_token,
         name_dob_hash=name_dob_hash,
         language=language,
