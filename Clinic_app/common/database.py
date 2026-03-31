@@ -2,13 +2,13 @@ import os
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
-from dotenv import load_dotenv
+from Clinic_app.common.env import load_project_dotenv
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Load .env for local development
-load_dotenv()
+# Load .env from repository root (works with Docker / uvicorn cwd)
+load_project_dotenv()
 
 # Get database connection from environment variables
 DB_HOST = os.getenv("DB_HOST")
@@ -16,6 +16,7 @@ DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_SSL = os.getenv("DB_SSL", "require").strip().lower()
 
 # Build async connection string (uses asyncpg driver)
 DATABASE_URL = f"postgresql+asyncpg://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
@@ -28,14 +29,21 @@ if DB_HOST and DB_NAME and DB_USER and DB_PASSWORD:
     try:
         # Log connection info (without password)
         logger.info(f"Initializing database connection to {DB_HOST}:{DB_PORT}/{DB_NAME}")
-        
+
+        # Local Docker Postgres typically does not support TLS by default, while Azure
+        # PostgreSQL requires it. Make this explicit and configurable.
+        # Supported DB_SSL values:
+        #   - "require" / "true" / "1" → enable TLS
+        #   - "disable" / "false" / "0" → disable TLS
+        ssl_enabled = DB_SSL in ("require", "true", "1", "yes", "on")
+
         engine = create_async_engine(
             DATABASE_URL,
             pool_pre_ping=True,  # Test connections before using
             echo=False,  # Set to True for SQL query logging
             future=True,
             connect_args={
-                "ssl": True  # Require SSL for secure connections (Azure PostgreSQL)
+                "ssl": ssl_enabled
             }
         )
         

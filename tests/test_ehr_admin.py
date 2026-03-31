@@ -86,7 +86,7 @@ class TestUpsertEhrConfigHandler:
         )
 
         with patch("Clinic_app.Routes.admin.encrypt_phi", side_effect=lambda s: b"enc_" + s.encode()), patch(
-            "Clinic_app.Routes.admin.invalidate_clinic_selectors", new_callable=AsyncMock
+            "Clinic_app.Routes.admin.invalidate_clinic_ehr_cache", new_callable=AsyncMock
         ) as inv:
             await upsert_ehr_config(cid, req, mock_db)
             inv.assert_awaited_once_with(cid)

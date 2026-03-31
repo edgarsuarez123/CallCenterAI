@@ -1,8 +1,9 @@
 """
-Feature 0 — Integration tests: Playwright runtime environment
---------------------------------------------------------------
-These tests verify that Playwright and AgentQL are correctly installed
-and that headless Chromium can launch in this environment (local or Docker).
+Feature 0 — Integration tests: Playwright + Browser-Use runtime environment
+---------------------------------------------------------------------------
+These tests verify that Playwright, Browser-Use, and their LLM backend packages
+are correctly installed and that headless Chromium can launch in this environment
+(local or Docker).
 
 They do NOT connect to NextGen — they only confirm the runtime is available.
 
@@ -13,7 +14,7 @@ Run inside Docker container (verifies production environment):
     docker compose -f docker-compose.dev.yaml run --rm app \
         pytest tests/test_playwright_docker.py -v -m integration
 
-If playwright or agentql are not yet installed, tests are skipped with a
+If playwright or browser-use are not yet installed, tests are skipped with a
 clear install instruction — they do not fail the suite.
 """
 
@@ -119,70 +120,42 @@ class TestPlaywrightRuntime:
 
 
 # --------------------------------------------------------------------------- #
-# AgentQL runtime checks                                                      #
+# Browser-Use + LLM backend runtime checks                                    #
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.integration
-class TestAgentQLRuntime:
+class TestBrowserUseRuntime:
     """
-    Confirms AgentQL is installed and has the async API we depend on.
-    Does not make any AgentQL API calls — just checks the package interface.
+    Confirms Browser-Use and LangChain LLM backend packages are installed.
+    Does not launch a browser or make any LLM API calls — just checks imports.
     """
 
-    def test_agentql_package_is_importable(self):
-        """agentql Python package must be importable."""
+    def test_browser_use_is_importable(self):
+        """browser-use package must be importable and expose Agent + Browser."""
         try:
-            import agentql  # noqa: F401
+            from browser_use import Agent, Browser  # noqa: F401
         except ImportError:
             pytest.fail(
-                "agentql is not installed.\n"
-                "Run: pip install agentql"
+                "browser-use is not installed.\n"
+                "Run: pip install browser-use"
             )
 
-    def test_agentql_has_wrap_async(self):
-        """agentql must expose wrap_async() — the async page wrapper we use in PlaywrightEHRService."""
+    def test_langchain_openai_is_importable(self):
+        """langchain-openai must be importable (AzureChatOpenAI for production)."""
         try:
-            import agentql
+            from langchain_openai import AzureChatOpenAI  # noqa: F401
         except ImportError:
-            pytest.skip("agentql not installed")
-
-        assert hasattr(agentql, "wrap_async"), (
-            "agentql.wrap_async not found. "
-            "Check agentql version — this is the async API required by PlaywrightEHRService."
-        )
-
-    def test_agentql_has_configure(self):
-        """agentql must expose configure() for API key injection."""
-        try:
-            import agentql
-        except ImportError:
-            pytest.skip("agentql not installed")
-
-        assert hasattr(agentql, "configure"), (
-            "agentql.configure not found. "
-            "API key must be injected via agentql.configure(api_key=...) before any query."
-        )
-
-    @pytest.mark.asyncio
-    async def test_agentql_wraps_playwright_page(self):
-        """
-        agentql.wrap_async() must accept a Playwright Page and return a
-        wrapped page that exposes query_elements().
-        """
-        try:
-            import agentql
-            from playwright.async_api import async_playwright
-        except ImportError:
-            pytest.skip("playwright or agentql not installed")
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            raw_page = await browser.new_page()
-
-            wrapped_page = await agentql.wrap_async(raw_page)
-            assert hasattr(wrapped_page, "query_elements"), (
-                "Wrapped page missing query_elements(). "
-                "agentql API may have changed — check agentql docs."
+            pytest.fail(
+                "langchain-openai is not installed.\n"
+                "Run: pip install langchain-openai"
             )
 
-            await browser.close()
+    def test_langchain_ollama_is_importable(self):
+        """langchain-ollama must be importable (ChatOllama for local dev)."""
+        try:
+            from langchain_ollama import ChatOllama  # noqa: F401
+        except ImportError:
+            pytest.fail(
+                "langchain-ollama is not installed.\n"
+                "Run: pip install langchain-ollama"
+            )

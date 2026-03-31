@@ -1,6 +1,32 @@
-# Core FastAPI and web server
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+# =============================================================================
+# Production stack aligned with browser-use==0.12.5 (strict anyio 4 / httpx / pydantic).
+# Do not pin conflicting versions below — resolver must agree with browser-use METADATA.
+# =============================================================================
+
+# EHR — browser-use and exact peers (see PyPI browser-use 0.12.5 Requires-Dist)
+browser-use==0.12.5
+aiohttp==3.13.3
+anthropic==0.76.0
+anyio==4.12.1
+httpx==0.28.1
+openai==2.16.0
+pydantic==2.12.5
+python-dotenv==1.2.1
+requests==2.32.5
+psutil==7.2.2
+typing-extensions==4.15.0
+click==8.3.1
+
+# Core FastAPI / ASGI (anyio 4.x compatible)
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+
+# LangChain backends for EHR LLM (browser-use optional lock)
+langchain-openai==1.1.7
+langchain-ollama==1.0.1
+
+# Data validation (pydantic already pinned above)
+pydantic-settings==2.7.0
 
 # Database
 sqlalchemy==2.0.23
@@ -9,54 +35,36 @@ asyncpg==0.29.0
 alembic==1.12.1
 
 # Security and encryption
-cryptography==41.0.7
+cryptography>=42.0.0,<47.0.0
 
-# Google Calendar integration
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
-google-api-python-client==2.108.0
+# Google Calendar / APIs (aligned with browser-use pins where overlapping)
+google-auth==2.48.0
+google-auth-oauthlib==1.2.4
+google-auth-httplib2==0.2.0
+google-api-python-client==2.188.0
 
-# HTTP requests
-httpx==0.25.2
-requests==2.31.0
-
-# Azure OpenAI
-openai==1.3.0
-
-# Data validation and parsing
-pydantic==2.5.0
-pydantic-settings==2.1.0
+# HTTP / utilities
 python-dateutil==2.8.2
 pytz==2024.1
-
-# Environment and configuration
-python-dotenv==1.0.0
-
-# System monitoring
-psutil==5.9.6
 
 # Redis caching
 redis==5.0.1
 
-# Retry logic (required for state persistence)
-tenacity==8.2.3
+# Retry logic
+tenacity>=8.2.3,<9.2.0
 
 # Background job scheduling (booking reaper)
 apscheduler==3.10.4
 
-# EHR Integration — server-side headless browser automation
-# Run after pip install: `python -m playwright install chromium`
+# EHR — Playwright (run after install: python -m playwright install chromium)
 playwright==1.58.0
-agentql==1.18.1
 
-# HEDIS campaign additions
-anthropic>=0.25.0        # Claude API — CSV gap type parsing + call summary generation
-PyJWT>=2.8.0             # JWT for clinic staff sessions (Feature 3)
-python-multipart>=0.0.9  # FastAPI file upload support (Feature 4)
-openpyxl>=3.1.0          # Excel file parsing alongside CSV (Feature 4)
+# HEDIS campaign
+PyJWT>=2.8.0
+python-multipart>=0.0.9
+openpyxl>=3.1.0
 
-# Development and testing (optional)
+# Development and testing
 pytest==7.4.3
 pytest-asyncio==0.21.1
 black==23.11.0

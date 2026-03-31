@@ -19,6 +19,11 @@ services:
       - DB_NAME=callcenterai
       - DB_USER=postgres
       - DB_PASSWORD=postgres
+      - DB_SSL=disable
+      # EHR_LLM_PROVIDER, OLLAMA_*, etc. come from `env_file: .env` above.
+      # Do NOT set them here as EHR_LLM_PROVIDER=${EHR_LLM_PROVIDER:-} — if Compose
+      # interpolation leaves the value empty, `environment` overrides `env_file` and
+      # wipes the real value from .env (Docker Compose precedence: environment wins).
     depends_on:
       postgres:
         condition: service_healthy
@@ -27,6 +32,10 @@ services:
     volumes:
       # Mount source code for hot-reload (development only)
       - ./Clinic_app:/app/Clinic_app:ro
+      # `Clinic_app/common/database.py` calls load_dotenv() from cwd (/app). Only mounting
+      # Clinic_app leaves /app/.env missing unless baked into the image — env_file alone
+      # does not create that file. Bind-mount the host .env so EHR_LLM_PROVIDER etc. load.
+      - ./.env:/app/.env:ro
     command: ["uvicorn", "Clinic_app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     networks:
       - callcenter-network
@@ -78,6 +87,7 @@ services:
       - DB_NAME=callcenterai
       - DB_USER=postgres
       - DB_PASSWORD=postgres
+      - DB_SSL=disable
     depends_on:
       postgres:
         condition: service_healthy

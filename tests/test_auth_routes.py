@@ -9,11 +9,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
 
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests-only")
-os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
-os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
-os.environ.setdefault("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
-os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
+# Force values so tests stay deterministic even if database.load_dotenv() ran first
+# (see Clinic_app/common/database.py) and populated GOOGLE_* from .env.
+os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-unit-tests-only"
+os.environ["GOOGLE_CLIENT_ID"] = "test-client-id"
+os.environ["GOOGLE_CLIENT_SECRET"] = "test-client-secret"
+os.environ["GOOGLE_REDIRECT_URI"] = "http://localhost:8000/auth/google/callback"
+os.environ["ADMIN_API_KEY"] = "test-admin-key"
 
 
 def _make_mock_staff(clinic_id: uuid.UUID, role: str = "viewer", google_sub: str = "sub123"):

@@ -18,6 +18,7 @@ from Clinic_app.services.csv_parser import (
     map_gap_type,
     _build_column_mapping,
     _detect_delimiter,
+    _try_direct_header_mapping,
     parse_file,
 )
 
@@ -168,13 +169,12 @@ class TestParseCSV:
             lines.append(delimiter.join(str(row[h]) for h in headers))
         return "\n".join(lines).encode("utf-8")
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_valid_csv_parses_correctly(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_valid_csv_parses_correctly(self):
+        # Uses canonical GapType values — direct header mapping handles this without Claude
         csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "COL", "Language": "es",
+            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "es",
              "Member Name": "Juan Perez", "DOB": "1970-01-01", "Plan ID": "ABC"},
-            {"Member Phone": "7875559999", "HEDIS Measure": "DM_A1C", "Language": "en",
+            {"Member Phone": "7875559999", "HEDIS Measure": "kidney", "Language": "en",
              "Member Name": "Maria Lopez", "DOB": "1980-06-15", "Plan ID": "XYZ"},
         ])
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
@@ -186,11 +186,9 @@ class TestParseCSV:
         assert rows[0].patient_name == "Juan Perez"
         assert rows[1].gap_type == GapType.KIDNEY
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_bad_phone_goes_to_errors_not_raises(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_bad_phone_goes_to_errors_not_raises(self):
         csv_bytes = self._make_csv([
-            {"Member Phone": "NOT_A_PHONE", "HEDIS Measure": "COL", "Language": "en",
+            {"Member Phone": "NOT_A_PHONE", "HEDIS Measure": "colorectal", "Language": "en",
              "Member Name": "Test", "DOB": "", "Plan ID": ""},
         ])
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
@@ -198,9 +196,7 @@ class TestParseCSV:
         assert len(errors) == 1
         assert "NOT_A_PHONE" in errors[0].reason or errors[0].row_number == 2
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_unrecognized_gap_type_is_parse_error(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_unrecognized_gap_type_is_parse_error(self):
         csv_bytes = self._make_csv([
             {"Member Phone": "7875551234", "HEDIS Measure": "UNKNOWN_GAP", "Language": "en",
              "Member Name": "", "DOB": "", "Plan ID": ""},
@@ -215,26 +211,22 @@ class TestParseCSV:
         with pytest.raises(ValueError, match="empty"):
             parse_file(b"", filename="empty.csv")
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_mixed_valid_and_invalid_rows(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_mixed_valid_and_invalid_rows(self):
         csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "COL", "Language": "en",
+            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
              "Member Name": "", "DOB": "", "Plan ID": ""},
-            {"Member Phone": "BADINPUT", "HEDIS Measure": "COL", "Language": "en",
+            {"Member Phone": "BADINPUT", "HEDIS Measure": "colorectal", "Language": "en",
              "Member Name": "", "DOB": "", "Plan ID": ""},
-            {"Member Phone": "7875559999", "HEDIS Measure": "HBP", "Language": "es",
+            {"Member Phone": "7875559999", "HEDIS Measure": "eye_exam", "Language": "es",
              "Member Name": "", "DOB": "", "Plan ID": ""},
         ])
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 2
         assert len(errors) == 1
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_pipe_delimited_csv(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_pipe_delimited_csv(self):
         csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "COL", "Language": "en",
+            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
              "Member Name": "Test", "DOB": "", "Plan ID": ""},
         ], delimiter="|")
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
@@ -258,11 +250,9 @@ class TestParseExcel:
         wb.save(buf)
         return buf.getvalue()
 
-    @patch("Clinic_app.services.csv_parser._get_anthropic_client")
-    def test_valid_xlsx_parses_correctly(self, mock_get_client):
-        mock_get_client.return_value = _make_mock_anthropic()
+    def test_valid_xlsx_parses_correctly(self):
         xlsx_bytes = self._make_xlsx([
-            {"Member Phone": "7875551234", "HEDIS Measure": "COL", "Language": "en",
+            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
              "Member Name": "Test", "DOB": "1970-01-01", "Plan ID": "A"},
         ])
         rows, errors = parse_file(xlsx_bytes, filename="patients.xlsx")
@@ -277,3 +267,90 @@ class TestParseExcel:
         wb.save(buf)
         with pytest.raises(ValueError):
             parse_file(buf.getvalue(), filename="empty.xlsx")
+
+
+# ── _try_direct_header_mapping ─────────────────────────────────────────────────
+
+@pytest.mark.unit
+class TestDirectHeaderMapping:
+    def _headers_and_samples(self, headers: list[str], gap_vals: list[str]) -> tuple:
+        sample = [[v if h == headers[-1] else "7875551234" for h in headers] for v in gap_vals]
+        return headers, sample
+
+    def test_standard_headers_recognized(self):
+        headers = ["Member Phone", "HEDIS Measure"]
+        sample = [["7875551234", "colorectal"]]
+        result = _try_direct_header_mapping(headers, sample)
+        assert result is not None
+        assert result["column_mapping"]["Member Phone"] == "phone"
+        assert result["column_mapping"]["HEDIS Measure"] == "gap_type"
+
+    def test_lowercase_and_underscore_headers_recognized(self):
+        headers = ["phone_number", "care_gap"]
+        sample = [["7875551234", "preventive_visit"]]
+        result = _try_direct_header_mapping(headers, sample)
+        assert result is not None
+        assert result["column_mapping"]["phone_number"] == "phone"
+        assert result["column_mapping"]["care_gap"] == "gap_type"
+
+    def test_missing_phone_returns_none(self):
+        headers = ["Patient Name", "HEDIS Measure"]
+        sample = [["Juan", "colorectal"]]
+        assert _try_direct_header_mapping(headers, sample) is None
+
+    def test_missing_gap_type_returns_none(self):
+        headers = ["Member Phone", "Patient Name"]
+        sample = [["7875551234", "Juan"]]
+        assert _try_direct_header_mapping(headers, sample) is None
+
+    def test_gap_type_alias_resolved(self):
+        headers = ["Member Phone", "HEDIS Measure"]
+        # "mammogram" is an alias — not a valid GapType value directly
+        sample = [["7875551234", "mammogram"]]
+        result = _try_direct_header_mapping(headers, sample)
+        assert result is not None
+        assert result["gap_type_values"]["mammogram"] == "breast_cancer"
+
+    def test_canonical_gap_value_not_added_to_gap_type_values(self):
+        # "colorectal" is already a valid GapType — no alias entry needed
+        headers = ["Member Phone", "HEDIS Measure"]
+        sample = [["7875551234", "colorectal"]]
+        result = _try_direct_header_mapping(headers, sample)
+        assert result is not None
+        assert "colorectal" not in result["gap_type_values"]
+
+    def test_unrecognized_gap_value_not_added(self):
+        headers = ["Member Phone", "HEDIS Measure"]
+        sample = [["7875551234", "TOTALLY_UNKNOWN"]]
+        result = _try_direct_header_mapping(headers, sample)
+        assert result is not None
+        assert "TOTALLY_UNKNOWN" not in result["gap_type_values"]
+
+    def test_parse_file_uses_direct_mapping_for_standard_headers(self):
+        # No Claude mock needed — direct mapping should succeed
+        import io as _io
+        csv_content = "Member Phone,Care Gap\n7875551234,preventive_visit\n"
+        rows, errors = parse_file(csv_content.encode(), filename="test.csv")
+        assert len(rows) == 1
+        assert rows[0].gap_type == GapType.PREVENTIVE_VISIT
+
+    def test_parse_file_falls_through_to_claude_for_unknown_headers(self):
+        # Headers not in alias table → direct mapping returns None → Claude called
+        from unittest.mock import patch, MagicMock
+        import json
+        mock_resp = {
+            "column_mapping": {"Mbr_Ph": "phone", "Measure_Cd": "gap_type"},
+            "gap_type_values": {"COL": "colorectal"},
+        }
+        mock_content = MagicMock()
+        mock_content.text = json.dumps(mock_resp)
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        with patch("Clinic_app.services.csv_parser._get_anthropic_client", return_value=mock_client):
+            csv_content = "Mbr_Ph,Measure_Cd\n7875551234,COL\n"
+            rows, errors = parse_file(csv_content.encode(), filename="test.csv")
+        assert len(rows) == 1
+        assert rows[0].gap_type == GapType.COLORECTAL

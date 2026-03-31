@@ -26,7 +26,7 @@ A multi-tenant SaaS platform that automates HEDIS care-gap outreach for primary 
 
 | Layer | Technology |
 |---|---|
-| API Framework | FastAPI 0.104.1 (async) |
+| API Framework | FastAPI 0.115.6 (async; aligned with browser-use / anyio 4.x) |
 | ORM | SQLAlchemy 2.0.23 (async) |
 | Migrations | Alembic 1.12.1 |
 | Database | Azure PostgreSQL Flexible Server |
@@ -338,6 +338,8 @@ Use this template when creating `PLAN.md` for the first time:
 - **Secrets:** Never in code, never in logs, always from environment variables
 
 ---
+
+*Dependency note (Mar 2026): `browser-use` pins `anyio` 4.x, `httpx` 0.28.x, `openai` 2.x, and related packages — see root `requirements.txt`.*
 
 *Last updated: March 2026*
 *Maintained by: Edgar J. Suárez Colón*

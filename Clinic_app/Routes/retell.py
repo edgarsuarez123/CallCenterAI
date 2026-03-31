@@ -1346,6 +1346,35 @@ def _extract_transcript_for_summary(call_obj: Dict[str, Any]) -> str:
     return ""
 
 
+def _get_summarizer_mode() -> str:
+    """
+    Return the active summarizer mode from SUMMARIZER_MODE env var.
+
+    claude (default) — call Claude API for structured extraction / one-sentence summary.
+    retell           — use Retell's built-in call_analysis.call_summary directly.
+
+    Invalid values are logged and fall back to 'claude'.
+    """
+    mode = os.environ.get("SUMMARIZER_MODE", "claude").lower()
+    if mode not in ("claude", "retell"):
+        logger.warning("Invalid SUMMARIZER_MODE=%r — defaulting to 'claude'", mode)
+        return "claude"
+    return mode
+
+
+def _extract_retell_summary(call_obj: Dict[str, Any]) -> str:
+    """Extract Retell's built-in call_summary from call_analysis (no Claude API call)."""
+    ca = call_obj.get("call_analysis")
+    if isinstance(ca, dict):
+        for key in ("call_summary", "summary"):
+            val = ca.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    # Fall back to transcript extraction (which also checks call_analysis keys)
+    fallback = _extract_transcript_for_summary(call_obj)
+    return fallback if fallback else "Call completed; no summary available."
+
+
 def _gap_type_is_order_based(gap_type_str: str) -> bool:
     """True if this gap uses order-based flow (kit/order; no EHR appointment)."""
     return gap_type_str in {gt.value for gt in ORDER_BASED_GAP_TYPES}
@@ -1452,8 +1481,8 @@ async def ehr_get_available_slots(
     db: AsyncSession = Depends(get_db),
 ) -> EhrToolSlotsResponse:
     """
-    Mid-call: read NextGen availability via Playwright + AgentQL (HEDIS PRD §10.3).
-    Must respond quickly; pre-warmed session + selector cache help meet the <3s target.
+    Mid-call: read NextGen availability via Browser-Use + LLM (HEDIS PRD §10.3).
+    Reads from Redis slot cache (pre-fetched by SlotPrefetchWorker) to meet <3s deadline.
     """
     body_bytes = await request.body()
     await verify_retell_signature(request, body_bytes)
@@ -1592,40 +1621,23 @@ async def ehr_book_appointment(
 # ============================================================================
 # WEBHOOK ENDPOINTS
 # ============================================================================
+# Retell posts all lifecycle events to a single account/agent webhook URL with
+# body["event"] in {"call_started","call_ended","call_analyzed",...}. Primary
+# route: POST /retell/webhook. Per-event paths are thin aliases for dev/curl.
 
-@retell_router.post("/webhook/call_started")
-async def webhook_call_started(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-) -> Dict[str, str]:
-    """
-    Webhook for call started event.
-    Creates CallLog entry and identifies clinic.
-    """
-    # Read body once
-    body_bytes = await request.body()
-    
-    # Verify signature using the body bytes
-    await verify_retell_signature(request, body_bytes)
-    
-    # Parse JSON from the same body bytes
-    body = json.loads(body_bytes.decode('utf-8'))
-    # Retell sends data nested in a "call" object when called as webhook
-    # When called as custom function, data might be in "call" object or at top level
-    call_obj = body.get("call", body)  # Try "call" object first, fallback to body
+
+async def _handle_call_started(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict[str, str]:
+    """Core logic for call_started: create CallLog and link HEDIS contact when present."""
     webhook = CallStartedWebhook.model_validate(call_obj)
-    
+
     logger.info(f"Call started: call_id={webhook.call_id}, agent_id={webhook.agent_id}")
-    
+
     try:
-        # Lookup clinic by agent_id
         clinic_id = await _get_clinic_by_agent_id(db, webhook.agent_id)
-        
-        # Determine call type (default to inbound if not provided)
+
         direction = webhook.direction or "inbound"
         call_type = "inbound" if direction == "inbound" else "outbound_campaign"
-        
-        # Parse timestamp (use current time if not provided)
+
         if webhook.timestamp:
             try:
                 started_at = datetime.fromisoformat(webhook.timestamp.replace("Z", "+00:00"))
@@ -1633,13 +1645,12 @@ async def webhook_call_started(
                 started_at = datetime.now(timezone.utc)
         else:
             started_at = datetime.now(timezone.utc)
-        
-        # Create CallLog entry
+
         call_log = CallLog(
             clinic_id=clinic_id,
             call_type=call_type,
             retell_call_id=webhook.call_id,
-            started_at=started_at
+            started_at=started_at,
         )
         meta = _hedis_metadata_from_call(call_obj, webhook.metadata)
         if meta.get("call_type") == "hedis_campaign" and meta.get("campaign_contact_id"):
@@ -1653,51 +1664,29 @@ async def webhook_call_started(
 
         db.add(call_log)
         await db.commit()
-        
+
         logger.info(f"Created CallLog: {call_log.id} for clinic {clinic_id}")
-        
+
         return {"status": "ok", "call_log_id": str(call_log.id)}
-        
+
     except ValueError as e:
         logger.error(f"Error processing call_started: {str(e)}")
-        # Still return OK to acknowledge webhook
         return {"status": "ok", "error": str(e)}
-    
+
     except Exception as e:
         logger.error(f"Error in call_started webhook: {str(e)}", exc_info=True)
         await db.rollback()
         return {"status": "ok", "error": "Internal error"}
 
 
-@retell_router.post("/webhook/call_ended")
-async def webhook_call_ended(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-) -> Dict[str, str]:
-    """
-    Webhook for call ended event.
-    Updates CallLog and releases any unconfirmed tentative bookings.
-    """
-    # Read body once
-    body_bytes = await request.body()
-    
-    # Verify signature using the body bytes
-    await verify_retell_signature(request, body_bytes)
-    
-    # Parse JSON from the same body bytes
-    body = json.loads(body_bytes.decode('utf-8'))
-    # Retell sends data nested in a "call" object when called as webhook
-    # When called as custom function, data might be in "call" object or at top level
-    call_obj = body.get("call", body)  # Try "call" object first, fallback to body
+async def _handle_call_ended(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict[str, str]:
+    """Core logic for call_ended: update CallLog, release holds, HEDIS contact updates."""
     webhook = CallEndedWebhook.model_validate(call_obj)
-    
-    # Extract outcome (use disconnection_reason if available, otherwise default)
+
     outcome_str = webhook.disconnection_reason if webhook.disconnection_reason else "unknown"
     logger.info(f"Call ended: call_id={webhook.call_id}, outcome={outcome_str}")
-    
+
     try:
-        # Find CallLog by retell_call_id
-        # If multiple exist (e.g., in testing), use the most recent one
         result = await db.execute(
             select(CallLog)
             .where(CallLog.retell_call_id == webhook.call_id)
@@ -1705,24 +1694,20 @@ async def webhook_call_ended(
             .limit(1)
         )
         call_log = result.scalar_one_or_none()
-        
+
         if not call_log:
             logger.warning(f"CallLog not found for call_id: {webhook.call_id}")
             return {"status": "ok", "warning": "CallLog not found"}
-        
-        # Calculate duration from timestamps (Retell sends milliseconds since epoch)
+
         duration_seconds = None
         if webhook.start_timestamp and webhook.end_timestamp:
-            duration_seconds = (webhook.end_timestamp - webhook.start_timestamp) // 1000  # Convert ms to seconds
-        
-        # Extract outcome from disconnection_reason
+            duration_seconds = (webhook.end_timestamp - webhook.start_timestamp) // 1000
+
         outcome = webhook.disconnection_reason if webhook.disconnection_reason else "unknown"
-        
-        # Parse timestamp (Retell sends milliseconds since epoch)
+
         if webhook.end_timestamp:
             ended_at = datetime.fromtimestamp(webhook.end_timestamp / 1000, tz=timezone.utc)
         else:
-            # Fallback to timestamp string if provided
             if webhook.timestamp:
                 try:
                     ended_at = datetime.fromisoformat(webhook.timestamp.replace("Z", "+00:00"))
@@ -1730,18 +1715,15 @@ async def webhook_call_ended(
                     ended_at = datetime.now(timezone.utc)
             else:
                 ended_at = datetime.now(timezone.utc)
-        
-        # Update CallLog
+
         if duration_seconds is not None:
             call_log.duration_seconds = duration_seconds
         call_log.outcome = outcome
         call_log.ended_at = ended_at
-        
-        # RELEASE UNCONFIRMED HOLDS
-        # If there's a tentative booking that wasn't confirmed, cancel it
+
         if call_log.tentative_booking_id:
             booking = await db.get(Booking, call_log.tentative_booking_id)
-            
+
             if booking and booking.status == BookingStatus.TENTATIVE:
                 logger.info(f"Releasing unconfirmed tentative booking: {booking.id}")
                 await cancel_booking(db, booking.id, call_log.clinic_id, actor="call_ended")
@@ -1751,35 +1733,28 @@ async def webhook_call_ended(
             await _apply_hedis_call_ended(db, call_log, webhook, call_obj, ended_at)
         except Exception as exc:
             logger.error("HEDIS call_ended handling failed: %s", exc, exc_info=True)
-        
+
         await db.commit()
-        
-        logger.info(f"Updated CallLog: {call_log.id}, released_hold={call_log.tentative_booking_id is None}")
-        
+
+        logger.info(
+            f"Updated CallLog: {call_log.id}, released_hold={call_log.tentative_booking_id is None}"
+        )
+
         return {"status": "ok"}
-        
+
     except Exception as e:
         logger.error(f"Error in call_ended webhook: {str(e)}", exc_info=True)
         await db.rollback()
         return {"status": "ok", "error": "Internal error"}
 
 
-@retell_router.post("/webhook/call_analyzed")
-async def webhook_call_analyzed(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> Dict[str, str]:
+async def _handle_call_analyzed(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict[str, str]:
     """
     Post-call analysis: Claude summary + CampaignAudit row for HEDIS campaigns.
 
     Order-based gaps use structured extraction (note stored encrypted); appointment-based
     gaps use a one-sentence summary. Raw transcript is not persisted.
     """
-    body_bytes = await request.body()
-    await verify_retell_signature(request, body_bytes)
-    body = json.loads(body_bytes.decode("utf-8"))
-    call_obj = body.get("call", body)
-
     call_id = call_obj.get("call_id") or ""
     agent_id = call_obj.get("agent_id")
     if not agent_id:
@@ -1807,9 +1782,19 @@ async def webhook_call_analyzed(
         return {"status": "ok", "error": "contact not found"}
 
     transcript = _extract_transcript_for_summary(call_obj)
+    summarizer_mode = _get_summarizer_mode()
 
     summary: str
-    if _gap_type_is_order_based(contact.gap_type):
+    if summarizer_mode == "retell":
+        summary = _extract_retell_summary(call_obj)
+        if _gap_type_is_order_based(contact.gap_type):
+            logger.info(
+                "call_analyzed SUMMARIZER_MODE=retell — skipping structured extraction "
+                "for order-based gap %s; contact_id=%s",
+                contact.gap_type,
+                contact.id,
+            )
+    elif _gap_type_is_order_based(contact.gap_type):
         try:
             notes = await asyncio.to_thread(
                 extract_order_based_notes_sync,
@@ -1831,7 +1816,6 @@ async def webhook_call_analyzed(
         pa = notes["patient_agreed"]
         if pa is False and contact.status == ContactStatus.ORDER_AGREED.value:
             contact.status = ContactStatus.ORDER_DECLINED.value
-        # pa is True: keep optimistic ORDER_AGREED from call_ended; pa is None: unchanged
     else:
         try:
             summary = await asyncio.to_thread(
@@ -1880,4 +1864,72 @@ async def webhook_call_analyzed(
         return {"status": "ok", "error": "commit failed"}
 
     return {"status": "ok", "audit_id": str(audit.id)}
+
+
+@retell_router.post("/webhook")
+async def webhook_unified(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """
+    Single Retell webhook URL: all lifecycle events POST here with JSON `event` field.
+
+    See https://docs.retellai.com/features/webhook — account-level or agent-level
+    webhook URL should be ``{APP_BASE_URL}/retell/webhook``.
+    """
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+
+    event = body.get("event", "")
+    call_obj = body.get("call", body)
+
+    if event == "call_started":
+        return await _handle_call_started(db, call_obj)
+    if event == "call_ended":
+        return await _handle_call_ended(db, call_obj)
+    if event == "call_analyzed":
+        return await _handle_call_analyzed(db, call_obj)
+
+    logger.warning("Unhandled Retell webhook event type: %s", event or "(empty)")
+    return {"status": "ok"}
+
+
+@retell_router.post("/webhook/call_started")
+async def webhook_call_started(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Alias for manual testing; production Retell config should use POST /retell/webhook."""
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", body)
+    return await _handle_call_started(db, call_obj)
+
+
+@retell_router.post("/webhook/call_ended")
+async def webhook_call_ended(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Alias for manual testing; production Retell config should use POST /retell/webhook."""
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", body)
+    return await _handle_call_ended(db, call_obj)
+
+
+@retell_router.post("/webhook/call_analyzed")
+async def webhook_call_analyzed(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, str]:
+    """Alias for manual testing; production Retell config should use POST /retell/webhook."""
+    body_bytes = await request.body()
+    await verify_retell_signature(request, body_bytes)
+    body = json.loads(body_bytes.decode("utf-8"))
+    call_obj = body.get("call", body)
+    return await _handle_call_analyzed(db, call_obj)
 

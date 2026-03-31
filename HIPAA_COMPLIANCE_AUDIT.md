@@ -341,6 +341,34 @@ Dashboard export (GET /campaigns/{id}/export)
 | Key management | Phase 1: env var (documented); Phase 2: Azure Key Vault (planned) | 🔲 IN PROGRESS |
 | Backup encryption | Azure-managed; no app-level verification | ⚠️ See W-05 |
 | Network egress | Port 8000 exposed; no TLS termination shown in compose | ✅ (TLS expected at reverse proxy / Azure Front Door layer) |
+| **AgentQL (third-party)** | No published BAA; DOM sent to AgentQL cloud may contain PHI | 🔴 **See T-01 below** |
+
+---
+
+## Third-Party Vendor Findings
+
+#### T-01 — AgentQL lacks a BAA — DOM containing PHI sent to third-party cloud
+**Rule:** 45 CFR §164.308(b)(1) — Business Associate Agreements required for all vendors handling PHI
+**File:** `Clinic_app/services/playwright_ehr.py:177,261`
+**Added:** 2026-03-26
+
+**How AgentQL works:** `agentql.wrap_async(page)` sends the full page DOM/HTML to AgentQL's cloud LLM API on every `query_elements()` call. The LLM interprets the DOM structure and returns CSS/XPath selectors.
+
+**PHI exposure risk:** When the app navigates to NextGen's scheduling or booking pages, the DOM may include other patients' existing appointments visible in calendar views, demographic fields pre-populated on the booking form, or appointment history. This content would be transmitted to AgentQL's servers.
+
+**Current mitigation (partial):** Redis selector cache (`selector_cache.py`) stores resolved selectors for 24 hours. If the cache is warm, `query_elements()` is not called and no DOM is sent. However, on cache miss (first call per clinic, or after 24h TTL expiry), the full page DOM is transmitted.
+
+**Risk level:** 🔴 HIGH — Any cache miss in production sends potentially-PHI-containing DOM to a vendor without a BAA. This is a reportable breach under HIPAA if PHI is present.
+
+**Remediation options (choose one before pilot launch):**
+
+1. **Get a BAA from AgentQL** (preferred if available) — Contact AgentQL at their enterprise/sales channel. They are a funded startup and may offer BAAs for healthcare customers. If obtained, add to BAA inventory alongside Azure BAA.
+
+2. **Replace AgentQL with hardcoded Playwright selectors for booking pages** — Use AgentQL only during development to discover selectors, store them permanently in code (not just Redis cache), and use `page.locator()` directly in production. No DOM is transmitted. More brittle on NextGen UI updates but PHI-safe.
+
+3. **Sentinel approach** — Before calling `query_elements()`, navigate away from any page that could contain patient data (e.g., query only on a freshly-loaded blank booking form before patient data is populated). Requires careful flow analysis to confirm no PHI is present in DOM at query time.
+
+**Required before pilot:** Resolve T-01. Do not use `query_elements()` in production against pages containing real patient data without a signed BAA or alternative selector strategy.
 
 ---
 

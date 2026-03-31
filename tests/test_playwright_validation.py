@@ -185,57 +185,42 @@ class TestPlaywrightEHRServiceContract:
 
 
 # --------------------------------------------------------------------------- #
-# Contract: Redis selector cache key format                                   #
+# Contract: Redis EHR slot cache key format                                   #
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.unit
-class TestAgentQLSelectorCacheKeys:
+class TestEHRSlotCacheKeys:
     """
-    Verify the Redis cache key naming convention for AgentQL selectors.
-    HEDIS PRD §10.7: cache selector strings in Redis with 24h TTL.
+    Verify the Redis cache key naming convention for Browser-Use slot pre-fetch.
+    Each clinic's slots are isolated by clinic_id in the key prefix.
 
-    Key format: agentql:selector:{clinic_id}:{element_name}
-    This format is tested here so that PlaywrightEHRService (Feature 5)
-    and the Redis module (Feature 1) use the exact same key structure.
+    Key format: ehr:slots:{clinic_id}:{provider_name_normalized}
+    TTL: 90 seconds (SlotPrefetchWorker runs every 60s with 30s buffer)
     """
 
-    def test_slot_grid_cache_key_format(self):
+    def test_slot_cache_key_format(self):
         clinic_id = "550e8400-e29b-41d4-a716-446655440000"
-        element_name = "appointment_slot_grid"
-        key = f"agentql:selector:{clinic_id}:{element_name}"
+        provider_name = "Dr. Smith"
+        safe_provider = provider_name.replace(" ", "_").lower()
+        key = f"ehr:slots:{clinic_id}:{safe_provider}"
 
-        assert key == "agentql:selector:550e8400-e29b-41d4-a716-446655440000:appointment_slot_grid"
-        assert key.startswith("agentql:selector:")
+        assert key == "ehr:slots:550e8400-e29b-41d4-a716-446655440000:dr._smith"
+        assert key.startswith("ehr:slots:")
         assert clinic_id in key
-        assert element_name in key
+        assert safe_provider in key
 
-    def test_login_form_cache_key_format(self):
-        clinic_id = "550e8400-e29b-41d4-a716-446655440000"
-        element_name = "login_form"
-        key = f"agentql:selector:{clinic_id}:{element_name}"
-
-        assert "agentql:selector:" in key
-        assert "login_form" in key
-
-    def test_booking_form_cache_key_format(self):
-        clinic_id = "550e8400-e29b-41d4-a716-446655440000"
-        element_name = "appointment_booking_form"
-        key = f"agentql:selector:{clinic_id}:{element_name}"
-
-        assert "appointment_booking_form" in key
-
-    def test_cache_key_is_tenant_scoped(self):
-        """Two clinics with the same element name must have different cache keys."""
+    def test_slot_cache_key_is_tenant_scoped(self):
+        """Two clinics with the same provider name must have different cache keys."""
         clinic_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         clinic_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        element = "appointment_slot_grid"
+        provider = "dr._jones"
 
-        key_a = f"agentql:selector:{clinic_a}:{element}"
-        key_b = f"agentql:selector:{clinic_b}:{element}"
+        key_a = f"ehr:slots:{clinic_a}:{provider}"
+        key_b = f"ehr:slots:{clinic_b}:{provider}"
 
-        assert key_a != key_b, "Cache keys must be scoped per clinic — different clinics, different keys"
+        assert key_a != key_b, "Slot cache keys must be scoped per clinic"
 
-    def test_cache_ttl_is_24_hours_in_seconds(self):
-        """AgentQL selector cache TTL must be 86400 seconds (24 hours per HEDIS PRD §10.7)."""
-        SELECTOR_CACHE_TTL_SECONDS = 86_400
-        assert SELECTOR_CACHE_TTL_SECONDS == 24 * 60 * 60
+    def test_slot_cache_ttl_is_90_seconds(self):
+        """EHR slot cache TTL must be 90s (pre-fetch runs every 60s, 30s buffer)."""
+        from Clinic_app.services.playbook_cache import SLOT_CACHE_TTL_SECONDS
+        assert SLOT_CACHE_TTL_SECONDS == 90

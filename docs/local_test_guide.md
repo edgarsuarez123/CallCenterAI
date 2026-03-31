@@ -44,12 +44,18 @@ RETELL_API_KEY=            ← from Retell dashboard
 RETELL_WEBHOOK_SECRET=     ← from Retell dashboard
 RETELL_FROM_NUMBER=        ← your Retell outbound number e.g. +15551234567
 
-ANTHROPIC_API_KEY=         ← from Anthropic console
+ANTHROPIC_API_KEY=         ← from Anthropic console (optional — see SUMMARIZER_MODE below)
 
 ADMIN_API_KEY=test-admin-key-123
 JWT_SECRET_KEY=test-jwt-secret-123
 
 REDIS_URL=redis://redis:6379
+
+# Summarizer mode — controls how call summaries are generated after each call
+# claude  (default): Claude API extracts structured notes + patient_agreed decision
+# retell         : Retell's built-in call_summary is used directly (no Claude key needed)
+# Switch between them to compare summary quality on the same set of calls.
+SUMMARIZER_MODE=claude
 ```
 
 ---
@@ -99,23 +105,57 @@ You should see the full API documentation. Keep this tab open — you'll use it 
 
 ---
 
-## Step 5 — Start your ngrok tunnel
+## Step 5 — Start a tunnel to expose your local server
 
-Open a **new terminal window** and run:
+Retell's webhooks and tool calls must reach your machine over HTTPS. You need a tunnel. Three options:
+
+| | ngrok | Cloudflare Tunnel | Tailscale Funnel |
+|---|---|---|---|
+| **Setup** | One command | One-time install + login | Requires Tailscale on machine |
+| **URL stability** | Random on each restart (free tier) | Stable, always same URL | Stable |
+| **Free tier** | Yes | Yes | Yes |
+| **Retell tested** | Yes (confirmed working) | Should work (standard HTTPS) | Should work |
+| **Best for** | Quickest to start | If you hate updating Retell every restart | If you already use Tailscale |
+
+### Option A — ngrok (simplest, confirmed working)
+
+Install: `winget install ngrok.ngrok` or download from ngrok.com.
 
 ```bash
 ngrok http 8000
 ```
 
-ngrok will show something like:
-
+ngrok prints:
 ```
 Forwarding   https://abc123.ngrok-free.app -> http://localhost:8000
 ```
 
-**Copy that `https://` URL.** This is your `APP_BASE_URL`. You'll use it in Retell and in Swagger.
+**Copy that `https://` URL.** Update Retell webhooks/tool URLs every time you restart ngrok.
 
-> Keep this terminal open. If you close it the tunnel dies and Retell can't reach your server.
+> Keep this terminal open. Closing it kills the tunnel.
+
+### Option B — Cloudflare Tunnel (stable URL, no restarts)
+
+Install: `winget install Cloudflare.cloudflared`
+
+One-time login (runs a browser): `cloudflared tunnel login`
+
+Then run:
+```bash
+cloudflared tunnel --url http://localhost:8000
+```
+
+Cloudflare prints a stable `*.trycloudflare.com` URL. You only need to update Retell once.
+
+### Option C — Tailscale Funnel (if you already use Tailscale)
+
+Enable funnel: `tailscale funnel 8000`
+
+Your machine gets a stable `https://machine-name.tailnet-name.ts.net` URL. No separate tool needed if Tailscale is already installed.
+
+---
+
+After starting your chosen tunnel, **copy the `https://` URL**. This is your `APP_BASE_URL`. You'll paste it into the Retell dashboard in Step 6.
 
 ---
 
@@ -168,13 +208,17 @@ In the **Functions** section, add these two (replace `https://abc123.ngrok-free.
 
 ### 6d — Register webhooks
 
-Find the webhook settings for your agent (usually in the agent's General or Settings tab). Add:
+Retell sends **all** lifecycle webhooks (`call_started`, `call_ended`, `call_analyzed`, and any others you subscribe to) to **one** URL. The JSON body includes `"event": "call_started"` (or `call_ended`, `call_analyzed`, …); this app reads that field and runs the correct handler.
+
+In the Retell dashboard (account **Webhooks** tab and/or your agent’s webhook URL field), set **one** URL (replace the host with your tunnel URL):
 
 ```
-call_started  →  https://abc123.ngrok-free.app/retell/webhook/call_started
-call_ended    →  https://abc123.ngrok-free.app/retell/webhook/call_ended
-call_analyzed →  https://abc123.ngrok-free.app/retell/webhook/call_analyzed
+https://abc123.ngrok-free.app/retell/webhook
 ```
+
+Do **not** point Retell at `/retell/webhook/call_started` only — Retell would still POST `call_ended` and `call_analyzed` to that same URL, and the wrong handler would run.
+
+**Optional (manual testing):** The app also exposes `POST /retell/webhook/call_started`, `/call_ended`, and `/call_analyzed` for curl or local debugging; production should use `/retell/webhook` only.
 
 ---
 
@@ -283,7 +327,7 @@ The admin uploads a Google Sheet exported as Excel (.xlsx). You will run **two t
 4. Go to **File → Download → Microsoft Excel (.xlsx)**
 5. Save it somewhere easy to find (e.g. Desktop)
 
-> The column names are flexible — Claude reads the headers and maps them to the right fields automatically.
+> The column names above (`Member Name`, `Phone`, `Gap Type`, etc.) are directly recognized by the system — no Claude API call is needed to parse them. If you use unusual column names, Claude will be called automatically as a fallback.
 
 ### What each row tests
 
@@ -434,6 +478,44 @@ summarize_transcript_sync: success ...
 
 ---
 
+## Viewing call summaries
+
+After a call completes, the `call_analyzed` webhook stores an encrypted summary in the database. To read it:
+
+1. In Swagger, find **GET /campaigns/{campaign_id}/audits** → click **Try it out**
+2. Enter your `CAMPAIGN_ID`
+3. Click **Execute**
+
+The response includes one record per completed call attempt:
+
+```json
+[
+  {
+    "audit_id": "...",
+    "contact_id": "...",
+    "retell_call_id": "...",
+    "outcome": "ORDER_AGREED",
+    "attempt_number": 1,
+    "called_at": "2026-03-26T14:30:00Z",
+    "call_summary": "Patient agreed to receive a colorectal stool kit by mail.",
+    "patient_name": "Jane Test"
+  }
+]
+```
+
+**Comparing Claude vs Retell summaries:**
+
+To compare summary quality, run the same call twice (or different contacts) with different `SUMMARIZER_MODE` values:
+
+1. Set `SUMMARIZER_MODE=claude` in `.env`, restart the app (`docker compose restart app`), run a test call → check `/audits`
+2. Set `SUMMARIZER_MODE=retell`, restart, run another test call → check `/audits` again
+
+The `call_summary` field shows which summarizer was active. Claude produces structured, PHI-free one-sentence summaries. Retell produces its own summary text from the call (quality varies by call length and content).
+
+> Note: For order-based gaps (colorectal, kidney, etc.), `SUMMARIZER_MODE=retell` means `patient_agreed` cannot be extracted — contact status stays as set by the `call_ended` webhook (optimistically `ORDER_AGREED`). Use `SUMMARIZER_MODE=claude` in production for accurate `ORDER_DECLINED` detection.
+
+---
+
 ## Troubleshooting
 
 | Problem | Check |
@@ -447,7 +529,7 @@ summarize_transcript_sync: success ...
 | Agent doesn't call `get_available_slots` | Patient said yes but agent didn't call tool — check that functions are saved in Retell with the correct ngrok URL |
 | `EHR not configured` on booking tool | Step 8b not done — add NextGen credentials first |
 | `Booking form not found` in logs | NextGen URL or credentials wrong, or NextGen blocked headless browser |
-| Contact stuck in `CALLING` status | `call_ended` webhook didn't fire — check ngrok is running and webhook URL is correct in Retell |
+| Contact stuck in `CALLING` status | `call_ended` webhook didn't fire — check ngrok is running and Retell webhook URL is exactly `…/retell/webhook` (single URL for all events) |
 | 401 on campaign routes | JWT expired — re-run the Python one-liner from Step 10 |
 
 ---
@@ -474,4 +556,4 @@ Record the result in `PROGRESS.txt` per `PLAN.md §Plan 014 Sprint C`.
 
 ---
 
-*Last updated: 2026-03-25*
+*Last updated: 2026-03-30 — Plan 020: single Retell webhook URL (`POST /retell/webhook`).*

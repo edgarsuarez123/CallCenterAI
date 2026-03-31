@@ -17,7 +17,7 @@ import hashlib
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from datetime import datetime, date, timedelta, timezone
 from uuid import uuid4, UUID
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from Clinic_app.Routes.retell import (
@@ -489,17 +489,21 @@ class TestCallEndedWebhook:
     """Tests for /retell/webhook/call_ended."""
     
     def test_call_ended_webhook_model(self):
-        """Test CallEndedWebhook model validation."""
+        """Test CallEndedWebhook model validation (matches Retell payload + extra ignored)."""
         webhook = CallEndedWebhook(
             call_id="call_123",
+            start_timestamp=1_700_000_000_000,
+            end_timestamp=1_700_000_180_000,
+            disconnection_reason="user_hangup",
+            timestamp="2025-01-20T10:03:00Z",
             duration_seconds=180,
             outcome="answered",
-            timestamp="2025-01-20T10:03:00Z"
         )
-        
+
         assert webhook.call_id == "call_123"
-        assert webhook.duration_seconds == 180
-        assert webhook.outcome == "answered"
+        assert webhook.start_timestamp == 1_700_000_000_000
+        assert webhook.end_timestamp == 1_700_000_180_000
+        assert webhook.disconnection_reason == "user_hangup"
     
     @pytest.mark.asyncio
     async def test_releases_unconfirmed_hold_conceptual(
@@ -590,4 +594,150 @@ class TestPydanticModels:
         
         assert response.success is True
         assert len(response.slots) == 1
+
+
+# ============================================================================
+# TEST UNIFIED WEBHOOK (POST /retell/webhook)
+# ============================================================================
+
+
+class TestUnifiedWebhook:
+    """Retell sends all lifecycle events to one URL with body['event']."""
+
+    @pytest.mark.unit
+    def test_unified_webhook_dispatches_call_started(self):
+        from Clinic_app.Routes import retell as retell_mod
+        from Clinic_app.common.database import get_db
+
+        captured: list = []
+
+        async def fake_start(db, call_obj):
+            captured.append(call_obj)
+            return {"status": "ok", "call_log_id": "unified-test"}
+
+        async def fake_db():
+            yield AsyncMock()
+
+        app = FastAPI()
+        app.include_router(retell_mod.retell_router)
+        app.dependency_overrides[get_db] = fake_db
+
+        with patch.object(retell_mod, "_handle_call_started", side_effect=fake_start):
+            client = TestClient(app)
+            r = client.post(
+                "/retell/webhook",
+                json={
+                    "event": "call_started",
+                    "call": {
+                        "call_id": "unified_c1",
+                        "agent_id": "agent_x",
+                        "direction": "outbound",
+                    },
+                },
+            )
+        app.dependency_overrides.clear()
+
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+        assert r.json().get("call_log_id") == "unified-test"
+        assert len(captured) == 1
+        assert captured[0]["call_id"] == "unified_c1"
+
+    @pytest.mark.unit
+    def test_unified_webhook_dispatches_call_ended(self):
+        from Clinic_app.Routes import retell as retell_mod
+        from Clinic_app.common.database import get_db
+
+        captured: list = []
+
+        async def fake_end(db, call_obj):
+            captured.append(call_obj)
+            return {"status": "ok"}
+
+        async def fake_db():
+            yield AsyncMock()
+
+        app = FastAPI()
+        app.include_router(retell_mod.retell_router)
+        app.dependency_overrides[get_db] = fake_db
+
+        with patch.object(retell_mod, "_handle_call_ended", side_effect=fake_end):
+            client = TestClient(app)
+            r = client.post(
+                "/retell/webhook",
+                json={
+                    "event": "call_ended",
+                    "call": {
+                        "call_id": "unified_end",
+                        "agent_id": "agent_x",
+                        "disconnection_reason": "user_hangup",
+                    },
+                },
+            )
+        app.dependency_overrides.clear()
+
+        assert r.status_code == 200
+        assert captured[0]["call_id"] == "unified_end"
+
+    @pytest.mark.unit
+    def test_unified_webhook_dispatches_call_analyzed(self):
+        from Clinic_app.Routes import retell as retell_mod
+        from Clinic_app.common.database import get_db
+
+        captured: list = []
+
+        async def fake_analyzed(db, call_obj):
+            captured.append(call_obj)
+            return {"status": "ok", "audit_id": "audit-1"}
+
+        async def fake_db():
+            yield AsyncMock()
+
+        app = FastAPI()
+        app.include_router(retell_mod.retell_router)
+        app.dependency_overrides[get_db] = fake_db
+
+        with patch.object(retell_mod, "_handle_call_analyzed", side_effect=fake_analyzed):
+            client = TestClient(app)
+            r = client.post(
+                "/retell/webhook",
+                json={
+                    "event": "call_analyzed",
+                    "call": {
+                        "call_id": "unified_an",
+                        "agent_id": "agent_x",
+                        "metadata": {"call_type": "hedis_campaign"},
+                    },
+                },
+            )
+        app.dependency_overrides.clear()
+
+        assert r.status_code == 200
+        assert r.json().get("audit_id") == "audit-1"
+        assert captured[0]["call_id"] == "unified_an"
+
+    @pytest.mark.unit
+    def test_unified_webhook_unknown_event_returns_ok(self):
+        from Clinic_app.Routes import retell as retell_mod
+        from Clinic_app.common.database import get_db
+
+        async def fake_db():
+            yield AsyncMock()
+
+        app = FastAPI()
+        app.include_router(retell_mod.retell_router)
+        app.dependency_overrides[get_db] = fake_db
+
+        client = TestClient(app)
+        r = client.post(
+            "/retell/webhook",
+            json={
+                "event": "transcript_updated",
+                "call": {"call_id": "c_unknown", "agent_id": "a1"},
+            },
+        )
+        app.dependency_overrides.clear()
+
+        assert r.status_code == 200
+        assert r.json() == {"status": "ok"}
 

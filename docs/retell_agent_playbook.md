@@ -84,11 +84,11 @@ sequenceDiagram
     loop While campaign ACTIVE and within hours
         W->>R: POST /v2/create-phone-call
         R->>T: Outbound call + agent
-        T->>API: POST /retell/webhook/call_started
+        T->>API: POST /retell/webhook (event=call_started)
         T->>API: POST /retell/tools/get_available_slots (if appointment gap)
         T->>API: POST /retell/tools/book_appointment (if patient books)
-        T->>API: POST /retell/webhook/call_ended
-        T->>API: POST /retell/webhook/call_analyzed
+        T->>API: POST /retell/webhook (event=call_ended)
+        T->>API: POST /retell/webhook (event=call_analyzed)
     end
 ```
 
@@ -155,9 +155,10 @@ JWT must be **scoped to the clinic** (after `/auth/select-clinic`). Several endp
 |---------|--------|------|
 | NextGen slots | `POST` | `/retell/tools/get_available_slots` |
 | NextGen book | `POST` | `/retell/tools/book_appointment` |
-| Call started | `POST` | `/retell/webhook/call_started` |
-| Call ended | `POST` | `/retell/webhook/call_ended` |
-| Post-call analysis | `POST` | `/retell/webhook/call_analyzed` |
+| **Lifecycle webhooks (production)** | `POST` | **`/retell/webhook`** — Retell sends `call_started`, `call_ended`, `call_analyzed` (and other subscribed events) to this **single** URL; JSON body includes `"event"`. |
+| Call started (dev / curl alias) | `POST` | `/retell/webhook/call_started` — same logic as `event=call_started` on `/retell/webhook`. |
+| Call ended (dev / curl alias) | `POST` | `/retell/webhook/call_ended` |
+| Post-call analysis (dev / curl alias) | `POST` | `/retell/webhook/call_analyzed` |
 
 **Latency:** Target **&lt; ~3 seconds** for slot lookup.
 
@@ -346,9 +347,11 @@ Handlers verify **`x-retell-signature`**, then parse JSON:
 
 ## 10. Webhook behavior (HEDIS)
 
+**Dashboard URL:** Register **`POST {APP_BASE_URL}/retell/webhook`** in Retell (account-level or agent `webhook_url`). Do not register three separate URLs — Retell posts every subscribed event to the same endpoint; the app reads **`body["event"]`** and dispatches.
+
 1. Read raw body bytes.  
 2. Verify HMAC (`x-retell-signature`, `RETELL_WEBHOOK_SECRET`).  
-3. Parse nested `call` / webhook payload.
+3. Parse JSON; for the unified route, read `event` and nested `call` (or top-level call fields).
 
 **Playground:** `call_id` of `playground` or prefixes `test_` / `playground_` may skip verification (see `retell.py`).
 
@@ -555,7 +558,7 @@ Register all of the following as **LLM dynamic variables** in the agent settings
 ## 12. Retell dashboard configuration (checklist)
 
 1. **Agent ID** → stored in `ClinicIntegration.retell_agent_id`.  
-2. **Webhooks** → §5.3 URLs with `APP_BASE_URL`.  
+2. **Webhooks** → **one** URL: `{APP_BASE_URL}/retell/webhook` (§5.3). Per-event paths under `/retell/webhook/call_*` are optional dev aliases only.  
 3. **Custom tools** → same base URL; **POST**; signing secret = `RETELL_WEBHOOK_SECRET`.  
 4. **Prompt** → §11 + dynamic variables from §7.  
 5. **Outbound caller ID** → matches `retell_outbound_number` or `RETELL_FROM_NUMBER`.
@@ -618,4 +621,6 @@ Record in **`PROGRESS.txt`**.
 
 ---
 
-*Last updated: 2026-03-25 — Workflow §4, full API catalog §5, create-phone-call + tool JSON §6–9, detailed agent prompt §11 (payer usage, per-gap scripts, tool calling steps, objection handling, voice rules).*
+*Last updated: 2026-03-30 — Plan 020: single webhook URL `POST /retell/webhook` + `event` dispatch; §4 mermaid, §5.3, §10, §12 updated.*
+
+*Previous: 2026-03-25 — Workflow §4, full API catalog §5, create-phone-call + tool JSON §6–9, detailed agent prompt §11 (payer usage, per-gap scripts, tool calling steps, objection handling, voice rules).*

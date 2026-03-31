@@ -104,6 +104,8 @@ class CampaignWorkerManager:
         self._lock = asyncio.Lock()
 
     async def start_clinic_worker(self, clinic_id: UUID) -> None:
+        from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
+
         async with self._lock:
             t = self._tasks.get(clinic_id)
             if t is not None and not t.done():
@@ -112,8 +114,11 @@ class CampaignWorkerManager:
                 _clinic_worker_loop(clinic_id),
                 name=f"campaign_worker:{clinic_id}",
             )
+        await slot_prefetch_manager.start(clinic_id)
 
     async def stop_clinic_worker(self, clinic_id: UUID) -> None:
+        from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
+
         async with self._lock:
             t = self._tasks.pop(clinic_id, None)
         if t is not None and not t.done():
@@ -122,6 +127,7 @@ class CampaignWorkerManager:
                 await t
             except asyncio.CancelledError:
                 pass
+        await slot_prefetch_manager.stop(clinic_id)
 
     async def shutdown_all(self) -> None:
         async with self._lock:
@@ -141,7 +147,9 @@ campaign_worker_manager = CampaignWorkerManager()
 
 
 async def resume_active_campaign_workers() -> None:
-    """On app startup: restart workers for clinics with ACTIVE campaigns."""
+    """On app startup: restart workers and slot pre-fetch for clinics with ACTIVE campaigns."""
+    from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
+
     if AsyncSessionLocal is None:
         logger.warning("Campaign worker resume skipped: database not configured")
         return
@@ -154,7 +162,8 @@ async def resume_active_campaign_workers() -> None:
         rows = result.all()
     for (clinic_id,) in rows:
         await campaign_worker_manager.start_clinic_worker(clinic_id)
-        logger.info("Resumed campaign worker for clinic_id=%s", clinic_id)
+        await slot_prefetch_manager.start(clinic_id)
+        logger.info("Resumed campaign worker + slot pre-fetch for clinic_id=%s", clinic_id)
 
 
 async def _clinic_worker_loop(clinic_id: UUID) -> None:

