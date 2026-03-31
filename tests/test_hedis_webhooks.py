@@ -484,3 +484,185 @@ def test_call_analyzed_human_request_does_not_override_booked() -> None:
 
     assert r.status_code == 200
     assert contact.status == ContactStatus.BOOKED.value
+
+
+# ── _get_summarizer_mode ───────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_get_summarizer_mode_defaults_to_claude(monkeypatch) -> None:
+    monkeypatch.delenv("SUMMARIZER_MODE", raising=False)
+    from Clinic_app.Routes.retell import _get_summarizer_mode
+    assert _get_summarizer_mode() == "claude"
+
+
+@pytest.mark.unit
+def test_get_summarizer_mode_retell(monkeypatch) -> None:
+    monkeypatch.setenv("SUMMARIZER_MODE", "retell")
+    from Clinic_app.Routes.retell import _get_summarizer_mode
+    assert _get_summarizer_mode() == "retell"
+
+
+@pytest.mark.unit
+def test_get_summarizer_mode_invalid_falls_back_to_claude(monkeypatch) -> None:
+    monkeypatch.setenv("SUMMARIZER_MODE", "gpt")
+    from Clinic_app.Routes.retell import _get_summarizer_mode
+    assert _get_summarizer_mode() == "claude"
+
+
+# ── _extract_retell_summary ────────────────────────────────────────────────────
+
+@pytest.mark.unit
+def test_extract_retell_summary_from_call_summary() -> None:
+    from Clinic_app.Routes.retell import _extract_retell_summary
+    call_obj = {"call_analysis": {"call_summary": "Patient agreed to colorectal kit."}}
+    assert _extract_retell_summary(call_obj) == "Patient agreed to colorectal kit."
+
+
+@pytest.mark.unit
+def test_extract_retell_summary_falls_back_to_summary_key() -> None:
+    from Clinic_app.Routes.retell import _extract_retell_summary
+    call_obj = {"call_analysis": {"summary": "Appointment scheduled."}}
+    assert _extract_retell_summary(call_obj) == "Appointment scheduled."
+
+
+@pytest.mark.unit
+def test_extract_retell_summary_falls_back_to_transcript() -> None:
+    from Clinic_app.Routes.retell import _extract_retell_summary
+    call_obj = {"transcript": "Hello, this is a transcript."}
+    assert _extract_retell_summary(call_obj) == "Hello, this is a transcript."
+
+
+@pytest.mark.unit
+def test_extract_retell_summary_no_content_returns_fallback() -> None:
+    from Clinic_app.Routes.retell import _extract_retell_summary
+    assert _extract_retell_summary({}) == "Call completed; no summary available."
+
+
+# ── webhook_call_analyzed with SUMMARIZER_MODE=retell ─────────────────────────
+
+@pytest.mark.unit
+def test_call_analyzed_retell_mode_skips_claude(monkeypatch) -> None:
+    """SUMMARIZER_MODE=retell: Retell call_summary stored, Claude never called."""
+    monkeypatch.setenv("SUMMARIZER_MODE", "retell")
+
+    from Clinic_app.Routes import retell as retell_mod
+    from Clinic_app.common.database import get_db
+    from Clinic_app.data.enums import ContactStatus, GapType
+
+    clinic_id = uuid.uuid4()
+    contact_id = uuid.uuid4()
+    camp_id = uuid.uuid4()
+
+    contact = MagicMock()
+    contact.id = contact_id
+    contact.clinic_id = clinic_id
+    contact.campaign_id = camp_id
+    contact.gap_type = GapType.PREVENTIVE_VISIT.value
+    contact.status = ContactStatus.BOOKED.value
+    contact.attempt_count = 1
+    contact.ehr_appointment_id = "appt-1"
+
+    mock_db = AsyncMock()
+    mock_db.get = AsyncMock(return_value=contact)
+    mock_db.add = MagicMock()
+    mock_db.flush = AsyncMock()
+    mock_db.commit = AsyncMock()
+    mock_db.rollback = AsyncMock()
+
+    async def fake_db():
+        yield mock_db
+
+    app = FastAPI()
+    app.include_router(retell_mod.retell_router)
+    app.dependency_overrides[get_db] = fake_db
+
+    with patch.object(
+        retell_mod, "_get_clinic_by_agent_id", new_callable=AsyncMock, return_value=clinic_id
+    ) as _, patch.object(
+        retell_mod, "summarize_transcript_sync"
+    ) as claude_mock:
+        client = TestClient(app)
+        r = client.post(
+            "/retell/webhook/call_analyzed",
+            json={
+                "call": {
+                    "call_id": "test_retell_mode",
+                    "agent_id": "agent_x",
+                    "end_timestamp": 1_700_000_000_000,
+                    "metadata": {
+                        "call_type": "hedis_campaign",
+                        "campaign_contact_id": str(contact_id),
+                    },
+                    "call_analysis": {"call_summary": "Patient booked a preventive visit."},
+                }
+            },
+        )
+
+    assert r.status_code == 200
+    claude_mock.assert_not_called()
+    # Audit row was added (db.add called once)
+    mock_db.add.assert_called_once()
+
+
+@pytest.mark.unit
+def test_call_analyzed_retell_mode_order_based_keeps_status(monkeypatch) -> None:
+    """SUMMARIZER_MODE=retell + order-based gap: status stays as set by call_ended."""
+    monkeypatch.setenv("SUMMARIZER_MODE", "retell")
+
+    from Clinic_app.Routes import retell as retell_mod
+    from Clinic_app.common.database import get_db
+    from Clinic_app.data.enums import ContactStatus, GapType
+
+    clinic_id = uuid.uuid4()
+    contact_id = uuid.uuid4()
+    camp_id = uuid.uuid4()
+
+    contact = MagicMock()
+    contact.id = contact_id
+    contact.clinic_id = clinic_id
+    contact.campaign_id = camp_id
+    contact.gap_type = GapType.COLORECTAL.value
+    contact.status = ContactStatus.ORDER_AGREED.value
+    contact.attempt_count = 1
+    contact.ehr_appointment_id = None
+
+    mock_db = AsyncMock()
+    mock_db.get = AsyncMock(return_value=contact)
+    mock_db.add = MagicMock()
+    mock_db.flush = AsyncMock()
+    mock_db.commit = AsyncMock()
+    mock_db.rollback = AsyncMock()
+
+    async def fake_db():
+        yield mock_db
+
+    app = FastAPI()
+    app.include_router(retell_mod.retell_router)
+    app.dependency_overrides[get_db] = fake_db
+
+    with patch.object(
+        retell_mod, "_get_clinic_by_agent_id", new_callable=AsyncMock, return_value=clinic_id
+    ), patch.object(
+        retell_mod, "extract_order_based_notes_sync"
+    ) as extract_mock:
+        client = TestClient(app)
+        r = client.post(
+            "/retell/webhook/call_analyzed",
+            json={
+                "call": {
+                    "call_id": "test_retell_order",
+                    "agent_id": "agent_x",
+                    "end_timestamp": 1_700_000_000_000,
+                    "metadata": {
+                        "call_type": "hedis_campaign",
+                        "campaign_contact_id": str(contact_id),
+                    },
+                    "call_analysis": {"call_summary": "Patient agreed to kit."},
+                }
+            },
+        )
+
+    assert r.status_code == 200
+    extract_mock.assert_not_called()
+    # Status unchanged — ORDER_AGREED set by call_ended stays
+    assert contact.status == ContactStatus.ORDER_AGREED.value

@@ -28,7 +28,7 @@ from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.enums import BookingStatus, GapType
 from Clinic_app.common.encryption import encrypt_phi
 from Clinic_app.services.booking import list_bookings, cancel_booking, get_booking_by_id
-from Clinic_app.services.selector_cache import invalidate_clinic_selectors
+from Clinic_app.services.playbook_cache import invalidate_clinic_ehr_cache
 from Clinic_app.services.playwright_ehr import playwright_ehr_service
 from Clinic_app.services.auth_service import create_staff
 
@@ -1362,7 +1362,7 @@ async def upsert_ehr_config(
         )
         db.add(row)
 
-    await invalidate_clinic_selectors(clinic_id)
+    await invalidate_clinic_ehr_cache(clinic_id)
     await db.commit()
     await db.refresh(row)
 
@@ -1450,5 +1450,94 @@ async def put_appt_type_mapping(
         success=True,
         data={"clinic_id": str(clinic_id), "appt_type_mapping": row.appt_type_mapping},
         message="Appointment type mapping updated",
+    )
+
+
+# ── EHR MFA / two-factor authentication handoff ───────────────────────────────
+
+
+@admin_router.get("/clinics/{clinic_id}/ehr-status", response_model=APIResponse)
+async def get_ehr_status(
+    clinic_id: UUID,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """
+    Return current EHR login status for a clinic.
+    Dashboard polls this to detect when MFA is required.
+
+    Response: {"logged_in": bool, "mfa_required": bool}
+    """
+    from Clinic_app.common.redis import get_redis
+    from Clinic_app.services.playwright_ehr import playwright_ehr_service, MFA_REDIS_PREFIX
+
+    r = await get_redis()
+    mfa_key = f"{MFA_REDIS_PREFIX}:{clinic_id}"
+    mfa_val = await r.get(mfa_key)
+    mfa_val_str = mfa_val.decode() if isinstance(mfa_val, bytes) else (mfa_val or "")
+    mfa_required = mfa_val_str == "pending"
+
+    # Check if an active session exists (non-None entry in service's internal dict)
+    # Browser-Use doesn't keep persistent sessions — use MFA key as proxy for active state
+    return APIResponse(
+        success=True,
+        data={
+            "clinic_id": str(clinic_id),
+            "mfa_required": mfa_required,
+        },
+        message="EHR status retrieved",
+    )
+
+
+class EhrMfaCodeRequest(BaseModel):
+    code: str
+
+    @field_validator("code")
+    @classmethod
+    def code_must_be_nonempty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("MFA code cannot be empty")
+        return v
+
+
+@admin_router.post("/clinics/{clinic_id}/ehr-mfa-code", response_model=APIResponse)
+async def submit_ehr_mfa_code(
+    clinic_id: UUID,
+    request: EhrMfaCodeRequest,
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse:
+    """
+    Submit the MFA / verification code for an EHR login that is waiting for 2FA.
+    The Browser-Use automation polls Redis every 5s for this code.
+
+    Steps:
+      1. Dashboard shows MFA banner (GET /ehr-status → mfa_required: true)
+      2. Clinic admin enters code from their email/phone
+      3. Admin submits POST /ehr-mfa-code with the code
+      4. This endpoint writes the code to Redis
+      5. Browser-Use automation picks it up and continues login
+    """
+    from Clinic_app.common.redis import get_redis
+    from Clinic_app.services.playwright_ehr import MFA_REDIS_PREFIX, MFA_TIMEOUT_SECONDS
+
+    r = await get_redis()
+    mfa_key = f"{MFA_REDIS_PREFIX}:{clinic_id}"
+
+    # Check that MFA is actually pending before accepting a code
+    mfa_val = await r.get(mfa_key)
+    mfa_val_str = mfa_val.decode() if isinstance(mfa_val, bytes) else (mfa_val or "")
+    if not mfa_val_str:
+        return APIResponse(
+            success=False,
+            data={"clinic_id": str(clinic_id)},
+            message="No MFA challenge is pending for this clinic",
+        )
+
+    # Write the code — the playwright_ehr.py polling loop will pick it up
+    await r.set(mfa_key, request.code, ex=MFA_TIMEOUT_SECONDS)
+    return APIResponse(
+        success=True,
+        data={"clinic_id": str(clinic_id), "accepted": True},
+        message="MFA code accepted — EHR automation will resume within 5 seconds",
     )
 

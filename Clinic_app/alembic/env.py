@@ -4,7 +4,6 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-from dotenv import load_dotenv
 
 from alembic import context
 
@@ -13,8 +12,10 @@ from alembic import context
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-# Load environment variables
-load_dotenv()
+from Clinic_app.common.env import load_project_dotenv
+
+# Load environment variables from repo-root .env (same as the API)
+load_project_dotenv()
 
 # Set dummy database env vars if not set (needed for database.py import to not fail)
 # These are only used during import - actual migration URL is set below
@@ -66,10 +67,15 @@ db_port = os.getenv("DB_PORT", "5432")
 db_name = os.getenv("DB_NAME")
 db_user = os.getenv("DB_USER")
 db_password = os.getenv("DB_PASSWORD")
+db_ssl = os.getenv("DB_SSL", "require").strip().lower()
 
 if db_host and db_name and db_user and db_password:
     # Use sync connection (postgresql+psycopg2) for migrations
-    sync_database_url = f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}?sslmode=require"
+    sslmode = "require" if db_ssl in ("require", "true", "1", "yes", "on") else "disable"
+    sync_database_url = (
+        f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+        f"?sslmode={sslmode}"
+    )
     config.set_main_option("sqlalchemy.url", sync_database_url)
 
 # other values from the config, defined by the needs of env.py,

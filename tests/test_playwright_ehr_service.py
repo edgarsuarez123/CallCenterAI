@@ -34,13 +34,8 @@ class TestPlaywrightEHRParseHelpers:
 
     def test_normalize_slots_builds_iso_rows(self):
         svc = PlaywrightEHRService()
-
-        class Slot:
-            date = "2026-05-01"
-            time = "09:00 AM"
-            provider_name = "Dr. X"
-
-        rows = svc._normalize_slots([Slot()], "Dr. Default", "2026-05-01", NYC)
+        slot = {"date": "2026-05-01", "time": "09:00 AM", "provider_name": "Dr. X"}
+        rows = svc._normalize_slots([slot], "Dr. Default", NYC)
         assert len(rows) >= 1
         assert "start_time" in rows[0]
         assert "end_time" in rows[0]

@@ -51,6 +51,108 @@ NORMALIZED_FIELD_NAMES = {
 # The set of valid gap type values Claude must map gap_type values to.
 VALID_GAP_TYPES = {gt.value for gt in GapType}
 
+# ── Direct header mapping alias tables ─────────────────────────────────────────
+
+# Maps normalized header strings to canonical field names.
+# Keys must be strip().lower() of the raw header.
+_HEADER_ALIASES: dict[str, str] = {
+    # phone
+    "phone": "phone",
+    "phone number": "phone",
+    "phone_number": "phone",
+    "member phone": "phone",
+    "patient phone": "phone",
+    "cell": "phone",
+    "mobile": "phone",
+    "telephone": "phone",
+    "cell phone": "phone",
+    "contact number": "phone",
+    # gap_type
+    "gap type": "gap_type",
+    "gap_type": "gap_type",
+    "gap": "gap_type",
+    "measure": "gap_type",
+    "hedis measure": "gap_type",
+    "hedis_measure": "gap_type",
+    "care gap": "gap_type",
+    "care_gap": "gap_type",
+    # patient_name
+    "patient name": "patient_name",
+    "patient_name": "patient_name",
+    "member name": "patient_name",
+    "member_name": "patient_name",
+    "name": "patient_name",
+    "full name": "patient_name",
+    "full_name": "patient_name",
+    # language
+    "language": "language",
+    "lang": "language",
+    "preferred language": "language",
+    "preferred_language": "language",
+    # provider_name
+    "provider": "provider_name",
+    "provider name": "provider_name",
+    "provider_name": "provider_name",
+    "pcp": "provider_name",
+    "physician": "provider_name",
+    "doctor": "provider_name",
+    "pcp name": "provider_name",
+    "pcp_name": "provider_name",
+    # payer
+    "payer": "payer",
+    "insurance": "payer",
+    "plan": "payer",
+    "health plan": "payer",
+    "health_plan": "payer",
+    "insurer": "payer",
+    # release_date
+    "release date": "release_date",
+    "release_date": "release_date",
+    "discharge date": "release_date",
+    "discharge_date": "release_date",
+}
+
+# Maps common gap type cell values to GapType enum values.
+# Keys must be strip().lower() of the raw cell value.
+_GAP_TYPE_ALIASES: dict[str, str] = {
+    "preventive visit": "preventive_visit",
+    "annual wellness": "preventive_visit",
+    "annual wellness visit": "preventive_visit",
+    "awv": "preventive_visit",
+    "yearly checkup": "preventive_visit",
+    "hospital follow-up": "hospital_flu",
+    "hospital flu": "hospital_flu",
+    "hosp flu": "hospital_flu",
+    "post-hospital": "hospital_flu",
+    "post hospital": "hospital_flu",
+    "discharge follow-up": "hospital_flu",
+    "crc": "colorectal",
+    "colonoscopy": "colorectal",
+    "stool test": "colorectal",
+    "fit": "colorectal",
+    "colorectal cancer screening": "colorectal",
+    "eye": "eye_exam",
+    "eye exam": "eye_exam",
+    "vision": "eye_exam",
+    "ophthalmology": "eye_exam",
+    "retinal exam": "eye_exam",
+    "mammogram": "breast_cancer",
+    "breast cancer": "breast_cancer",
+    "breast cancer screening": "breast_cancer",
+    "bse": "breast_cancer",
+    "kidney function": "kidney",
+    "ckd": "kidney",
+    "renal": "kidney",
+    "afr/cmp": "afr_cmp",
+    "albumin creatinine": "afr_cmp",
+    "alb/cr ratio": "afr_cmp",
+    "urine albumin": "afr_cmp",
+    "bw/ua": "afr_cmp",
+    "medication review": "medication_review",
+    "med review": "medication_review",
+    "medication management": "medication_review",
+}
+
 _SYSTEM_PROMPT = """\
 You are a HEDIS data normalization assistant. You will receive the first 3 rows
 of a patient outreach CSV (header row + up to 2 data rows) and return a JSON
@@ -149,6 +251,52 @@ def normalize_phone(raw: str) -> str:
     if len(digits) == 11 and digits.startswith("1"):
         return "+" + digits
     raise ValueError("Cannot normalize phone number to E.164 format")
+
+
+# ── Direct header mapping ──────────────────────────────────────────────────────
+
+def _try_direct_header_mapping(
+    header_row: list[str],
+    sample_rows: list[list[str]],
+) -> Optional[dict]:
+    """
+    Attempt column mapping using hard-coded alias tables without calling Claude.
+
+    Returns a dict in the same shape as Claude's response if both 'phone' and
+    'gap_type' columns are identified, or None if the headers are unrecognized.
+    """
+    col_mapping: dict[str, str] = {}
+    for header in header_row:
+        alias_key = header.strip().lower()
+        if alias_key in _HEADER_ALIASES:
+            col_mapping[header] = _HEADER_ALIASES[alias_key]
+
+    # Both phone and gap_type are required — if either is missing, fall through to Claude
+    mapped_fields = set(col_mapping.values())
+    if "phone" not in mapped_fields or "gap_type" not in mapped_fields:
+        return None
+
+    # Build gap_type_values from sample rows for values that need aliasing
+    gap_type_col_header = next(h for h, f in col_mapping.items() if f == "gap_type")
+    gap_type_col_idx = header_row.index(gap_type_col_header)
+    gap_type_values: dict[str, str] = {}
+    for row in sample_rows:
+        if gap_type_col_idx >= len(row):
+            continue
+        raw_val = str(row[gap_type_col_idx]).strip()
+        if not raw_val:
+            continue
+        # If already a valid GapType value, map_gap_type handles it — no alias needed
+        try:
+            GapType(raw_val)
+            continue
+        except ValueError:
+            pass
+        alias_key = raw_val.lower()
+        if alias_key in _GAP_TYPE_ALIASES:
+            gap_type_values[raw_val] = _GAP_TYPE_ALIASES[alias_key]
+
+    return {"column_mapping": col_mapping, "gap_type_values": gap_type_values}
 
 
 # ── Claude API call ────────────────────────────────────────────────────────────
@@ -340,10 +488,21 @@ def parse_file(
 
     sample_rows = [[row.get(h, "") for h in header_row] for row in all_rows[:2]]
 
-    # Claude API call — once per upload
-    logger.info(f"Calling Claude to normalize file columns. header_count={len(header_row)}")
-    claude_response = _call_claude_for_column_mapping(header_row, sample_rows)
-    mapping = _build_column_mapping(claude_response, header_row)
+    # Try direct alias mapping first — skips Claude API for standard-format files
+    direct = _try_direct_header_mapping(header_row, sample_rows)
+    if direct is not None:
+        logger.info(
+            "Direct header mapping succeeded — skipping Claude API. header_count=%d",
+            len(header_row),
+        )
+        mapping = _build_column_mapping(direct, header_row)
+    else:
+        logger.info(
+            "Direct header mapping failed — calling Claude API. header_count=%d",
+            len(header_row),
+        )
+        claude_response = _call_claude_for_column_mapping(header_row, sample_rows)
+        mapping = _build_column_mapping(claude_response, header_row)
 
     if not mapping.phone_col:
         raise ValueError("Could not identify a phone number column. Check your file format.")

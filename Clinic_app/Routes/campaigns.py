@@ -23,11 +23,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.database import get_db
+from Clinic_app.common.encryption import decrypt_phi
 from Clinic_app.common.jwt import StaffToken, require_scoped_staff
 from Clinic_app.data.enums import CampaignStatus, ContactStatus
+from Clinic_app.data.models.campaign_audit import CampaignAudit
 from Clinic_app.services.campaign_service import (
     CampaignCreateResult,
     SkippedContact,
@@ -114,6 +117,17 @@ class ContactResponse(BaseModel):
     next_attempt_after: Optional[datetime]
     ehr_appointment_id: Optional[str]
     created_at: datetime
+
+
+class AuditResponse(BaseModel):
+    audit_id: UUID
+    contact_id: UUID
+    retell_call_id: str
+    outcome: str
+    attempt_number: int
+    called_at: datetime
+    call_summary: Optional[str] = None
+    patient_name: Optional[str] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -319,6 +333,66 @@ async def get_contacts_route(
         )
         for c in contacts
     ]
+
+
+# ── Audit records (call summaries) ─────────────────────────────────────────────
+
+@campaign_router.get("/{campaign_id}/audits", response_model=list[AuditResponse])
+async def get_campaign_audits(
+    campaign_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    staff: StaffToken = Depends(require_scoped_staff),
+    db: AsyncSession = Depends(get_db),
+) -> list[AuditResponse]:
+    """
+    Return call audit records for a campaign, including decrypted call summaries
+    and patient names. Useful for reviewing call outcomes and comparing summarizer
+    modes. Requires scoped staff JWT. Results are ordered newest-first.
+    """
+    # Verify campaign belongs to this clinic
+    await get_campaign(db, staff.clinic_id, campaign_id)
+
+    stmt = (
+        select(CampaignAudit)
+        .where(
+            CampaignAudit.clinic_id == staff.clinic_id,
+            CampaignAudit.campaign_id == campaign_id,
+        )
+        .order_by(CampaignAudit.called_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await db.execute(stmt)
+    audits = result.scalars().all()
+
+    out: list[AuditResponse] = []
+    for a in audits:
+        call_summary: Optional[str] = None
+        if a.call_summary_encrypted:
+            try:
+                call_summary = decrypt_phi(a.call_summary_encrypted)
+            except Exception:
+                call_summary = "[decryption error]"
+
+        patient_name: Optional[str] = None
+        if a.patient_name_encrypted:
+            try:
+                patient_name = decrypt_phi(a.patient_name_encrypted)
+            except Exception:
+                patient_name = "[decryption error]"
+
+        out.append(AuditResponse(
+            audit_id=a.id,
+            contact_id=a.campaign_contact_id,
+            retell_call_id=a.retell_call_id,
+            outcome=a.outcome,
+            attempt_number=a.attempt_number,
+            called_at=a.called_at,
+            call_summary=call_summary,
+            patient_name=patient_name,
+        ))
+    return out
 
 
 # ── Start (PENDING -> ACTIVE) ────────────────────────────────────────────────

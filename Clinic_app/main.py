@@ -20,6 +20,7 @@ from Clinic_app.workers.campaign_worker import (
     resume_active_campaign_workers,
 )
 from Clinic_app.services.playwright_ehr import playwright_ehr_service
+from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
 
 # Configure logging
 logging.basicConfig(
@@ -58,6 +59,10 @@ async def lifespan(app: FastAPI):
         await campaign_worker_manager.shutdown_all()
     except Exception as e:
         logger.warning("Campaign worker shutdown: %s", e)
+    try:
+        await slot_prefetch_manager.stop_all()
+    except Exception as e:
+        logger.warning("SlotPrefetchWorker shutdown: %s", e)
     scheduler.shutdown(wait=False)
     try:
         await playwright_ehr_service.shutdown_all()

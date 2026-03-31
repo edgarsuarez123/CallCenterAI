@@ -28,10 +28,13 @@ def upgrade() -> None:
     
     # Create ENUM types for PostgreSQL
     # Note: Using native PostgreSQL ENUMs for better type safety
-    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=True)
-    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=True)
-    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=True)
-    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=True)
+    # create_type=False: we create each ENUM once below via .create(checkfirst=True).
+    # If create_type=True, op.create_table() would emit CREATE TYPE again and fail when
+    # the type already exists (e.g. after a partial migration or re-run).
+    booking_status_enum = postgresql.ENUM('tentative', 'confirmed', 'canceled', name='bookingstatus', create_type=False)
+    slot_status_enum = postgresql.ENUM('free', 'booked', 'blocked', name='slotstatus', create_type=False)
+    slot_source_enum = postgresql.ENUM('csv', 'gcal', name='slotsource', create_type=False)
+    booking_action_enum = postgresql.ENUM('hold', 'confirm', 'cancel', 'expire', name='bookingaction', create_type=False)
     
     booking_status_enum.create(op.get_bind(), checkfirst=True)
     slot_status_enum.create(op.get_bind(), checkfirst=True)

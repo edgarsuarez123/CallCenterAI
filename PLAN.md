@@ -14,23 +14,26 @@
 
 | # | Date | Title | Status |
 |---|---|---|---|
-| 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active |
-| 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | Complete (NextGen validated 2026-03-20) |
-| 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | Complete |
-| 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | Complete |
-| 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | Complete |
-| 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | Complete |
-| 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | Complete |
-| 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | Complete |
-| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending — after MVP test call confirmed + Plan 012 |
-| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — last, after dashboard |
-| 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | Partially superseded by Plan 014 (MVP sprint absorbs Sprint B + C) |
-| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
-| 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | Split: critical subset in Plan 014 Sprint A; complex rules deferred post-MVP |
-| 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — top priority this week** |
-| 015 | 2026-03-23 | HIPAA Security Rule Compliance Audit | Active reference — track findings & remediation |
+| 001 | 2026-03-18 | MVP Roadmap — Full Feature Inventory | Active (reference) |
+| 002 | 2026-03-18 | Feature 0 — Playwright Validation Gate | ✅ Complete (NextGen validated 2026-03-20) |
+| 003 | 2026-03-18 | Feature 1 — Pre-HEDIS Codebase Fixes | ✅ Complete |
+| 004 | 2026-03-18 | Feature 2 — New Schema + Migrations | ✅ Complete |
+| 005 | 2026-03-18 | Feature 3 — Authentication & Authorization | ✅ Complete |
+| 006 | 2026-03-20 | Feature 4 — CSV Upload + Parsing + Campaign Creation + Clinic Settings | ✅ Complete |
+| 007 | 2026-03-18 | Feature 5 — EHR Integration (Playwright + AgentQL) | ✅ Complete |
+| 008 | 2026-03-18 | Feature 6 — Campaign Worker + Outbound Calling | ✅ Complete |
+| 011 | 2026-03-22 | Retell agent playbook + E2E voice gate + post-call staff notes | ✅ Partially complete — superseded by Plan 014 (Sprint B + C absorbed) |
+| 013 | 2026-03-23 | Business Logic Decisions — Gap Types, Scheduling Rules, Schema Additions | ✅ Partially complete — critical subset done in Plan 014 Sprint A; complex rules deferred post-MVP |
+| 015 | 2026-03-23 | HIPAA Security Rule Compliance Audit | ✅ Critical/high/medium findings addressed — active reference |
 | 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | ✅ Complete (2026-03-25) |
-| 017 | 2026-03-25 | No-Claude local test mode (direct header mapping + Retell summary fallback) | Pending — before E2E gate |
+| 017 | 2026-03-25 | Choosable summarizer + CSV direct mapping + audit endpoint | ✅ Complete (2026-03-26) |
+| 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — E2E gate remaining** |
+| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
+| 018 | 2026-03-26 | AgentQL → Browser-Use + Azure OpenAI (HIPAA-safe EHR automation) | ✅ Complete (2026-03-27) |
+| 019 | 2026-03-27 | EHR automation architecture — MVP path vs post-MVP (selectors, slot cache, multi-EHR) | Active (reference) |
+| 020 | 2026-03-30 | Unified Retell webhook — single URL + `event` dispatch | Complete (2026-03-30) |
+| 009 | 2026-03-18 | Feature 7 — Clinic Dashboard | Pending — after MVP test call + Plan 012 |
+| 010 | 2026-03-18 | Feature 8 — Hardening + Pilot Onboarding | Pending — last, after dashboard |
 
 ### Implementation order (current — revised 2026-03-23 for MVP sprint)
 
@@ -38,19 +41,21 @@
 
 1. **Plan 014 Sprint A** — Fix GapType enum mismatch + add missing ContactStatus values + hospital_flu columns. This is blocking a test call.
 2. **Plan 014 Sprint B** — Create `docs/retell_agent_playbook.md` + audit retell.py/worker metadata alignment. Lets Edgar configure the Retell agent in the dashboard.
-3. **Plan 014 Sprint C** — Use hardcoded scheduling defaults (no new DB tables), simplified staff notes extractor, E2E gate (upload CSV → call fires → correct script → slot/booking path → DB updated).
-4. **Plan 016** — Basic logging: app-wide log configuration, structured/consistent levels, PHI-safe masking (phone numbers, etc. per CLAUDE.md), correlation where useful for worker + Retell webhooks + tool calls. Supports Sprint C “watch worker log” and production troubleshooting.
+3. **Plan 020** — **Complete.** `POST /retell/webhook` + `_handle_call_*`; playbook + `docs/local_test_guide.md` updated. Register `{APP_BASE_URL}/retell/webhook` in Retell.
+4. **Plan 014 Sprint C** — Use hardcoded scheduling defaults (no new DB tables), simplified staff notes extractor, E2E gate (upload CSV → call fires → correct script → slot/booking path → DB updated).
+5. **Plan 016** — Basic logging: app-wide log configuration, structured/consistent levels, PHI-safe masking (phone numbers, etc. per CLAUDE.md), correlation where useful for worker + Retell webhooks + tool calls. Supports Sprint C “watch worker log” and production troubleshooting.
 
 **AFTER MVP TEST CALL CONFIRMED:**
 
-5. **Plan 012** — API security hardening before any real clinic uses the system. Includes **M2 (CORS + rate limiting + security headers)** from the HIPAA audit — three sub-tasks:
+6. **Plan 012** — API security hardening before any real clinic uses the system. Includes **M2 (CORS + rate limiting + security headers)** from the HIPAA audit — three sub-tasks:
    - **CORS:** Add `CORSMiddleware` with explicit allowed origins list (required before any web dashboard is built)
    - **Rate limiting:** Add `slowapi` throttle on auth endpoints and Retell webhooks (prevents DB exhaustion)
    - **Security headers:** One middleware pass setting `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` on all responses
-6. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
-7. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
-8. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests.
-9. **Plan 015** — HIPAA Security Rule compliance audit (`HIPAA_COMPLIANCE_AUDIT.md`, 2026-03-23). Use it as the running checklist for critical/high findings; remediation overlaps **Plan 012** (e.g. webhook integrity, rate limits, OpenAPI exposure) and **Plan 010** (production hardening, operational PHI controls).
+7. **Plan 018** — Replace AgentQL with Browser-Use (open-source) + Azure OpenAI. Required before pilot with real patients — resolves HIPAA audit finding T-01 (AgentQL has no BAA). See full plan below.
+8. **Plan 009 (Feature 7)** — React dashboard once the core call path is trusted.
+9. **Plan 013 complex rules** — `clinic_insurance_rules`, `clinic_scheduling_rules` tables, double-booking enforcement, insurance year eligibility, hospital_flu telehealth mode. Build these against a working system.
+10. **Plan 010 (Feature 8)** — Production deploy, PHI audit, pilot onboarding, load tests. Includes Azure OpenAI private endpoints + Zero Data Retention approval (prerequisite for Plan 018 in production).
+11. **Plan 015** — HIPAA Security Rule compliance audit (`HIPAA_COMPLIANCE_AUDIT.md`, 2026-03-23). Use it as the running checklist for critical/high findings; remediation overlaps **Plan 012** (e.g. webhook integrity, rate limits, OpenAPI exposure) and **Plan 010** (production hardening, operational PHI controls).
 
 ---
 
@@ -2172,6 +2177,66 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 
 ---
 
+### 11. Integration & enforcement model (decided 2026-03-27)
+
+This section records **how** insurance and scheduling rules (§2–§5, tables in §5) connect to the **running app** — in plain terms, for implementers. It does not replace §5 schema; it describes **where** logic runs and **how** it interacts with the **Redis slot cache** used on the Retell hot path.
+
+#### 11.1 The “three boxes” model (explain-like-I’m-five)
+
+- **Box A — Rule sheet (per clinic, in the database)**  
+  Think of a **printed list** taped to the wall for **that clinic only**: “We don’t book closer than 24 hours,” “this payer uses the one-year-and-one-day rule,” “these two visit types can’t share an hour,” etc.  
+  In software this is **`clinic_insurance_rules`** + **`clinic_scheduling_rules`** (§5), or — for an early pilot — a **minimal** JSON/config row **scoped by `clinic_id`** until full migrations land.  
+  **Customization:** change the sheet (admin API, Super Admin API, or DB row) — **no code deploy** for each tweak.
+
+- **Box B — EHR robot (NextGen today)**  
+  This is **Browser-Use / Playwright**: log in, open the schedule, **read what times look open** in the EHR, or **book** a time.  
+  It should **not** encode every insurance law inside NextGen clicks. It **returns facts** (“here are slots the EHR shows”) or **executes** (“book this slot”).
+
+- **Box C — Referee (your FastAPI code)**  
+  The referee **reads Box A** and **checks Box B’s answers** before the patient hears anything or before a booking commits.  
+  If the rule sheet says “no,” the referee **throws away** that option or **stops** the book — even if the EHR page looked fine.
+
+#### 11.2 How this works with the **Redis slot cache** (simple)
+
+- **What Redis holds today:** A **short-lived copy** of “next available slots” **per clinic + provider** (see `playbook_cache.py`, `SlotPrefetchWorker`). Think of it as a **sticky note**: “Last time we looked, these times were open.”  
+- **Redis is not the rule book.** It’s a **speed shortcut** so `get_available_slots` can answer Retell in **under ~3 seconds** without launching a full browser on every tool call.
+
+**Order of operations (conceptual):**
+
+1. **Background job** (or first fetch) fills Redis with slots **from NextGen** — “raw” availability the EHR exposed.  
+2. When the **voice tool** runs, the API **reads** that cache (fast).  
+3. **Then the referee (Box C)** loads **this clinic’s rules** from the DB and **filters** the list: drop slots that violate lead-time, insurance year, hospital-flu mode, double-book risk, etc.  
+4. **Only the filtered list** is spoken to the patient / returned to the agent.
+
+So: **Redis = remember what the schedule looked like; rules = decide what we’re allowed to offer from that list.**  
+If the cache is empty or stale, behavior is defined elsewhere (miss → empty or trigger refresh); rules still apply **whenever** a list is returned.
+
+#### 11.3 Where enforcement hooks go (must implement with §5)
+
+| Step | What happens |
+|------|----------------|
+| **After** reading slots (from Redis or live fetch), **before** returning to Retell | Apply **scheduling + insurance + gap-type** rules → **filter** or annotate slots. |
+| **Immediately before** `book_appointment` calls the EHR | Run **double-booking** and any **last-moment** checks using **DB bookings/holds** + **`clinic_scheduling_rules`**. If fail → do not book; return a safe message. |
+
+Rules are **not** implemented only inside Browser-Use prompt text; they belong in **shared Python** keyed by **`clinic_id`**, so Epic/other EHRs can reuse the same referee with a different Box B later.
+
+#### 11.4 How the system “chooses” slots for the patient
+
+1. Start from **candidate slots** (from Redis cache or live).  
+2. Load **clinic rules** + **this contact’s `gap_type`** + **metadata** (provider, payer if known).  
+3. **Remove** candidates that break rules (eligibility, forbidden combinations, wrong mode for hospital_flu, etc.).  
+4. **Sort** if needed (e.g. earliest first).  
+5. Expose **top N** to the voice agent (see `MAX_SLOTS_RETURNED` patterns in code).  
+The “choice” is **rule-driven filtering**, not the LLM guessing policy.
+
+#### 11.5 MVP vs full Plan 013
+
+- **Full Plan 013** implements §5 tables, PUT endpoints (§7), and EHR/worker updates in the implementation checklist below.  
+- **Plan 014** deferred full rules to ship the test call faster.  
+- **Exception (first production clinic):** If a pilot clinic **cannot** go live without specific rules, implement the **same three-box model** with a **minimal** rule payload (e.g. JSONB on `clinic` or a slim migration) **before** the full §5 surface area — still **`clinic_id`-scoped**, still referee at **read slots** + **pre-book** — then **expand** to full tables and dashboard toggles without redesigning the flow.
+
+---
+
 ### Implementation Steps (Plan 013)
 
 - [ ] Resolve open question: `updated_by = null vs. Super Admin staff record`
@@ -2185,6 +2250,7 @@ When Super Admin modifies scheduling rules via `X-Admin-Key` (no Google OAuth / 
 - [ ] Implement `PUT /clinics/scheduling-rules` and `PUT /clinics/insurance-rules`
 - [ ] Implement `PUT /admin/clinics/{id}/scheduling-rules` and `PUT /admin/clinics/{id}/insurance-rules`
 - [ ] Update campaign worker: `hospital_flu` priority sort + `EXPIRED` check before dialing
+- [ ] Implement **referee layer** per **§11**: after reading slots (cache or live), filter by `clinic_insurance_rules` + `clinic_scheduling_rules` + `gap_type` before Retell response; before `book_appointment`, enforce double-booking + eligibility (see §11.3)
 - [ ] Update EHR/Playwright layer: double booking check against `clinic_scheduling_rules`
 - [ ] Update EHR/Playwright layer: preventive visit eligibility check + Redis cache for last visit date
 - [ ] Update EHR/Playwright layer: hospital flu mode dispatch (`telehealth_4_5pm` vs `next_to_followup`)
@@ -2412,6 +2478,221 @@ If `ANTHROPIC_API_KEY` is not set:
 
 ---
 
-*Last updated: 2026-03-25 (Plan 017 added)*
+## Plan 018 — AgentQL → Browser-Use + Azure OpenAI (HIPAA-Safe EHR Automation)
+**Date:** 2026-03-26
+**Status:** Pending — implement before pilot with real patients
+**Trigger:** HIPAA audit finding T-01 (AgentQL has no BAA) + multi-EHR scalability requirement
+
+### Context
+
+AgentQL sends full page DOM (including PHI on NextGen scheduling pages) to their cloud API on every `query_elements()` call. No published BAA → violates 45 CFR §164.308(b)(1). Finding T-01 in `HIPAA_COMPLIANCE_AUDIT.md`. Hardcoded Playwright selectors don't scale to multi-EHR.
+
+### What We Are Building
+
+**Two-layer architecture** replacing AgentQL:
+
+**Layer 1 — Playbook Recorder** (Browser-Use Agent, runs in background):
+Browser-Use Agent navigates EHR using natural language + Azure OpenAI LLM. Every Playwright action is recorded as a **Playbook** (JSON action sequence) cached in Redis (7-day TTL). Runs once per clinic session setup or on playbook invalidation.
+
+**Layer 2 — Playbook Executor** (raw Playwright, runs during live calls):
+Replays cached playbook using `page.locator()` calls. No LLM involved. Sub-second execution. If a step fails (EHR UI changed), queues background re-discovery.
+
+**Slot Pre-fetch Loop**: Background task refreshes slots every 90s for active campaigns, caching in Redis (120s TTL). Retell `get_available_slots` gets instant cache hit.
+
+### Key Architecture Decisions
+
+| Decision | Reasoning |
+|---|---|
+| Two-layer Playbook Recorder + Executor | Solves 3-second Retell webhook deadline. Browser-Use takes 5-15s; raw Playwright playback takes <1s. |
+| Browser-Use open-source, NOT Cloud | Cloud version has same PHI exposure as AgentQL. Open-source keeps data local. |
+| Azure OpenAI as LLM backend | HIPAA BAA covers text inputs. Data stays in Azure tenant. |
+| `use_vision=False` (no screenshots) | Image BAA coverage unconfirmed. Text-only DOM stays in covered territory. |
+| `sensitive_data` for EHR credentials | Credentials isolated from LLM context via placeholder tokens. |
+| `allowed_domains` | Locks browser navigation to authorized EHR domain only. |
+| ZDR + private endpoints required in production | 30-day abuse monitoring stores prompts by default. ZDR eliminates this. Private endpoints prevent public internet exposure. |
+
+### Playbook vs Application Logic Boundary
+
+The playbook is a **low-level EHR remote control**. It does NOT encode business rules.
+
+| Responsibility | Where it lives |
+|---|---|
+| Navigate EHR pages, read slots, fill/submit forms | **Playbook** |
+| Filter slots (no 2 preventatives same hour) | **App logic** (webhook handler / campaign worker) |
+| Insurance eligibility rules | **App logic** (future plan) |
+| Offer best slot to patient | **Retell agent prompt** |
+| Decide which slot to book | **App logic** (retell.py) |
+
+### Redis Key Schema
+
+| Key | TTL | Purpose |
+|-----|-----|---------|
+| `ehr:playbook:{clinic_id}:{workflow}` | 7 days | Cached action sequence |
+| `ehr:slots:{clinic_id}:{provider}:{date}` | 120s | Pre-fetched slots |
+| `ehr:playbook:version:{clinic_id}` | No expiry | Version counter |
+
+Replaces old `agentql:selector:{clinic_id}:{element_name}` keys.
+
+### Implementation Steps
+
+- [ ] Step 1: `requirements.txt` — remove `agentql==1.18.1`, add `browser-use>=0.12.0`, `langchain-openai>=0.3.0`
+- [ ] Step 2: Rename `selector_cache.py` → `playbook_cache.py` — new key schema, playbook + slot cache functions
+- [ ] Step 3: `playwright_ehr.py` — add PlaybookStep/Playbook/SlotData/ConfirmationData data structures, `_get_llm()` singleton, playbook management methods
+- [ ] Step 4: `playwright_ehr.py` — replace 8 AgentQL calls with playbook recorder/executor pattern:
+  - MFA detection → pure CSS heuristic (no LLM)
+  - Login → playbook with `sensitive_data` credential placeholders
+  - Navigation → playbook with cached nav selector
+  - Provider dropdown → playbook with `{provider_name}` placeholder
+  - Slot reading → playbook + `SlotData` output model + pre-fetch loop
+  - Booking form → playbook with `{patient_name}`, `{appt_type_code}` placeholders
+  - Submit + confirmation → playbook + `ConfirmationData` output model
+- [ ] Step 5: Add slot pre-fetch loop (90s interval, 120s TTL), wire into `initialize_session()`/`shutdown_session()`
+- [ ] Step 6: Update `admin.py` import (`invalidate_clinic_selectors` → `invalidate_clinic_playbooks`)
+- [ ] Step 7: Update `env.example` — uncomment Azure OpenAI vars `[REQUIRED for EHR]`, deprecate AGENTQL_API_KEY
+- [ ] Step 8: Update `CLAUDE.md` tech stack table
+- [ ] Step 9: Update tests — replace AgentQL import tests, update cache key assertions, add playbook execution tests
+- [ ] Step 10: Update `docs/local_test_guide.md` — add Azure OpenAI resource creation guide, update EHR section
+- [ ] Step 11: Mark T-01 as REMEDIATED in `HIPAA_COMPLIANCE_AUDIT.md`
+
+### Files to Change
+
+| File | Change |
+|---|---|
+| `requirements.txt` | Remove agentql, add browser-use + langchain-openai |
+| `Clinic_app/services/playwright_ehr.py` | Major rewrite: playbook infrastructure, Browser-Use integration, slot pre-fetch |
+| `Clinic_app/services/selector_cache.py` → `playbook_cache.py` | Rename + repurpose for playbooks + slot cache |
+| `Clinic_app/Routes/admin.py` | Update import |
+| `env.example` | Uncomment Azure OpenAI vars, deprecate AGENTQL_API_KEY |
+| `CLAUDE.md` | Update tech stack |
+| `HIPAA_COMPLIANCE_AUDIT.md` | Mark T-01 remediated |
+| `docs/local_test_guide.md` | Add Azure OpenAI setup guide |
+| `tests/test_playwright_docker.py` | Replace AgentQL import tests |
+| `tests/test_playwright_validation.py` | Update cache key assertions |
+| `tests/test_selector_cache.py` → `test_playbook_cache.py` | Rename + update |
+| `tests/test_playwright_ehr_service.py` | Add playbook mock tests |
+
+### Local Dev: Azure OpenAI Setup
+
+1. Azure Portal → Create resource → "Azure OpenAI" → East US region → Standard S0
+2. Model deployments → Create → `gpt-4o` → deployment name `gpt-4o` → Standard type
+3. Keys and Endpoint → copy Endpoint + Key 1
+4. `.env`: `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION=2025-03-01-preview`, `AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o`
+5. Apply for access if needed: https://aka.ms/oai/access
+
+### Production Prerequisites (Plan 010)
+
+1. Apply for Modified Abuse Monitoring (ZDR) — eliminates 30-day prompt storage
+2. Private endpoint + VNet — no public internet to LLM
+3. Managed Identity instead of API key
+4. Verify `ContentLogging: false` in Azure resource
+5. US region Standard deployment
+
+### Explicitly Deferred
+
+- Production Azure OpenAI hardening (Plan 010)
+- Epic / Athena task descriptions (post-MVP)
+- Image/screenshot-based resolution (unconfirmed BAA coverage)
+- Clinic-specific scheduling business rules (separate plan)
+
+---
+
+## Plan 019 — EHR automation architecture: MVP path vs post-MVP
+**Date:** 2026-03-27  
+**Status:** Active (reference — constrains scope for pilot/MVP vs later scale)  
+**Source:** Architecture discussion (selector cache, Playwright scripts, slot cache, multi-tenant EHR)
+
+### Plain-language model (three pieces)
+
+1. **Playwright script** — A fixed checklist in code (click here, type there). Fast and cheap; breaks when the EHR UI changes.
+2. **Selector cache** — Saved “where to click” (CSS/AgentQL/playbook text) per clinic or EHR template, reused instead of rediscovering the DOM every run.
+3. **Slot cache** — Redis copy of “next available slots” so Retell’s `get_available_slots` stays under ~3s; populated by a background job, short TTL.
+
+**Ideal long-term:** deterministic Playwright + selector playbooks for stable flows; LLM/Browser-Use mainly for discovery, breakage, or ambiguous UIs. **Multi-EHR:** one “adapter” interface per product (NextGen, Epic, …), tenant-scoped config and caches (never global selectors for all clinics).
+
+### What we have today (post–Plan 018)
+
+- **NextGen-first:** `ClinicEHRConfig` (URL, encrypted creds, `appt_type_mapping` JSONB) — not a generic multi-EHR abstraction yet.
+- **Slot cache:** `playbook_cache.py` + `SlotPrefetchWorker` — matches the “slot cache” pattern; keys include `clinic_id`.
+- **Hot path:** `get_available_slots` reads Redis only (fast); prefetch uses **Browser-Use + LLM** (`fetch_slots_live`) to refresh slots.
+- **No full selector-playbook layer** driving every click without LLM; Browser-Use task strings do the navigation. Redis docstring still references historical AgentQL selector-cache intent; implementation center of gravity is **LLM-driven Browser-Use** + **slot result cache**.
+
+### MVP recommendation — keep it simple
+
+**Goal:** Ship a **pilot-ready** path with **minimum moving parts**: one EHR (NextGen), one clinic’s reality, HIPAA-safe LLM (Azure OpenAI in prod per Plan 018), Retell deadlines met.
+
+**Include for MVP (must ship or already in place):**
+
+| Item | Rationale |
+|------|-----------|
+| **NextGen-only automation** | Matches PRD pilot; avoid abstract “EHR adapter” interfaces until a second EHR is contracted. |
+| **Slot cache + prefetch** | Already the design; required for sub–3s tool responses. Keep worker healthy and TTL sensible. |
+| **Per-clinic `ClinicEHRConfig`** | URL, creds, `appt_type_mapping` — customization without code changes for appointment-type codes. |
+| **Browser-Use + Azure OpenAI for EHR tasks in prod** | Resolves T-01 (no AgentQL in prod); acceptable MVP cost/latency for **pilot volume**. |
+| **Manual gate: `browser-use-test/test_nextgen_browseruse.py`** | Validates login/MFA/slots path against real NextGen before real patients. |
+| **Tenant isolation** | All DB queries `clinic_id`-scoped; Redis keys include `clinic_id` (already required by PHI rules). |
+| **`EHR_LLM_PROVIDER` env** | Ollama local dev, `azure_openai` production — single deployment config is OK for MVP. |
+
+**Explicitly defer post-MVP (do not block pilot on these):**
+
+| Deferred item | Why defer |
+|---------------|-----------|
+| **Generic EHR adapter layer** (Epic, athena, …) | No second EHR in MVP; adds interfaces and tests without pilot value. |
+| **Redis-backed selector/playbook cache** replacing most LLM navigation | Major engineering; optimize after pilot proves volume and pain (cost/latency). |
+| **Per-clinic LLM routing** (different model per tenant) | Operational complexity; revisit when multi-tenant LLM cost tuning is required. |
+| **Full scheduling rules engine** | Plan 013 complex rules (`clinic_scheduling_rules`, etc.) — post-MVP unless a hard blocker appears. |
+| **Vision/screenshot-based EHR steps** | BAA/PHI and cost; stay `use_vision=False` unless headless text-only fails. |
+
+### Evolution path (after MVP test call / pilot)
+
+1. Measure **real** prefetch duration, token use, and failure modes on Azure OpenAI.
+2. If **cost or latency** is the bottleneck, add **playbook or selector reuse** for the **stable** parts of NextGen (login → scheduler) first — **one pilot clinic**, then generalize keys by `clinic_id`.
+3. When a **second EHR** is real, introduce an **adapter boundary** (interface + NextGen implementation) rather than scattering `if epic` in routes.
+
+### Deferred (unchanged from other plans)
+
+- Plan 013 advanced scheduling/insurance rules until core path is stable.
+- Plan 010 production LLM hardening (private endpoint, ZDR) for non-pilot scale.
+
+---
+
+## Plan 020 — Unified Retell webhook (single URL + `event` dispatch)
+**Date:** 2026-03-30  
+**Status:** Complete (2026-03-30)  
+**Source:** Retell product behavior ([Webhook Overview](https://docs.retellai.com/features/webhook), [Create Phone Call](https://docs.retellai.com/api-references/create-phone-call)) + codebase review (`Clinic_app/Routes/retell.py`)
+
+### Problem
+
+- Retell supports **one** webhook URL at account level (or per-agent `webhook_url`). Every subscribed lifecycle event (`call_started`, `call_ended`, `call_analyzed`, …) is **POSTed to that same URL**; the JSON body includes `"event": "<type>"`.
+- The app currently exposes **three separate routes**: `POST /retell/webhook/call_started`, `/call_ended`, `/call_analyzed`. If the dashboard URL is set to only one of those paths, **all** events hit that path — wrong handler and broken validation.
+- Outbound dialing is unchanged: `POST https://api.retellai.com/v2/create-phone-call` (see `services/retell_client.py`). Webhooks are **Retell → app**, not how calls start.
+
+### What We Are Building
+
+1. **`POST /retell/webhook`** — Read raw body → `verify_retell_signature` → parse JSON → `match` / `if` on `event` → invoke the same business logic as today’s three handlers (refactor into shared async functions if needed to avoid duplication).
+2. **Unknown `event`** — Return 2xx (acknowledge) and log at warning; do not 500 (Retell retries on non-2xx).
+3. **Tests** — Extend `tests/test_retell.py` / `tests/test_hedis_webhooks.py` to hit the unified route with each `event` and assert behavior matches existing expectations.
+4. **Docs** — Update `docs/retell_agent_playbook.md` §5.3 (and `docs/local_test_guide.md` if it lists three webhook URLs) so the **single** URL is the documented contract; optional note that path-specific routes may remain for manual testing or be thin wrappers calling shared code.
+
+### Key Decisions & Reasoning
+
+- **One public URL** aligns with Retell’s model; dispatch on `event` is the standard pattern in Retell’s own SDK examples.
+- **Keep HMAC verification** identical (raw body, same secret); no change to PHI handling in handlers.
+- **Optional:** Deprecate or keep the three path-specific routes as aliases that forward to the same logic — if kept, document that Retell must not be pointed at them unless using a reverse-proxy fan-out (not recommended).
+
+### Deferred
+
+- Retell **transfer** / `transcript_updated` events — only add branches when product requires them.
+- Rate limiting for `/retell/webhook` remains **Plan 012** scope unless merged earlier for ops reasons.
+
+### Implementation Steps
+
+- [x] Extract or delegate `webhook_call_*` body into shared handlers callable from one route (`_handle_call_started`, `_handle_call_ended`, `_handle_call_analyzed` in `retell.py`).
+- [x] Add `POST /retell/webhook` with `event` dispatch + safe default for unknown events.
+- [x] Tests for unified route (`tests/test_retell.py::TestUnifiedWebhook`); existing HEDIS webhook tests unchanged (aliases).
+- [x] Playbook + local test guide: one webhook URL `…/retell/webhook`.
+
+---
+
+*Last updated: 2026-03-30 (Plan 020 implemented — unified Retell webhook)*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: **Plan 017** (optional, run first if no Claude key) → **Plan 014 Sprint C E2E gate** per `docs/local_test_guide.md`.*
+*Next action: **Plan 014 Sprint B/C** Retell dashboard setup (use `/retell/webhook`); then **Plan 014 Sprint C E2E gate** per `docs/local_test_guide.md`. Manual Browser-Use validation: `cd browser-use-test && python test_nextgen_browseruse.py` against real NextGen + Ollama before pilot with real patients.*
