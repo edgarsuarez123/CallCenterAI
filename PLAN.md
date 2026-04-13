@@ -28,7 +28,7 @@
 | 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | ✅ Complete (2026-03-25) |
 | 017 | 2026-03-25 | Choosable summarizer + CSV direct mapping + audit endpoint | ✅ Complete (2026-03-26) |
 | 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🟡 E2E verified (2026-04) — EHR booking (`book_appointment` → NextGen) not yet tested** |
-| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
+| 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | ✅ Complete (2026-04-13) |
 | 018 | 2026-03-26 | AgentQL → Browser-Use + Azure OpenAI (HIPAA-safe EHR automation) | ✅ Complete (2026-03-27) |
 | 019 | 2026-03-27 | EHR automation architecture — MVP path vs post-MVP (selectors, slot cache, multi-EHR) | Active (reference) |
 | 020 | 2026-03-30 | Unified Retell webhook — single URL + `event` dispatch | Complete (2026-03-30) |
@@ -1904,17 +1904,38 @@ The browser UI will increase **attack surface** (CORS, credential handling, traf
 
 - Full **PHI log audit** automation, **12-call load test**, **Azure BAA** operational checklist — keep in **Plan 010** unless a blocker for pilot.
 
-### Open decisions (answer before implementation)
+### Open decisions — RESOLVED 2026-04-13
 
-1. **CORS:** Single global allowlist env var vs per-tenant origins in DB for white-label / multi-domain clinics?
-2. **Claude limits:** Global-only vs **per-`clinic_id`** buckets (fairness across tenants)?
-3. **Admin routes (`X-Admin-Key`):** Same rate-limit tier as staff auth, stricter, or IP allowlist in Azure only?
+1. **CORS:** ✅ Single global `ALLOWED_ORIGINS` env var (comma-separated). No per-tenant DB origins.
+2. **Claude limits:** ✅ Per-`clinic_id` buckets — fairness across tenants; one clinic cannot starve others.
+3. **Admin routes (`X-Admin-Key`):** ✅ Same rate-limit tier as staff auth routes.
+
+### Implementation steps (all complete 2026-04-13)
+
+- [x] A. Disable `/docs` + `/redoc` when `APP_ENVIRONMENT=production` (main.py) — was already implemented
+- [x] B. Add `CORSMiddleware` with `ALLOWED_ORIGINS` env var (main.py)
+- [x] C. Safe 500 handler — dev mode now includes type+message; prod stays generic (main.py)
+- [x] D. Custom Redis-based `make_rate_limit_dep` (no slowapi dependency needed):
+  - `/auth/*` routes — per-IP via `auth_rate_limit()` Depends
+  - CSV upload — `upload_rate_limit()` (5/min); campaign start/pause/resume/cancel — `auth_rate_limit()`
+  - `/retell/webhook` + 3 legacy aliases — `webhook_rate_limit()` (120/min)
+  - Admin + provider routers — `admin_rate_limit()` applied at router registration level in main.py
+  - `/clinic/settings` PATCH — `auth_rate_limit()`
+  - Fail-open when Redis unreachable; reads env at request time for test override
+- [x] E. Claude per-clinic rate limit (`Clinic_app/common/claude_rate_limit.py`):
+  - `check_and_increment(clinic_id)` → True/False
+  - Inserted in `_handle_call_analyzed` after retell-mode check, before Claude calls
+  - Fallback: "Call summary unavailable (rate limit.)"; audit row still written; webhook returns 200
+- [x] F. Tests — 20/20 passing: `tests/test_rate_limits.py` (11) + `tests/test_cors.py` (9)
+- [x] G. `env.example` — new API Security section with all `RATE_LIMIT_*` and `ALLOWED_ORIGINS` vars
+
+**Implementation note:** Used custom Redis Depends factory instead of slowapi — no new dependency required.
 
 ---
 
-*Last updated: 2026-03-23*
+*Last updated: 2026-04-13*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: Plan 011 (E2E gate) → Plan 012 (security + rate limits) → Plan 009 (dashboard) → Plan 010 (onboarding).*
+*Next action: Implement Plan 012 steps A–G → Plan 009 (dashboard) → Plan 010 (onboarding).*
 
 ---
 
