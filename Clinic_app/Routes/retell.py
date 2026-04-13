@@ -1395,39 +1395,16 @@ def _transcript_requests_human(transcript: str) -> bool:
     )
 
 
-async def _apply_hedis_call_ended(
+async def _update_hedis_campaign_contact_from_call_end(
     db: AsyncSession,
-    call_log: CallLog,
+    contact: CampaignContact,
+    campaign: Campaign,
     webhook: CallEndedWebhook,
-    raw_call: Dict[str, Any],
-    ended_at: datetime,
 ) -> None:
-    """Update CampaignContact + Campaign counters for HEDIS outbound calls."""
-    meta = _hedis_metadata_from_call(raw_call, webhook.metadata)
-    if meta.get("call_type") != "hedis_campaign":
-        return
-
-    ccid_raw = meta.get("campaign_contact_id")
-    if not ccid_raw:
-        return
-    try:
-        contact_id = UUID(str(ccid_raw))
-    except (ValueError, TypeError):
-        logger.warning("HEDIS call_ended: invalid campaign_contact_id %r", ccid_raw)
-        return
-
-    contact = await db.get(CampaignContact, contact_id)
-    if not contact or contact.clinic_id != call_log.clinic_id:
-        logger.warning(
-            "HEDIS call_ended: contact missing or wrong clinic id=%s",
-            contact_id,
-        )
-        return
-
-    campaign = await db.get(Campaign, contact.campaign_id)
-    if not campaign or campaign.clinic_id != call_log.clinic_id:
-        return
-
+    """
+    Apply call_ended outcome to campaign contact + campaign counters.
+    Shared by CallLog and no-CallLog code paths.
+    """
     has_appt = bool(contact.ehr_appointment_id and str(contact.ehr_appointment_id).strip())
     outcome = _map_disconnection_to_outcome(webhook.disconnection_reason, has_appt)
     is_order_based = contact.gap_type in {gt.value for gt in ORDER_BASED_GAP_TYPES}
@@ -1470,9 +1447,92 @@ async def _apply_hedis_call_ended(
         contact.status = outcome.value
         contact.next_attempt_after = None
 
+    await maybe_mark_campaign_completed(db, contact.clinic_id, campaign.id)
+
+
+async def _apply_hedis_call_ended(
+    db: AsyncSession,
+    call_log: CallLog,
+    webhook: CallEndedWebhook,
+    raw_call: Dict[str, Any],
+) -> None:
+    """Update CampaignContact + Campaign counters for HEDIS outbound calls."""
+    meta = _hedis_metadata_from_call(raw_call, webhook.metadata)
+    if meta.get("call_type") != "hedis_campaign":
+        return
+
+    ccid_raw = meta.get("campaign_contact_id")
+    if not ccid_raw:
+        return
+    try:
+        contact_id = UUID(str(ccid_raw))
+    except (ValueError, TypeError):
+        logger.warning("HEDIS call_ended: invalid campaign_contact_id %r", ccid_raw)
+        return
+
+    contact = await db.get(CampaignContact, contact_id)
+    if not contact or contact.clinic_id != call_log.clinic_id:
+        logger.warning(
+            "HEDIS call_ended: contact missing or wrong clinic id=%s",
+            contact_id,
+        )
+        return
+
+    campaign = await db.get(Campaign, contact.campaign_id)
+    if not campaign or campaign.clinic_id != call_log.clinic_id:
+        return
+
+    await _update_hedis_campaign_contact_from_call_end(db, contact, campaign, webhook)
     call_log.related_id = contact.id
 
-    await maybe_mark_campaign_completed(db, call_log.clinic_id, campaign.id)
+
+async def _apply_hedis_call_ended_without_calllog(
+    db: AsyncSession,
+    webhook: CallEndedWebhook,
+    raw_call: Dict[str, Any],
+) -> bool:
+    """
+    When call_started never created a CallLog, call_ended still must clear
+    CampaignContact from CALLING → PENDING (or terminal) or the worker will
+    never dial them again (get_next_eligible_contact only selects pending).
+
+    Returns True if a HEDIS contact row was updated.
+    """
+    meta = _hedis_metadata_from_call(raw_call, webhook.metadata)
+    if meta.get("call_type") != "hedis_campaign":
+        return False
+
+    ccid_raw = meta.get("campaign_contact_id")
+    if not ccid_raw:
+        return False
+    try:
+        contact_id = UUID(str(ccid_raw))
+    except (ValueError, TypeError):
+        logger.warning(
+            "HEDIS call_ended (no CallLog): invalid campaign_contact_id %r",
+            ccid_raw,
+        )
+        return False
+
+    contact = await db.get(CampaignContact, contact_id)
+    if not contact:
+        logger.warning(
+            "HEDIS call_ended (no CallLog): contact not found id=%s",
+            contact_id,
+        )
+        return False
+
+    campaign = await db.get(Campaign, contact.campaign_id)
+    if not campaign or campaign.clinic_id != contact.clinic_id:
+        return False
+
+    await _update_hedis_campaign_contact_from_call_end(db, contact, campaign, webhook)
+    logger.info(
+        "HEDIS contact updated without CallLog: contact_id=%s call_id=%s",
+        contact_id,
+        webhook.call_id,
+    )
+    return True
 
 
 @retell_router.post("/tools/get_available_slots", response_model=EhrToolSlotsResponse)
@@ -1697,6 +1757,18 @@ async def _handle_call_ended(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict
 
         if not call_log:
             logger.warning(f"CallLog not found for call_id: {webhook.call_id}")
+            try:
+                if await _apply_hedis_call_ended_without_calllog(db, webhook, call_obj):
+                    await db.commit()
+                else:
+                    await db.rollback()
+            except Exception as exc:
+                logger.error(
+                    "HEDIS call_ended without CallLog failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                await db.rollback()
             return {"status": "ok", "warning": "CallLog not found"}
 
         duration_seconds = None
@@ -1730,7 +1802,7 @@ async def _handle_call_ended(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict
                 call_log.tentative_booking_id = None
 
         try:
-            await _apply_hedis_call_ended(db, call_log, webhook, call_obj, ended_at)
+            await _apply_hedis_call_ended(db, call_log, webhook, call_obj)
         except Exception as exc:
             logger.error("HEDIS call_ended handling failed: %s", exc, exc_info=True)
 

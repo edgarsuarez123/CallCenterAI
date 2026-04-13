@@ -103,7 +103,6 @@ async def test_apply_hedis_call_ended_voicemail_sets_pending_retry() -> None:
             call_log,
             webhook,
             {"metadata": webhook.metadata},
-            datetime.now(timezone.utc),
         )
 
     assert contact.status == ContactStatus.PENDING.value
@@ -169,7 +168,6 @@ async def test_apply_hedis_call_ended_order_based_hangup_sets_order_agreed() -> 
             call_log,
             webhook,
             {"metadata": webhook.metadata},
-            datetime.now(timezone.utc),
         )
 
     assert contact.status == ContactStatus.ORDER_AGREED.value

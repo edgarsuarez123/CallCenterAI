@@ -37,7 +37,6 @@ from Clinic_app.common.database import Base
 # Models must use the same Base instance
 from Clinic_app.data.models import (
     Clinic,
-    License,
     ClinicIntegration,
     Provider,
     Patient,

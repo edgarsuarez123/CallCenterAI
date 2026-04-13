@@ -236,7 +236,7 @@ def _get_hash_key() -> bytes:
     if _hash_key is not None:
         return _hash_key
 
-    key_str = os.getenv("PHI_HASH_KEY")
+    key_str = (os.getenv("PHI_HASH_KEY") or "").strip()
     if not key_str:
         raise EncryptionKeyError(
             "PHI_HASH_KEY environment variable is required for PHI hashing."

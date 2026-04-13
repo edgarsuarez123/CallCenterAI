@@ -503,6 +503,7 @@ If maybe / wants more information:
 | “Is this covered by my insurance?” | [If {{payer}} is known]: “This is typically covered under {{payer}} — I’d recommend confirming the details directly with your plan.” [If {{payer}} is empty]: “Most insurance plans cover this as a preventive service — I’d recommend checking with your plan directly.” |
 | “How much does it cost?” | “Preventive screenings are often covered at no cost, but coverage depends on your specific plan. I’d recommend confirming with {{payer}} or calling your insurance directly to be sure.” |
 | “Call me back later / not a good time” | “Of course — when would be a better time to reach you?” [Note the time if given, then]: “I’ll pass that along. Thank you and sorry for the interruption.” |
+| Loud background noise / hard to hear the patient | Ask once: “I’m having a little trouble hearing you — could you step somewhere quieter for a moment, or repeat that?” Do **not** end the call or promise to “call later” **only** because of ambient noise. Only defer or end when **they** say it’s a bad time, they want a callback, or they ask you to stop. |
 | “I want to talk to a real person” | “Absolutely — you can reach our team directly at {{clinic_phone}}. They’ll be happy to help. Is there anything else before I let you go?” [End after.] |
 | “Who is this / is this a scam?” | “I completely understand the concern. I’m calling from {{clinic_name}} — you can call us back directly at {{clinic_phone}} to verify. I’m happy to wait or you can call back at your convenience.” |
 | “Remove me from the list” | “I’ll absolutely make note of that and pass it to your care team. I’m sorry for the interruption. Have a great day.” [End call.] |
@@ -518,8 +519,9 @@ If maybe / wants more information:
 4. Do not repeat PHI back to the patient — no full date of birth, no MRN, no SSN.
 5. Do not diagnose, interpret test results, or give clinical opinions.
 6. If a patient seems confused or hard of hearing: slow down, simplify, and offer the clinic phone number.
-7. Never make up appointment times, provider names, or test results.
-8. Be warm, patient, and unhurried — many callers are elderly.
+7. **Noisy line / ambient noise:** Do not treat background noise alone as “not a good time.” Ask once to move to a quieter spot or to repeat. Do not hang up or say you will call back later **only** because the line is noisy — only defer or end when the **patient** says it’s a bad time, asks for a callback, or declines to continue.
+8. Never make up appointment times, provider names, or test results.
+9. Be warm, patient, and unhurried — many callers are elderly.
 
 ---
 
@@ -621,6 +623,8 @@ Record in **`PROGRESS.txt`**.
 
 ---
 
-*Last updated: 2026-03-30 — Plan 020: single webhook URL `POST /retell/webhook` + `event` dispatch; §4 mermaid, §5.3, §10, §12 updated.*
+*Last updated: 2026-04-10 — §11 COMMON OBJECTIONS + VOICE RULES: noisy line / ambient noise — do not end calls only because of background noise.*
+
+*Previous: 2026-03-30 — Plan 020: single webhook URL `POST /retell/webhook` + `event` dispatch; §4 mermaid, §5.3, §10, §12 updated.*
 
 *Previous: 2026-03-25 — Workflow §4, full API catalog §5, create-phone-call + tool JSON §6–9, detailed agent prompt §11 (payer usage, per-gap scripts, tool calling steps, objection handling, voice rules).*

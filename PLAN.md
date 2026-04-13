@@ -27,7 +27,7 @@
 | 015 | 2026-03-23 | HIPAA Security Rule Compliance Audit | ✅ Critical/high/medium findings addressed — active reference |
 | 016 | 2026-03-23 | Basic application logging (structured + PHI-safe) | ✅ Complete (2026-03-25) |
 | 017 | 2026-03-25 | Choosable summarizer + CSV direct mapping + audit endpoint | ✅ Complete (2026-03-26) |
-| 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🔴 ACTIVE — E2E gate remaining** |
+| 014 | 2026-03-23 | **MVP Sprint — Test Call by March 27** | **🟡 E2E verified (2026-04) — EHR booking (`book_appointment` → NextGen) not yet tested** |
 | 012 | 2026-03-23 | API security hardening + HTTP rate limits + Claude rate limits | Pending — after MVP test call; before Plan 009 |
 | 018 | 2026-03-26 | AgentQL → Browser-Use + Azure OpenAI (HIPAA-safe EHR automation) | ✅ Complete (2026-03-27) |
 | 019 | 2026-03-27 | EHR automation architecture — MVP path vs post-MVP (selectors, slot cache, multi-EHR) | Active (reference) |
@@ -37,7 +37,9 @@
 
 ### Implementation order (current — revised 2026-03-23 for MVP sprint)
 
-**THIS WEEK (MVP goal: Edgar can upload a fake HEDIS CSV and watch the system make a real call):**
+**Current status (2026-04-12):** Plan 014 **end-to-end flow is verified** (CSV → campaign → outbound call → Retell webhooks → slot tooling path → DB / summaries). The **only MVP item not yet exercised** is **EHR appointment creation**: `POST /retell/tools/book_appointment` → `PlaywrightEHRService.book_appointment` → NextGen scheduler submit and confirmation. After that test (or an explicit decision to defer), close Plan 014 and move to **Plan 012** (API security).
+
+**THIS WEEK (historical — March 2026 MVP sprint goal: Edgar can upload a fake HEDIS CSV and watch the system make a real call):**
 
 1. **Plan 014 Sprint A** — Fix GapType enum mismatch + add missing ContactStatus values + hospital_flu columns. This is blocking a test call.
 2. **Plan 014 Sprint B** — Create `docs/retell_agent_playbook.md` + audit retell.py/worker metadata alignment. Lets Edgar configure the Retell agent in the dashboard.
@@ -45,7 +47,7 @@
 4. **Plan 014 Sprint C** — Use hardcoded scheduling defaults (no new DB tables), simplified staff notes extractor, E2E gate (upload CSV → call fires → correct script → slot/booking path → DB updated).
 5. **Plan 016** — Basic logging: app-wide log configuration, structured/consistent levels, PHI-safe masking (phone numbers, etc. per CLAUDE.md), correlation where useful for worker + Retell webhooks + tool calls. Supports Sprint C “watch worker log” and production troubleshooting.
 
-**AFTER MVP TEST CALL CONFIRMED:**
+**AFTER MVP PATH CONFIRMED** (voice E2E ✅ 2026-04; EHR booking write path still to test or defer):
 
 6. **Plan 012** — API security hardening before any real clinic uses the system. Includes **M2 (CORS + rate limiting + security headers)** from the HIPAA audit — three sub-tasks:
    - **CORS:** Add `CORSMiddleware` with explicit allowed origins list (required before any web dashboard is built)
@@ -2265,18 +2267,18 @@ The “choice” is **rule-driven filtering**, not the LLM guessing policy.
 
 ## Plan 014 — MVP Sprint: Test Call by March 27
 **Date:** 2026-03-23
-**Status:** 🔴 ACTIVE — top priority
+**Status:** 🟡 **E2E flow verified (2026-04)** — **remaining:** test **EHR booking** (`book_appointment` → NextGen submit), then mark Plan 014 complete.
 **Goal:** Edgar uploads a fake HEDIS CSV → system dials the contact via Retell → agent delivers correct gap-type script → for appointment-based gaps, agent checks slots + books in NextGen → post-call summary stored in DB. No dashboard required — Swagger UI is sufficient.
 
 ### What "done" looks like
 
-- [ ] Fake CSV with at least one order-based contact (e.g. `colorectal`) and one appointment-based contact (e.g. `preventive_visit`) uploaded via `POST /campaigns/upload`
-- [ ] Campaign started → worker dials → Retell call connects
-- [ ] Agent says the right script for the gap type (driven by `gap_type` metadata)
-- [ ] `get_available_slots` tool returns real slots from NextGen (or mocked sandbox)
-- [ ] `book_appointment` tool creates the appointment (or mocked)
-- [ ] `call_analyzed` webhook fires → summary stored encrypted in `campaign_audit`
-- [ ] Contact status updated correctly in DB (BOOKED or ORDER_AGREED)
+- [x] Fake CSV with at least one order-based contact (e.g. `colorectal`) and one appointment-based contact (e.g. `preventive_visit`) uploaded via `POST /campaigns/upload`
+- [x] Campaign started → worker dials → Retell call connects
+- [x] Agent says the right script for the gap type (driven by `gap_type` metadata)
+- [x] `get_available_slots` tool returns real slots from NextGen (or mocked sandbox)
+- [ ] **`book_appointment` tool creates the appointment in NextGen (EHR write — not yet tested; rest of E2E verified)**
+- [x] `call_analyzed` webhook fires → summary stored encrypted in `campaign_audit`
+- [x] Contact status updated correctly in DB (BOOKED or ORDER_AGREED)
 
 ---
 
@@ -2333,13 +2335,14 @@ Order-based care gaps have no `ehr_appointment_id`, so a normal call hangup was 
   ```
   Encrypt with AES-256-GCM; store in `campaign_audit`. Discard transcript. One-sentence summary still stored for appointment-based gaps. **Implemented:** `extract_order_based_notes_sync` + `webhook_call_analyzed` branch; note stored in `call_summary_encrypted`.
 
-- [x] **C2:** E2E gate — **curl/Swagger steps** documented in `docs/retell_agent_playbook.md` §13. Execute the gate locally or on staging, then record in `PROGRESS.txt`:
+- [x] **C2:** E2E gate — **curl/Swagger steps** documented in `docs/retell_agent_playbook.md` §13; also `docs/local_test_guide.md`. **Executed successfully (2026-04):** full flow except **NextGen appointment submit** via `book_appointment` — that EHR write path is the **only remaining gate item** (use a controlled test patient/slot per clinic policy). Record final booking test in `PROGRESS.txt` when done.
   - Stand up API: `docker compose -f docker-compose.dev.yaml up -d` (see §13)
   - Run DB migrations: `docker compose ... --profile migrate run --rm migrate` or `alembic upgrade head`
   - Configure Retell agent (§10) with tunnel `APP_BASE_URL` if needed
   - Create clinic + EHR config via admin API (§13.2–13.3) or Swagger
   - Upload CSV + start campaign via Swagger or scripted client (§13.4)
   - Confirm logs + DB as in §13.5
+  - **Remaining:** run one appointment-based path that completes `book_appointment` → Browser-Use → NextGen confirmation (or document deferral)
 
 ---
 
@@ -2693,6 +2696,6 @@ Replaces old `agentql:selector:{clinic_id}:{element_name}` keys.
 
 ---
 
-*Last updated: 2026-03-30 (Plan 020 implemented — unified Retell webhook)*
+*Last updated: 2026-04-12 — Plan 014 E2E verified; EHR booking test remaining*
 *Maintained by: Edgar J. Suárez Colón*
-*Next action: **Plan 014 Sprint B/C** Retell dashboard setup (use `/retell/webhook`); then **Plan 014 Sprint C E2E gate** per `docs/local_test_guide.md`. Manual Browser-Use validation: `cd browser-use-test && python test_nextgen_browseruse.py` against real NextGen + Ollama before pilot with real patients.*
+*Next action: **Plan 014 — test EHR booking** — exercise `POST /retell/tools/book_appointment` (Retell voice path or direct HMAC call) so `PlaywrightEHRService.book_appointment` completes a real NextGen submit + confirmation; see `docs/local_test_guide.md`. Optional: `cd browser-use-test && python test_nextgen_browseruse.py` for NextGen login/slots sanity. Then **Plan 012** (API security) before broader clinic use.*

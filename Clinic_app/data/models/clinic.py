@@ -1,8 +1,8 @@
 # data/models/clinic.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Integer, DateTime, Text
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from Clinic_app.common.database import Base
 
 
@@ -21,6 +21,8 @@ class Clinic(Base):
     license_expires_at = Column(DateTime(timezone=True), nullable=True)
     business_hours_start = Column(String(5), nullable=False, default="09:00")  # HH:MM format
     business_hours_end = Column(String(5), nullable=False, default="17:00")  # HH:MM format
+    max_concurrency = Column(Integer, nullable=False, default=3)
+    features = Column(JSONB, nullable=False, default=dict)  # {"reminders": true, "hedis": false}
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     def __repr__(self):

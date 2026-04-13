@@ -11,6 +11,7 @@ Core responsibilities:
 """
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -28,9 +29,24 @@ from Clinic_app.data.models.campaign import Campaign
 from Clinic_app.data.models.campaign_contact import CampaignContact
 from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
+from Clinic_app.services.clinic_service import get_clinic_settings
 from Clinic_app.services.csv_parser import ParsedRow
 
 logger = logging.getLogger(__name__)
+
+
+def _allow_campaign_start_without_ehr_verification() -> bool:
+    """
+    Local/dev only: when ALLOW_CAMPAIGN_START_WITHOUT_EHR is truthy and
+    APP_ENVIRONMENT is development, dev, or local, skip NextGen verification at start.
+    Never enabled in production/staging or when APP_ENVIRONMENT is unset/unknown.
+    """
+    app_env = os.environ.get("APP_ENVIRONMENT", "").strip().lower()
+    if app_env not in ("development", "dev", "local"):
+        return False
+    flag = os.environ.get("ALLOW_CAMPAIGN_START_WITHOUT_EHR", "").strip().lower()
+    return flag in ("1", "true", "yes", "on")
+
 
 # Terminal statuses — contacts in these states are excluded from dedup skipping
 # (a BOOKED contact should block re-upload; EXHAUSTED/DECLINED also block)
@@ -382,36 +398,76 @@ async def expire_overdue_hospital_flu_contacts(
     return len(contacts)
 
 
+def _apply_clinic_operational_defaults_to_campaign(
+    campaign: Campaign,
+    integration: ClinicIntegration,
+) -> None:
+    """
+    Copy current clinic integration operational fields onto the campaign row.
+    Matches create_campaign inheritance so PATCH /clinic/settings applies on
+    start/resume, not only at CSV upload.
+    """
+    campaign.calling_hours_start = integration.calling_hours_start
+    campaign.calling_hours_end = integration.calling_hours_end
+    campaign.campaign_concurrency_limit = integration.campaign_concurrency_limit
+    campaign.voicemail_retry_hours = integration.voicemail_retry_hours
+    campaign.no_answer_retry_hours = integration.no_answer_retry_hours
+    campaign.error_retry_hours = integration.error_retry_hours
+    campaign.max_attempts = integration.max_attempts
+
+
 async def start_campaign(
     db: AsyncSession,
     clinic_id: UUID,
     campaign_id: UUID,
 ) -> Campaign:
     """
-    PENDING -> ACTIVE. Requires verified EHR credentials for the clinic.
+    PENDING or CANCELED -> ACTIVE. Restarts a previously canceled campaign without
+    changing contacts or progress counters (cancel does not alter contact rows).
+    Refreshes calling hours, concurrency, and retry settings from the clinic's
+    current integration row so Swagger/settings changes apply at start time.
+    Requires verified EHR credentials unless dev bypass is set
+    (see ALLOW_CAMPAIGN_START_WITHOUT_EHR + APP_ENVIRONMENT in env.example).
     """
     campaign = await get_campaign(db, clinic_id, campaign_id)
-    if campaign.status != CampaignStatus.PENDING.value:
+    if campaign.status not in (
+        CampaignStatus.PENDING.value,
+        CampaignStatus.CANCELED.value,
+    ):
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "INVALID_TRANSITION",
-                "message": f"Campaign cannot be started from status '{campaign.status}'. Must be pending.",
+                "message": (
+                    f"Campaign cannot be started from status '{campaign.status}'. "
+                    "Must be pending or canceled (use resume if paused)."
+                ),
             },
         )
 
-    ehr_result = await db.execute(
-        select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
-    )
-    ehr = ehr_result.scalar_one_or_none()
-    if ehr is None or ehr.connection_verified_at is None:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "EHR_NOT_VERIFIED",
-                "message": "NextGen EHR credentials must be configured and verified before starting a campaign.",
-            },
+    if not _allow_campaign_start_without_ehr_verification():
+        ehr_result = await db.execute(
+            select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
         )
+        ehr = ehr_result.scalar_one_or_none()
+        if ehr is None or ehr.connection_verified_at is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "EHR_NOT_VERIFIED",
+                    "message": "NextGen EHR credentials must be configured and verified before starting a campaign.",
+                },
+            )
+    else:
+        logger.warning(
+            "Campaign start without EHR verification (ALLOW_CAMPAIGN_START_WITHOUT_EHR); "
+            "clinic_id=%s campaign_id=%s",
+            clinic_id,
+            campaign_id,
+        )
+
+    integration = await get_clinic_settings(db, clinic_id)
+    _apply_clinic_operational_defaults_to_campaign(campaign, integration)
 
     campaign.status = CampaignStatus.ACTIVE.value
     await db.commit()
@@ -494,6 +550,7 @@ async def resume_campaign(
 ) -> Campaign:
     """
     Set campaign status to ACTIVE. Raises 409 if not currently PAUSED.
+    Refreshes operational defaults from clinic integration (same as start_campaign).
     """
     campaign = await get_campaign(db, clinic_id, campaign_id)
     if campaign.status != CampaignStatus.PAUSED.value:
@@ -504,6 +561,8 @@ async def resume_campaign(
                 "message": f"Campaign cannot be resumed from status '{campaign.status}'. Must be paused.",
             },
         )
+    integration = await get_clinic_settings(db, clinic_id)
+    _apply_clinic_operational_defaults_to_campaign(campaign, integration)
     campaign.status = CampaignStatus.ACTIVE.value
     await db.commit()
     await db.refresh(campaign)
@@ -517,7 +576,8 @@ async def cancel_campaign(
     campaign_id: UUID,
 ) -> Campaign:
     """
-    Set campaign status to CANCELED. Terminal — cannot be reversed.
+    Set campaign status to CANCELED. Contact rows and counters are unchanged;
+    call POST /campaigns/{id}/start again to resume dialing (same as un-canceled restart).
     Raises 409 if already completed or canceled.
     """
     campaign = await get_campaign(db, clinic_id, campaign_id)

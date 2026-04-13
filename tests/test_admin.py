@@ -4,7 +4,6 @@ Unit tests for Admin Routes.
 Tests cover:
 - Clinic CRUD (setup, create, get, update, list)
 - Integration CRUD (create, get, update)
-- License CRUD (create, get, update)
 - Business hours management
 """
 
@@ -20,7 +19,6 @@ from Clinic_app.Routes.admin import (
     ClinicCreateRequest,
     ClinicUpdateRequest,
     IntegrationCreateRequest,
-    LicenseCreateRequest,
     BusinessHoursRequest,
     validate_e164_phone,
     validate_time_format
@@ -53,12 +51,6 @@ def sample_integration_id():
 
 
 @pytest.fixture
-def sample_license_id():
-    """Generate a sample license UUID."""
-    return uuid4()
-
-
-@pytest.fixture
 def mock_clinic(sample_clinic_id):
     """Create a mock Clinic object."""
     clinic = Mock()
@@ -85,19 +77,6 @@ def mock_integration(sample_integration_id, sample_clinic_id):
     integration.retell_agent_id = "agent_123"
     integration.retell_did = "+15559876543"
     return integration
-
-
-@pytest.fixture
-def mock_license(sample_license_id, sample_clinic_id):
-    """Create a mock ClinicLicense object."""
-    license_obj = Mock()
-    license_obj.id = sample_license_id
-    license_obj.clinic_id = sample_clinic_id
-    license_obj.tier = "professional"
-    license_obj.max_providers = 10
-    license_obj.max_outbound_calls_month = 1000
-    license_obj.expires_at = datetime.now(timezone.utc) + timedelta(days=365)
-    return license_obj
 
 
 @pytest.fixture
@@ -189,28 +168,25 @@ class TestClinicEndpoints:
         clinic = ClinicCreateRequest(
             name="Test Clinic",
             tier="basic",
-            license_token="test_token_123"
+            license_token="test_token_123",
+            max_concurrency=5,
+            features={"hedis": True},
         )
         integration = IntegrationCreateRequest(
             retell_agent_id="agent_123",
             retell_did="+15551234567",
             google_service_account_json='{"type": "service_account", "project_id": "test", "private_key_id": "123", "private_key": "key", "client_email": "test@test.iam.gserviceaccount.com"}'
         )
-        license_req = LicenseCreateRequest(
-            token="license_token",
-            tier="basic",
-            max_concurrency=5
-        )
         
         request = ClinicSetupRequest(
             clinic=clinic,
             integration=integration,
-            license=license_req
         )
         
         assert request.clinic.name == "Test Clinic"
+        assert request.clinic.max_concurrency == 5
+        assert request.clinic.features == {"hedis": True}
         assert request.integration.retell_agent_id == "agent_123"
-        assert request.license.tier == "basic"
     
     def test_clinic_update_request_partial(self):
         """Test ClinicUpdateRequest with partial data."""
@@ -273,38 +249,6 @@ class TestIntegrationEndpoints:
         result = mock_result.scalar_one_or_none()
         
         assert result.retell_agent_id == "agent_123"
-
-
-# ============================================================================
-# TEST LICENSE ENDPOINTS
-# ============================================================================
-
-class TestLicenseEndpoints:
-    """Tests for license CRUD endpoints."""
-    
-    def test_license_create_request_valid(self):
-        """Test LicenseCreateRequest with valid data."""
-        request = LicenseCreateRequest(
-            token="test_license_token",
-            tier="pro",
-            max_concurrency=10
-        )
-        
-        assert request.tier == "pro"
-        assert request.max_concurrency == 10
-    
-    @pytest.mark.asyncio
-    async def test_get_license_success(
-        self, mock_db_session, mock_license
-    ):
-        """Test successful license retrieval conceptually."""
-        mock_result = Mock()
-        mock_result.scalar_one_or_none.return_value = mock_license
-        mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
-        result = mock_result.scalar_one_or_none()
-        
-        assert result.tier == "professional"
 
 
 # ============================================================================
@@ -447,18 +391,20 @@ class TestPydanticDefaults:
             license_token="test_token"
         )
         
-        # Check defaults
         assert request.status == "active"
-    
-    def test_license_create_defaults(self):
-        """Test LicenseCreateRequest has correct defaults."""
-        request = LicenseCreateRequest(
-            token="test_token",
-            tier="basic",
-            max_concurrency=5
+        assert request.max_concurrency == 3
+        assert request.features == {}
+
+    def test_clinic_create_custom_concurrency(self):
+        """Test ClinicCreateRequest with explicit max_concurrency and features."""
+        request = ClinicCreateRequest(
+            name="Test Clinic",
+            tier="pro",
+            license_token="test_token",
+            max_concurrency=10,
+            features={"hedis": True, "reminders": False},
         )
-        
-        # Most fields should have defaults
-        assert request.tier == "basic"
-        assert request.status == "active"
+
+        assert request.max_concurrency == 10
+        assert request.features == {"hedis": True, "reminders": False}
 
