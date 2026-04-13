@@ -356,7 +356,7 @@ Open a terminal (outside Docker — on your Windows machine) and run:
 python -c "
 import jwt, datetime, uuid
 SECRET = 'test-jwt-secret-123'
-CLINIC_ID = 'PASTE_YOUR_CLINIC_ID_HERE'
+CLINIC_ID = 'e2b04e6e-a874-45d1-9c09-e0d519019a1a'
 payload = {
     'sub': 'test-user',
     'email': 'test@clinic.com',
@@ -398,6 +398,8 @@ Copy the printed token. It will look like `eyJhbGci...`
 1. Find **POST /campaigns/{campaign_id}/start** → click **Try it out**
 2. Enter your `CAMPAIGN_ID`
 3. Click **Execute**
+
+By default the API returns **422 `EHR_NOT_VERIFIED`** until NextGen credentials are saved and **POST /admin/clinics/{id}/ehr-test** has succeeded. For local voice testing only (no booking), set `APP_ENVIRONMENT` to `development`, `dev`, or `local` and add `ALLOW_CAMPAIGN_START_WITHOUT_EHR=true` in `.env`, then restart the app. That skips the start-time EHR check; gaps that need NextGen tools can still fail later until EHR is configured.
 
 ---
 

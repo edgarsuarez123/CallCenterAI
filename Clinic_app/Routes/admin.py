@@ -1,7 +1,7 @@
 """
 Admin routes for clinic management.
 
-Handles clinic, integration, and license CRUD operations.
+Handles clinic, integration, staff, booking, and EHR CRUD operations.
 Routes handle database operations directly (no service layer).
 """
 
@@ -22,7 +22,6 @@ from Clinic_app.common.database import get_db
 from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.data.models.clinic_staff import ClinicStaff
-from Clinic_app.data.models.license import License
 from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
 from Clinic_app.data.enums import BookingStatus, GapType
@@ -40,7 +39,6 @@ admin_router = APIRouter(prefix="/admin", tags=["admin"])
 # Validation constants
 VALID_CLINIC_TIERS = ["basic", "pro", "enterprise"]
 VALID_CLINIC_STATUSES = ["active", "suspended"]
-VALID_LICENSE_STATUSES = ["active", "suspended", "expired"]
 DEFAULT_APPOINTMENT_LENGTH = 15
 DEFAULT_CAPACITY = 1
 E164_PATTERN = re.compile(r'^\+[1-9]\d{1,14}$')
@@ -131,6 +129,8 @@ class ClinicBase(BaseModel):
     license_token: str
     license_expires_at: Optional[datetime] = None
     network_id: Optional[UUID] = None
+    max_concurrency: int = 3
+    features: Dict[str, Any] = {}
 
     @field_validator('tier')
     @classmethod
@@ -144,6 +144,13 @@ class ClinicBase(BaseModel):
     def validate_status(cls, v):
         if v not in VALID_CLINIC_STATUSES:
             raise ValueError(f"status must be one of {VALID_CLINIC_STATUSES}")
+        return v
+
+    @field_validator('max_concurrency')
+    @classmethod
+    def validate_max_concurrency(cls, v):
+        if v < 1:
+            raise ValueError("max_concurrency must be a positive integer")
         return v
 
 
@@ -160,6 +167,8 @@ class ClinicUpdateRequest(BaseModel):
     license_token: Optional[str] = None
     license_expires_at: Optional[datetime] = None
     network_id: Optional[UUID] = None
+    max_concurrency: Optional[int] = None
+    features: Optional[Dict[str, Any]] = None
 
     @field_validator('tier')
     @classmethod
@@ -173,6 +182,13 @@ class ClinicUpdateRequest(BaseModel):
     def validate_status(cls, v):
         if v is not None and v not in VALID_CLINIC_STATUSES:
             raise ValueError(f"status must be one of {VALID_CLINIC_STATUSES}")
+        return v
+
+    @field_validator('max_concurrency')
+    @classmethod
+    def validate_max_concurrency(cls, v):
+        if v is not None and v < 1:
+            raise ValueError("max_concurrency must be a positive integer")
         return v
 
 
@@ -227,46 +243,10 @@ class ApptTypesPutRequest(BaseModel):
         return v
 
 
-class LicenseBase(BaseModel):
-    """Base license model."""
-    token: str
-    tier: str
-    status: str = "active"
-    max_concurrency: int
-    features: Dict[str, Any] = {}
-
-    @field_validator('tier')
-    @classmethod
-    def validate_tier(cls, v):
-        if v not in VALID_CLINIC_TIERS:
-            raise ValueError(f"tier must be one of {VALID_CLINIC_TIERS}")
-        return v
-
-    @field_validator('status')
-    @classmethod
-    def validate_status(cls, v):
-        if v not in VALID_LICENSE_STATUSES:
-            raise ValueError(f"status must be one of {VALID_LICENSE_STATUSES}")
-        return v
-
-    @field_validator('max_concurrency')
-    @classmethod
-    def validate_max_concurrency(cls, v):
-        if v <= 0:
-            raise ValueError("max_concurrency must be a positive integer")
-        return v
-
-
-class LicenseCreateRequest(LicenseBase):
-    """Request model for creating/updating license."""
-    pass
-
-
 class ClinicSetupRequest(BaseModel):
-    """Request model for clinic setup (creates clinic + integration + license)."""
+    """Request model for clinic setup (creates clinic + integration atomically)."""
     clinic: ClinicCreateRequest
     integration: IntegrationCreateRequest
-    license: LicenseCreateRequest
 
 
 class ClinicResponse(BaseModel):
@@ -278,6 +258,8 @@ class ClinicResponse(BaseModel):
     license_token: str
     license_expires_at: Optional[datetime]
     network_id: Optional[UUID]
+    max_concurrency: int
+    features: Dict[str, Any]
     created_at: datetime
 
     class Config:
@@ -292,10 +274,10 @@ async def setup_clinic(
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
     """
-    Create a new clinic with integration and license in a single transaction.
+    Create a new clinic with integration in a single transaction.
     
-    This is a convenience endpoint for initial clinic onboarding. All three
-    records (Clinic, ClinicIntegration, License) are created atomically.
+    This is a convenience endpoint for initial clinic onboarding. Both
+    records (Clinic, ClinicIntegration) are created atomically.
     """
     try:
         logger.info(f"Creating clinic setup: name={request.clinic.name}, tier={request.clinic.tier}")
@@ -308,14 +290,16 @@ async def setup_clinic(
             logger.warning(f"Duplicate license_token attempted: {request.clinic.license_token}")
             raise_conflict_error(f"License token '{request.clinic.license_token}' already exists", "DUPLICATE_LICENSE_TOKEN")
         
-        # Create Clinic
+        # Create Clinic (includes subscription fields: tier, max_concurrency, features)
         clinic = Clinic(
             name=request.clinic.name,
             tier=request.clinic.tier,
             status=request.clinic.status,
             license_token=request.clinic.license_token,
             license_expires_at=request.clinic.license_expires_at,
-            network_id=request.clinic.network_id
+            network_id=request.clinic.network_id,
+            max_concurrency=request.clinic.max_concurrency,
+            features=request.clinic.features,
         )
         db.add(clinic)
         await db.flush()  # Get clinic.id
@@ -330,17 +314,6 @@ async def setup_clinic(
             default_capacity=request.integration.default_capacity
         )
         db.add(integration)
-        
-        # Create License
-        license = License(
-            clinic_id=clinic.id,
-            token=request.license.token,
-            tier=request.license.tier,
-            status=request.license.status,
-            max_concurrency=request.license.max_concurrency,
-            features=request.license.features
-        )
-        db.add(license)
         
         await db.commit()
         logger.info(f"Clinic created successfully: clinic_id={clinic.id}, name={clinic.name}")
@@ -377,7 +350,7 @@ async def create_clinic(
     request: ClinicCreateRequest,
     db: AsyncSession = Depends(get_db)
 ) -> APIResponse:
-    """Create a clinic only (without integration/license)."""
+    """Create a clinic only (without integration)."""
     try:
         logger.info(f"Creating clinic: name={request.name}, tier={request.tier}")
         
@@ -395,7 +368,9 @@ async def create_clinic(
             status=request.status,
             license_token=request.license_token,
             license_expires_at=request.license_expires_at,
-            network_id=request.network_id
+            network_id=request.network_id,
+            max_concurrency=request.max_concurrency,
+            features=request.features,
         )
         db.add(clinic)
         await db.commit()
@@ -675,184 +650,6 @@ async def update_integration(
             detail={
                 "code": "INTERNAL_ERROR",
                 "message": "Failed to update integration"
-            }
-        )
-
-
-@admin_router.post("/clinics/{clinic_id}/license", response_model=APIResponse)
-async def create_license(
-    clinic_id: UUID,
-    request: LicenseCreateRequest,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """Create or update clinic license."""
-    # Check clinic exists
-    clinic = await db.get(Clinic, clinic_id)
-    if not clinic:
-        raise_not_found("Clinic", clinic_id)
-    
-    try:
-        logger.info(f"Creating/updating license: clinic_id={clinic_id}")
-        
-        # Check if license already exists
-        license = await db.get(License, clinic_id)
-        
-        if license:
-            # Update existing
-            license.token = request.token
-            license.tier = request.tier
-            license.status = request.status
-            license.max_concurrency = request.max_concurrency
-            license.features = request.features
-            license.updated_at = datetime.utcnow()
-        else:
-            # Check if token already exists
-            stmt = select(License).where(License.token == request.token)
-            result = await db.execute(stmt)
-            existing = result.scalar_one_or_none()
-            if existing:
-                logger.warning(f"Duplicate license token attempted: {request.token}")
-                raise_conflict_error(f"License token '{request.token}' already exists", "DUPLICATE_LICENSE_TOKEN")
-            
-            # Create new
-            license = License(
-                clinic_id=clinic_id,
-                token=request.token,
-                tier=request.tier,
-                status=request.status,
-                max_concurrency=request.max_concurrency,
-                features=request.features
-            )
-            db.add(license)
-        
-        await db.commit()
-        logger.info(f"License updated: clinic_id={clinic_id}")
-        
-        return APIResponse(
-            success=True,
-            data={
-                "clinic_id": str(license.clinic_id),
-                "token": license.token,
-                "tier": license.tier,
-                "status": license.status,
-                "max_concurrency": license.max_concurrency,
-                "features": license.features
-            },
-            message="License created/updated successfully"
-        )
-        
-    except HTTPException:
-        await db.rollback()
-        raise
-    except IntegrityError as e:
-        await db.rollback()
-        logger.error(f"Database integrity error creating license: {str(e)}", exc_info=True)
-        if "token" in str(e.orig):
-            raise_conflict_error("License token already exists", "DUPLICATE_LICENSE_TOKEN")
-        raise_conflict_error("Database constraint violation", "CONSTRAINT_VIOLATION")
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Unexpected error creating license: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to create/update license"
-            }
-        )
-
-
-@admin_router.get("/clinics/{clinic_id}/license", response_model=APIResponse)
-async def get_license(
-    clinic_id: UUID,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """Get clinic license."""
-    license = await db.get(License, clinic_id)
-    
-    if not license:
-        raise_not_found("License", clinic_id)
-    
-    return APIResponse(
-        success=True,
-        data={
-            "clinic_id": str(license.clinic_id),
-            "token": license.token,
-            "tier": license.tier,
-            "status": license.status,
-            "max_concurrency": license.max_concurrency,
-            "features": license.features,
-            "issued_at": license.issued_at.isoformat(),
-            "updated_at": license.updated_at.isoformat()
-        }
-    )
-
-
-@admin_router.put("/clinics/{clinic_id}/license", response_model=APIResponse)
-async def update_license(
-    clinic_id: UUID,
-    request: LicenseCreateRequest,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """Update clinic license."""
-    license = await db.get(License, clinic_id)
-    
-    if not license:
-        raise_not_found("License", clinic_id)
-    
-    try:
-        logger.info(f"Updating license: clinic_id={clinic_id}")
-        
-        # Check token uniqueness if being updated
-        if request.token != license.token:
-            stmt = select(License).where(
-                License.token == request.token,
-                License.clinic_id != clinic_id
-            )
-            result = await db.execute(stmt)
-            existing = result.scalar_one_or_none()
-            if existing:
-                logger.warning(f"Duplicate license token attempted: {request.token}")
-                raise_conflict_error(f"License token '{request.token}' already exists", "DUPLICATE_LICENSE_TOKEN")
-        
-        license.token = request.token
-        license.tier = request.tier
-        license.status = request.status
-        license.max_concurrency = request.max_concurrency
-        license.features = request.features
-        license.updated_at = datetime.utcnow()
-        
-        await db.commit()
-        logger.info(f"License updated: clinic_id={clinic_id}")
-        
-        return APIResponse(
-            success=True,
-            data={
-                "clinic_id": str(license.clinic_id),
-                "token": license.token,
-                "tier": license.tier,
-                "status": license.status,
-                "max_concurrency": license.max_concurrency,
-                "features": license.features
-            },
-            message="License updated successfully"
-        )
-        
-    except HTTPException:
-        await db.rollback()
-        raise
-    except IntegrityError as e:
-        await db.rollback()
-        logger.error(f"Database integrity error updating license: {str(e)}", exc_info=True)
-        raise_conflict_error("Database constraint violation", "CONSTRAINT_VIOLATION")
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Unexpected error updating license: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to update license"
             }
         )
 

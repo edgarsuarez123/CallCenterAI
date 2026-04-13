@@ -63,7 +63,31 @@ def _make_campaign(status: str = CampaignStatus.ACTIVE.value):
     c.called_count = 3
     c.booked_count = 1
     c.failed_count = 0
+    c.calling_hours_start = "09:00"
+    c.calling_hours_end = "18:00"
+    c.campaign_concurrency_limit = 3
+    c.voicemail_retry_hours = 4
+    c.no_answer_retry_hours = 2
+    c.error_retry_hours = 24
+    c.max_attempts = 3
     return c
+
+
+def _make_clinic_integration_mock(
+    *,
+    calling_hours_start: str = "10:00",
+    calling_hours_end: str = "19:00",
+):
+    """Matches fields read by _apply_clinic_operational_defaults_to_campaign."""
+    m = MagicMock()
+    m.calling_hours_start = calling_hours_start
+    m.calling_hours_end = calling_hours_end
+    m.campaign_concurrency_limit = 5
+    m.voicemail_retry_hours = 4
+    m.no_answer_retry_hours = 2
+    m.error_retry_hours = 24
+    m.max_attempts = 3
+    return m
 
 
 # ── phone hashing + encryption ────────────────────────────────────────────────
@@ -202,14 +226,18 @@ class TestResumeCampaign:
         from Clinic_app.services.campaign_service import resume_campaign
         campaign = _make_campaign(CampaignStatus.PAUSED.value)
         mock_db = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = campaign
-        mock_db.execute = AsyncMock(return_value=mock_result)
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        integ = _make_clinic_integration_mock()
+        integ_res = MagicMock()
+        integ_res.scalar_one_or_none.return_value = integ
+        mock_db.execute = AsyncMock(side_effect=[camp_res, integ_res])
         mock_db.commit = AsyncMock()
         mock_db.refresh = AsyncMock()
 
         result = await resume_campaign(mock_db, campaign.clinic_id, campaign.id)
         assert result.status == CampaignStatus.ACTIVE.value
+        assert campaign.calling_hours_start == integ.calling_hours_start
 
     async def test_resume_active_raises_409(self):
         from Clinic_app.services.campaign_service import resume_campaign
@@ -284,11 +312,49 @@ class TestStartCampaign:
         camp_res.scalar_one_or_none.return_value = campaign
         ehr_res = MagicMock()
         ehr_res.scalar_one_or_none.return_value = ehr
-        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res])
+        integ = _make_clinic_integration_mock()
+        integ_res = MagicMock()
+        integ_res.scalar_one_or_none.return_value = integ
+        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res, integ_res])
         mock_db.commit = AsyncMock()
         mock_db.refresh = AsyncMock()
 
-        out = await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        with patch.dict(
+            os.environ,
+            {"ALLOW_CAMPAIGN_START_WITHOUT_EHR": "false"},
+            clear=False,
+        ):
+            out = await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert out.status == CampaignStatus.ACTIVE.value
+        assert campaign.calling_hours_start == integ.calling_hours_start
+        assert campaign.calling_hours_end == integ.calling_hours_end
+        assert campaign.campaign_concurrency_limit == integ.campaign_concurrency_limit
+
+    async def test_start_from_canceled_with_verified_ehr(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.CANCELED.value)
+        ehr = MagicMock()
+        ehr.connection_verified_at = datetime.now(timezone.utc)
+
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        ehr_res = MagicMock()
+        ehr_res.scalar_one_or_none.return_value = ehr
+        integ = _make_clinic_integration_mock()
+        integ_res = MagicMock()
+        integ_res.scalar_one_or_none.return_value = integ
+        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res, integ_res])
+        mock_db.commit = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        with patch.dict(
+            os.environ,
+            {"ALLOW_CAMPAIGN_START_WITHOUT_EHR": "false"},
+            clear=False,
+        ):
+            out = await start_campaign(mock_db, campaign.clinic_id, campaign.id)
         assert out.status == CampaignStatus.ACTIVE.value
 
     async def test_start_without_ehr_raises_422(self):
@@ -302,8 +368,66 @@ class TestStartCampaign:
         ehr_res.scalar_one_or_none.return_value = None
         mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res])
 
-        with pytest.raises(HTTPException) as exc_info:
-            await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENVIRONMENT": "development",
+                "ALLOW_CAMPAIGN_START_WITHOUT_EHR": "false",
+            },
+            clear=False,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail["code"] == "EHR_NOT_VERIFIED"
+
+    async def test_start_without_ehr_allowed_when_dev_flag_set(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.PENDING.value)
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        integ = _make_clinic_integration_mock()
+        integ_res = MagicMock()
+        integ_res.scalar_one_or_none.return_value = integ
+        mock_db.execute = AsyncMock(side_effect=[camp_res, integ_res])
+        mock_db.commit = AsyncMock()
+        mock_db.refresh = AsyncMock()
+
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENVIRONMENT": "development",
+                "ALLOW_CAMPAIGN_START_WITHOUT_EHR": "true",
+            },
+            clear=False,
+        ):
+            out = await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert out.status == CampaignStatus.ACTIVE.value
+        assert mock_db.execute.await_count == 2
+
+    async def test_start_without_ehr_still_enforced_in_production_with_flag(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.PENDING.value)
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        ehr_res = MagicMock()
+        ehr_res.scalar_one_or_none.return_value = None
+        mock_db.execute = AsyncMock(side_effect=[camp_res, ehr_res])
+
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENVIRONMENT": "production",
+                "ALLOW_CAMPAIGN_START_WITHOUT_EHR": "true",
+            },
+            clear=False,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await start_campaign(mock_db, campaign.clinic_id, campaign.id)
         assert exc_info.value.status_code == 422
         assert exc_info.value.detail["code"] == "EHR_NOT_VERIFIED"
 
@@ -319,6 +443,20 @@ class TestStartCampaign:
         with pytest.raises(HTTPException) as exc_info:
             await start_campaign(mock_db, campaign.clinic_id, campaign.id)
         assert exc_info.value.status_code == 409
+
+    async def test_start_paused_raises_409(self):
+        from Clinic_app.services.campaign_service import start_campaign
+
+        campaign = _make_campaign(CampaignStatus.PAUSED.value)
+        mock_db = AsyncMock()
+        camp_res = MagicMock()
+        camp_res.scalar_one_or_none.return_value = campaign
+        mock_db.execute = AsyncMock(return_value=camp_res)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await start_campaign(mock_db, campaign.clinic_id, campaign.id)
+        assert exc_info.value.status_code == 409
+        assert "resume" in exc_info.value.detail["message"].lower()
 
 
 # ── get_next_eligible_contact ─────────────────────────────────────────────────

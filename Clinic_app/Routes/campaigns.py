@@ -395,7 +395,7 @@ async def get_campaign_audits(
     return out
 
 
-# ── Start (PENDING -> ACTIVE) ────────────────────────────────────────────────
+# ── Start (PENDING or CANCELED -> ACTIVE) ────────────────────────────────────
 
 @campaign_router.post("/{campaign_id}/start", response_model=CampaignResponse)
 async def start_campaign_route(
@@ -403,7 +403,7 @@ async def start_campaign_route(
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
 ) -> CampaignResponse:
-    """Start a pending campaign and ensure the clinic worker is running. Admin only."""
+    """Start a pending campaign or restart a canceled one; ensures the clinic worker runs. Admin only."""
     _require_admin(staff)
     campaign = await start_campaign(db, staff.clinic_id, campaign_id)
     await campaign_worker_manager.start_clinic_worker(staff.clinic_id)
