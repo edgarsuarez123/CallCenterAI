@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.database import get_db
+from Clinic_app.common.rate_limit import auth_rate_limit, upload_rate_limit
 from Clinic_app.common.encryption import decrypt_phi
 from Clinic_app.common.jwt import StaffToken, require_scoped_staff
 from Clinic_app.data.enums import CampaignStatus, ContactStatus
@@ -168,6 +169,7 @@ async def upload_campaign(
     measurement_year: int = Form(default=datetime.utcnow().year),
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(upload_rate_limit()),
 ) -> CampaignUploadResponse:
     """
     Upload a CSV or Excel patient list to create a HEDIS outreach campaign.
@@ -402,6 +404,7 @@ async def start_campaign_route(
     campaign_id: UUID,
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> CampaignResponse:
     """Start a pending campaign or restart a canceled one; ensures the clinic worker runs. Admin only."""
     _require_admin(staff)
@@ -417,6 +420,7 @@ async def pause_campaign_route(
     campaign_id: UUID,
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> CampaignResponse:
     """Pause an active campaign. Admin only."""
     _require_admin(staff)
@@ -431,6 +435,7 @@ async def resume_campaign_route(
     campaign_id: UUID,
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> CampaignResponse:
     """Resume a paused campaign. Admin only."""
     _require_admin(staff)
@@ -446,6 +451,7 @@ async def cancel_campaign_route(
     campaign_id: UUID,
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> CampaignResponse:
     """Cancel a campaign. Terminal — cannot be reversed. Admin only."""
     _require_admin(staff)

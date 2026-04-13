@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from Clinic_app.common.database import get_db
+from Clinic_app.common.rate_limit import auth_rate_limit
 from Clinic_app.common.jwt import (
     StaffToken,
     create_state_token,
@@ -68,7 +69,9 @@ class MeResponse(BaseModel):
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @auth_router.get("/google", summary="Initiate Google OAuth login")
-async def google_login() -> RedirectResponse:
+async def google_login(
+    _rl: None = Depends(auth_rate_limit()),
+) -> RedirectResponse:
     """
     Redirect the user to Google's OAuth consent screen.
     A signed state token is embedded in the URL for CSRF protection.
@@ -83,6 +86,7 @@ async def google_callback(
     code: str,
     state: str,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> TokenResponse:
     """
     Handle the Google OAuth callback.
@@ -139,6 +143,7 @@ async def google_callback(
 async def get_me(
     staff: StaffToken = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> MeResponse:
     """
     Return all clinic memberships for the authenticated staff member.
@@ -171,6 +176,7 @@ async def select_clinic(
     request: SelectClinicRequest,
     staff: StaffToken = Depends(get_current_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> TokenResponse:
     """
     Upgrade an unscoped token to a scoped token for a specific clinic.

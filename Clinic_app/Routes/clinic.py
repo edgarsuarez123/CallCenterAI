@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.database import get_db
 from Clinic_app.common.jwt import StaffToken, require_scoped_staff
+from Clinic_app.common.rate_limit import auth_rate_limit
 from Clinic_app.services.clinic_service import get_clinic_settings, update_clinic_settings
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,7 @@ async def patch_settings(
     body: ClinicSettingsPatch,
     staff: StaffToken = Depends(require_scoped_staff),
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(auth_rate_limit()),
 ) -> ClinicSettingsResponse:
     """Update operational settings for the clinic. Requires admin role."""
     if staff.role != "admin":

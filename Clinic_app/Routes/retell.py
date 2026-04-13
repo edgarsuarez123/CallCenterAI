@@ -37,7 +37,9 @@ from Clinic_app.data.enums import (
     ORDER_BASED_GAP_TYPES,
 )
 from Clinic_app.common.auth import verify_admin_api_key
+from Clinic_app.common.claude_rate_limit import check_and_increment as claude_check
 from Clinic_app.common.encryption import encrypt_phi
+from Clinic_app.common.rate_limit import webhook_rate_limit
 from Clinic_app.services.campaign_service import maybe_mark_campaign_completed
 from Clinic_app.services.call_summarizer import (
     extract_order_based_notes_sync,
@@ -1866,6 +1868,14 @@ async def _handle_call_analyzed(db: AsyncSession, call_obj: Dict[str, Any]) -> D
                 contact.gap_type,
                 contact.id,
             )
+    elif not await claude_check(clinic_id):
+        # Per-clinic Claude rate limit exceeded — use fallback; audit row still written.
+        logger.warning(
+            "call_analyzed: Claude rate limit exceeded for clinic_id=%s; "
+            "using fallback summary",
+            clinic_id,
+        )
+        summary = "Call summary unavailable (rate limit)."
     elif _gap_type_is_order_based(contact.gap_type):
         try:
             notes = await asyncio.to_thread(
@@ -1942,6 +1952,7 @@ async def _handle_call_analyzed(db: AsyncSession, call_obj: Dict[str, Any]) -> D
 async def webhook_unified(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(webhook_rate_limit()),
 ) -> Dict[str, str]:
     """
     Single Retell webhook URL: all lifecycle events POST here with JSON `event` field.
@@ -1971,6 +1982,7 @@ async def webhook_unified(
 async def webhook_call_started(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(webhook_rate_limit()),
 ) -> Dict[str, str]:
     """Alias for manual testing; production Retell config should use POST /retell/webhook."""
     body_bytes = await request.body()
@@ -1984,6 +1996,7 @@ async def webhook_call_started(
 async def webhook_call_ended(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(webhook_rate_limit()),
 ) -> Dict[str, str]:
     """Alias for manual testing; production Retell config should use POST /retell/webhook."""
     body_bytes = await request.body()
@@ -1997,6 +2010,7 @@ async def webhook_call_ended(
 async def webhook_call_analyzed(
     request: Request,
     db: AsyncSession = Depends(get_db),
+    _rl: None = Depends(webhook_rate_limit()),
 ) -> Dict[str, str]:
     """Alias for manual testing; production Retell config should use POST /retell/webhook."""
     body_bytes = await request.body()

@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import logging
 
 from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from Clinic_app.Routes.health import health_router
@@ -14,6 +15,7 @@ from Clinic_app.Routes.clinic import clinic_router
 from Clinic_app.Routes.campaigns import campaign_router
 from Clinic_app.common.auth import verify_admin_api_key
 from Clinic_app.common.redis import close_redis
+from Clinic_app.common.rate_limit import admin_rate_limit
 from Clinic_app.workers.booking_reaper import scheduler, run_booking_reaper
 from Clinic_app.workers.campaign_worker import (
     campaign_worker_manager,
@@ -28,6 +30,23 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
+_allowed_origins: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_is_dev = os.environ.get("APP_ENVIRONMENT", "").lower() in ("development", "dev", "local")
+
+if not _allowed_origins and _is_dev:
+    _cors_origins: list[str] = ["*"]
+    logger.warning(
+        "ALLOWED_ORIGINS is not set — allowing all origins. "
+        "Set ALLOWED_ORIGINS in production."
+    )
+else:
+    _cors_origins = _allowed_origins  # empty list → no cross-origin allowed in prod
+
+# allow_credentials=True requires explicit origins (not "*").
+_cors_credentials = bool(_cors_origins) and "*" not in _cors_origins
 
 
 @asynccontextmanager
@@ -82,15 +101,30 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Register CORS middleware — must be added before routers.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Admin-Key"],
+)
+
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 # Health — no auth
 app.include_router(health_router)
 
-# Admin routes — protected by API key
-app.include_router(admin_router, dependencies=[Depends(verify_admin_api_key)])
-app.include_router(provider_router, dependencies=[Depends(verify_admin_api_key)])
+# Admin routes — protected by API key + rate limited
+app.include_router(admin_router, dependencies=[
+    Depends(verify_admin_api_key),
+    Depends(admin_rate_limit()),
+])
+app.include_router(provider_router, dependencies=[
+    Depends(verify_admin_api_key),
+    Depends(admin_rate_limit()),
+])
 
 # Retell webhooks + tool endpoints — auth handled internally via HMAC signature
 app.include_router(retell_router)
@@ -122,14 +156,14 @@ def root():
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc: Exception):
-    """General exception handler."""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-        },
-    )
+    """General exception handler. Never leaks exception details in production."""
+    logger.error("Unhandled exception: %s", exc, exc_info=True)
+    content: dict = {"error": "Internal server error"}
+    if _is_dev:
+        # Include traceback details locally so Edgar can debug without grepping logs.
+        content["type"] = type(exc).__name__
+        content["message"] = str(exc)
+    return JSONResponse(status_code=500, content=content)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
