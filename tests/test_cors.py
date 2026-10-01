@@ -14,7 +14,6 @@ Run this file in isolation or ensure env vars are stable across the test suite.
 import os
 
 # Set env before any app import so middleware is created with these origins.
-os.environ.setdefault("APP_ENVIRONMENT", "production")
 os.environ.setdefault("ALLOWED_ORIGINS", "https://app.example.com")
 os.environ.setdefault("ADMIN_API_KEY", "test-admin-key")
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret-for-cors-tests")

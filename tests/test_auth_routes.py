@@ -302,7 +302,7 @@ class TestSelectClinic:
 @pytest.mark.unit
 class TestAdminStaffEndpoints:
     def _admin_headers(self) -> dict:
-        return {"X-Admin-Key": "test-admin-key"}
+        return {"X-API-Key": "test-admin-key"}
 
     def test_provision_staff_success(self):
         from fastapi.testclient import TestClient
