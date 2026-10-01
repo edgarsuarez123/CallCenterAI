@@ -13,7 +13,9 @@ Started as an asyncio task via the FastAPI lifespan event in main.py.
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+import uuid as _uuid_mod
+from datetime import datetime, time, timezone
+from typing import Dict
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,14 +31,70 @@ POLL_INTERVAL_SECONDS = 30
 MAX_CONCURRENT_CALLS_PER_CLINIC = 3  # default; overridden by clinic license in production
 
 
-class _CampaignWorkerManager:
-    """Compatibility shim — the global poll loop handles all clinics; per-clinic start is a no-op."""
-
-    async def start_clinic_worker(self, clinic_id) -> None:  # noqa: ARG002
-        pass  # global worker already running
+# ── Time helpers ──────────────────────────────────────────────────────────────
 
 
-campaign_worker_manager = _CampaignWorkerManager()
+def _local_now(integ) -> datetime:
+    """Return the current datetime in the clinic's local timezone."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(integ.timezone or "UTC")
+    except Exception:
+        tz = timezone.utc
+    return datetime.now(tz)
+
+
+def _is_within_calling_hours(integ, start_str: str, end_str: str) -> bool:
+    """Return True if the current local time is within [start_str, end_str] (HH:MM)."""
+    now = _local_now(integ)
+    try:
+        start = time.fromisoformat(start_str)
+        end = time.fromisoformat(end_str)
+    except ValueError:
+        return False
+    return start <= now.time() <= end
+
+
+# ── Per-clinic worker loop (stub — global loop handles all clinics) ───────────
+
+
+async def _clinic_worker_loop(clinic_id: _uuid_mod.UUID) -> None:
+    """Per-clinic worker loop placeholder. Global run_campaign_worker handles all clinics."""
+    pass
+
+
+# ── Campaign worker manager ───────────────────────────────────────────────────
+
+
+class CampaignWorkerManager:
+    """
+    Manages per-clinic asyncio worker tasks.
+
+    In the current implementation the global poll loop (run_campaign_worker)
+    handles all clinics, so per-clinic tasks are lightweight stubs. The class
+    exists so route code can call start_clinic_worker() without knowing about
+    the global loop, and for unit-testability.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: Dict[_uuid_mod.UUID, asyncio.Task] = {}
+
+    async def start_clinic_worker(self, clinic_id: _uuid_mod.UUID) -> None:
+        """Start a per-clinic worker task if one is not already running."""
+        existing = self._tasks.get(clinic_id)
+        if existing is not None and not existing.done():
+            return  # already running — idempotent
+        self._tasks[clinic_id] = asyncio.create_task(_clinic_worker_loop(clinic_id))
+
+    async def shutdown_all(self) -> None:
+        """Cancel all running per-clinic tasks."""
+        for task in self._tasks.values():
+            task.cancel()
+        self._tasks.clear()
+
+
+campaign_worker_manager = CampaignWorkerManager()
 
 
 async def _get_active_campaigns(db: AsyncSession) -> list[Campaign]:

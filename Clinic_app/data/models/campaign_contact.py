@@ -66,7 +66,7 @@ class CampaignContact(Base):
     provider_name = Column(Text, nullable=True)
     payer = Column(Text, nullable=True)
     gap_type = Column(String(50), nullable=True, index=True)
-    preferred_language = Column(String(10), nullable=True)
+    preferred_language = Column(String(10), nullable=True, default="en")
 
     # Per-contact outreach reason (may override campaign default)
     reason = Column(Text, nullable=True)
@@ -83,7 +83,11 @@ class CampaignContact(Base):
     # Scheduling
     priority_order = Column(SmallInteger, nullable=True)
     next_attempt_after = Column(DateTime(timezone=True), nullable=True)
+    last_attempted_at = Column(DateTime(timezone=True), nullable=True)
     release_date = Column(Date, nullable=True)
+
+    # EHR booking reference
+    ehr_appointment_id = Column(String(100), nullable=True)
 
     # Call outcome tracking (simple service compat — maps to ContactOutcome)
     outcome = Column(
@@ -122,4 +126,4 @@ class CampaignContact(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<CampaignContact(id={self.id}, outcome={self.outcome})>"
+        return f"<CampaignContact(id={self.id}, status={self.status}, outcome={self.outcome})>"
