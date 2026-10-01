@@ -1,66 +1,91 @@
-# Clinic_app/data/models/campaign_contact.py
+# data/models/campaign_contact.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Date, DateTime, ForeignKey, Index
-from sqlalchemy.dialects.postgresql import UUID, BYTEA
+from sqlalchemy import Column, String, DateTime, Integer, Text, LargeBinary, ForeignKey, Index
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from Clinic_app.common.database import Base
-from Clinic_app.data.enums import ContactStatus
 
 
 class CampaignContact(Base):
     """
-    One row per patient per campaign. The campaign worker reads this table to determine
-    who to call next (FIFO, respecting next_attempt_after).
+    One row per patient in a campaign. Tracks call outcome per contact.
 
-    PHI: encrypted phone, name, and DOB at rest. Name/DOB are decrypted only when placing
-    an outbound call or for authorized dashboard flows. Provider name and payer are plain text.
-    The dual-column pattern (phone_encrypted + phone_hash) mirrors the patient table:
-    - phone_encrypted: passed to Retell to place the call
-    - phone_hash: used for dedup on CSV import without decrypting all rows
+    PHI fields:
+      - patient_name_encrypted: AES-256-GCM encrypted bytes (via encrypt_phi)
+      - phone_encrypted: AES-256-GCM encrypted bytes
+      - phone_hash: SHA-256 of normalized E.164 phone (for dedup without decryption)
+
+    All plaintext PHI exists only in memory during active request processing
+    and is never persisted, logged, or returned in API responses except as
+    masked values (phone last 4 digits, patient first name only).
+
+    Tenant isolation: every query MUST include clinic_id filter.
     """
     __tablename__ = "campaign_contact"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False, index=True)
-    clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)  # Denormalized for tenant isolation
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+    )
+    campaign_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Denormalized for efficient row-level tenant isolation
+    clinic_id = Column(
+        UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+    )
 
-    # PHI — phone + optional name for Retell metadata at dial time
-    # DOB is never stored (PHI Rule #2) — Retell agent does not require DOB for identity
-    phone_encrypted = Column(BYTEA, nullable=False)          # AES-256-GCM encrypted E.164 phone number
-    phone_hash = Column(String(64), nullable=False)          # HMAC-SHA256 hash for dedup without decryption
-    patient_name_encrypted = Column(BYTEA, nullable=True)    # AES-256-GCM — decrypt only at dial
+    # PHI — always encrypted at rest
+    patient_name_encrypted = Column(LargeBinary, nullable=False)
+    phone_encrypted = Column(LargeBinary, nullable=False)
 
-    provider_name = Column(String, nullable=True)              # From CSV — Retell metadata
-    payer = Column(String, nullable=True)                      # Insurance plan name — Retell metadata
+    # SHA-256 of normalized E.164 phone — used for dedup without decryption
+    phone_hash = Column(String(64), nullable=False)
 
-    gap_type = Column(String(100), nullable=False)           # GapType enum value — drives agent script + appt type
-    preferred_language = Column(String(10), nullable=False, default="en")  # "en" | "es"
+    # Per-contact outreach reason (may override campaign default)
+    reason = Column(Text, nullable=False)
 
-    status = Column(String(50), nullable=False, default=ContactStatus.PENDING.value, index=True)
-    attempt_count = Column(Integer, nullable=False, default=0)        # 0–3
-    last_attempted_at = Column(DateTime(timezone=True), nullable=True)
-    next_attempt_after = Column(DateTime(timezone=True), nullable=True)  # NULL = ready now
+    # Call outcome tracking
+    outcome = Column(
+        String(50),
+        nullable=False,
+        default="pending",
+        index=True,
+        comment="ContactOutcome enum: pending|calling|accepted|declined|voicemail|no_answer|failed",
+    )
+    retell_call_id = Column(String(255), nullable=True, comment="Retell call ID for correlation to call logs")
+    call_duration_seconds = Column(Integer, nullable=True)
+    call_date = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
 
-    ehr_appointment_id = Column(String, nullable=True)       # NextGen appointment ID on BOOKED
-
-    # hospital_flu scheduling fields
-    release_date = Column(Date, nullable=True)               # Discharge date from CSV; deadline = release_date + 7 days
-    priority_order = Column(Integer, nullable=False, default=1)  # 0 = hospital_flu (called first); 1 = all others
+    # One-sentence summary from call (if available)
+    notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    __table_args__ = (
-        # Primary worker query: PENDING contacts ready to call now, FIFO by created_at
-        Index("idx_contact_worker_queue", "clinic_id", "campaign_id", "status", "next_attempt_after"),
-        # Dedup check on CSV import
-        Index("idx_contact_phone_hash", "clinic_id", "phone_hash"),
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
     )
 
     # Relationships
-    campaign = relationship("Campaign", backref="contacts")
-    clinic = relationship("Clinic", backref="campaign_contacts")
+    campaign = relationship("Campaign", back_populates="contacts")
+
+    __table_args__ = (
+        Index("idx_campaign_contact_clinic_campaign", "clinic_id", "campaign_id"),
+        Index("idx_campaign_contact_outcome", "campaign_id", "outcome"),
+        # Dedup index: one phone number per clinic across all campaigns
+        Index("idx_campaign_contact_phone_hash", "clinic_id", "phone_hash"),
+    )
 
     def __repr__(self) -> str:
-        return f"<CampaignContact(id={self.id}, campaign_id={self.campaign_id}, status={self.status}, attempts={self.attempt_count})>"
+        return f"<CampaignContact(id={self.id}, outcome={self.outcome})>"

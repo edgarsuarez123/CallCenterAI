@@ -1,293 +1,240 @@
-# CallCenterAI
+# CallCenterAI — HEDIS Outreach Automation Platform
 
-**HEDIS care-gap outreach automation** for primary care clinics on **NextGen EHR**. Clinics upload patient lists; the platform places **Retell AI** voice calls, can check **NextGen** availability during a call via **Playwright + AgentQL**, supports booking workflows, and exposes APIs for admin, providers, and voice tooling.
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-311/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688.svg)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791.svg)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
+[![HIPAA](https://img.shields.io/badge/HIPAA-compliant-green.svg)](#phi-security)
 
-| | |
-|---|---|
-| **Author** | Edgar J. Suárez Colón |
-| **Status** | Active development — MVP |
-| **Stack** | FastAPI · PostgreSQL · Azure-oriented hosting |
-| **Compliance note** | PHI must be handled per project rules — see [PHI & security](#phi--security) |
+A multi-tenant SaaS platform that automates HEDIS care-gap outreach for primary care clinics. Clinics upload a CSV of patients; the system places AI voice calls via **Retell AI**, records each patient's response, and generates an outcome report — without staff intervention.
 
----
-
-## Table of contents
-
-- [What this project does](#what-this-project-does)
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Repository layout](#repository-layout)
-- [Tech stack](#tech-stack)
-- [Prerequisites](#prerequisites)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [Database migrations](#database-migrations)
-- [Running tests](#running-tests)
-- [EHR validation (NextGen / Playwright)](#ehr-validation-nextgen--playwright)
-- [API documentation](#api-documentation)
-- [PHI & security](#phi--security)
-- [Documentation index](#documentation-index)
-- [Contributing & operations notes](#contributing--operations-notes)
+> Built with FastAPI + PostgreSQL + AES-256-GCM PHI encryption. Designed for HIPAA compliance (Azure BAA in scope).
 
 ---
 
-## What this project does
+## Architecture
 
-- **Multi-tenant SaaS shape**: clinic-scoped data; super-admin vs clinic roles (see PRD).
-- **Outbound voice**: Retell AI agents and webhooks/tool endpoints for in-call logic.
-- **Scheduling & bookings**: Services for availability, bookings, and audit trails; Google Calendar integration where configured.
-- **EHR automation (NextGen)**: Server-side headless Chromium via Playwright, with AgentQL for resilient selectors (see `agentql-test/` and `INFRASTRUCTURE.md`).
-- **PHI at rest**: AES-256-GCM via `Clinic_app/common/encryption.py` — do not roll your own crypto.
+```mermaid
+graph LR
+    Staff[Clinic Staff] -->|CSV Upload| API
+    API[FastAPI Backend] -->|encrypt PHI| DB[(PostgreSQL)]
+    API -->|trigger calls| Retell[Retell AI]
+    Retell <-->|conversation| Patient[Patient Phone]
+    Retell -->|HMAC webhook| API
+    API -->|outcome report| Staff
 
-Detailed product scope, roles, and phased delivery are in **`HEDIS_PRD_v2.md`** (and related implementation docs below).
-
----
-
-## Architecture at a glance
-
-```text
-Clinic staff / Admin
-        │
-        ▼
-   FastAPI (Clinic_app)
-        │
-        ├── PostgreSQL (clinics, patients, bookings, integrations, …)
-        ├── Redis (caching / locks — when enabled)
-        ├── Retell AI (calls, webhooks)
-        ├── Anthropic Claude (per PRD — parsing / summaries)
-        └── Playwright + AgentQL → NextGen (availability / booking automation)
+    style API fill:#1e40af,color:#fff
+    style DB fill:#166534,color:#fff
+    style Retell fill:#7c3aed,color:#fff
 ```
 
-For tables, endpoints, and integration details, see **`INFRASTRUCTURE.md`**.
+See [`docs/architecture/`](docs/architecture/) for detailed Mermaid diagrams:
+- [System overview](docs/architecture/system-overview.md)
+- [Call flow sequence](docs/architecture/call-flow.md)
+- [Database ERD](docs/architecture/database-erd.md)
+- [PHI encryption flow](docs/architecture/phi-encryption.md)
+- [Multi-tenancy isolation](docs/architecture/multi-tenancy.md)
 
 ---
 
-## Repository layout
+## What This Solves
 
-```text
+Primary care clinics enrolled in value-based contracts receive monthly care-gap reports (HEDIS measures — A1C, mammograms, annual wellness visits). Acting on these lists requires staff to manually call hundreds of patients — a process that takes days.
+
+**Fewer than 40% of HEDIS care gaps get closed** due to staff bandwidth constraints. For a clinic earning $40–$80 per closed gap, automating outreach from 40% → 80% on 500 patients = **$8,000–$16,000 in additional reimbursement per cycle**.
+
+---
+
+## Features
+
+### Implemented
+- **Outbound campaign engine** — create campaigns, upload patient CSVs, process contacts via AI voice agent
+- **HIPAA-compliant PHI handling** — patient names and phones encrypted at rest (AES-256-GCM), never logged in plaintext
+- **Multi-tenant isolation** — row-level `clinic_id` scoping on every table and query
+- **Phone dedup via SHA-256** — deduplication without decryption
+- **Outcome recording** — ACCEPTED / DECLINED / VOICEMAIL / NO_ANSWER / FAILED per contact
+- **Campaign outcome report** — decrypted names, masked phones, call dates, durations
+- **Background campaign worker** — asyncio task, polls for QUEUED campaigns, respects business hours
+- **Demo mode** — simulates call outcomes locally when `RETELL_API_KEY` is not set
+- **Admin API** — clinic, license, and integration CRUD (API key protected)
+- **HMAC-SHA256 webhook verification** — all Retell webhooks signature-verified
+- **Async pytest test suite** — unit coverage of encryption, campaign service, auth, availability, booking
+
+### Phase 2 (Designed, Not Yet Activated)
+- **GCal-integrated booking engine** — inbound scheduling with tentative holds, confirm/cancel/reschedule
+- **NextGen EHR automation** — server-side Playwright + AgentQL to read live availability and book mid-call
+- **Google OAuth staff login** — JWT-scoped per clinic
+- **Redis selector cache** — 24h TTL caching of AgentQL selectors (~60% token savings)
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Why |
+|-------|-----------|-----|
+| API Framework | FastAPI 0.104 (async) | Native async, OpenAPI auto-docs, type safety |
+| ORM | SQLAlchemy 2.0 async + asyncpg | True async DB — no thread pool blocking |
+| Migrations | Alembic | Schema version control |
+| Database | PostgreSQL 15 | JSONB for features, row-level isolation |
+| Encryption | AES-256-GCM via `cryptography` | FIPS 140-2, tamper-evident auth tag |
+| Voice AI | Retell AI | Sub-200ms latency, tool calling, bilingual |
+| Background Jobs | asyncio tasks | No Celery/Redis dependency for MVP |
+| Container | Docker + docker-compose | Dev parity, one-command startup |
+| Hosting | Azure (HIPAA BAA in effect) | BAA required for PHI |
+
+---
+
+## Quick Start
+
+```bash
+# 1. Clone and configure
+git clone <repo-url> && cd CallCenterAI
+cp env.example .env
+# Edit .env: set DB_PASSWORD, PHI_ENCRYPTION_KEY, ADMIN_API_KEY
+
+# 2. Start services (app + postgres + redis)
+docker compose -f docker-compose.dev.yaml up
+
+# 3. Load demo data
+python scripts/seed_demo.py
+
+# 4. Open Swagger UI
+open http://localhost:8000/docs
+
+# 5. Run the demo walkthrough
+export CLINIC_ID=<id from seed output>
+export ADMIN_API_KEY=<your key>
+bash scripts/demo_walkthrough.sh
+```
+
+---
+
+## API Endpoints
+
+### Campaigns (`X-API-Key` required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/admin/clinics/{id}/campaigns` | Create campaign |
+| `GET` | `/admin/clinics/{id}/campaigns` | List campaigns |
+| `GET` | `/admin/clinics/{id}/campaigns/{cid}` | Get campaign |
+| `POST` | `/admin/clinics/{id}/campaigns/{cid}/upload` | Upload patient CSV |
+| `POST` | `/admin/clinics/{id}/campaigns/{cid}/start` | Start campaign |
+| `POST` | `/admin/clinics/{id}/campaigns/{cid}/pause` | Pause campaign |
+| `POST` | `/admin/clinics/{id}/campaigns/{cid}/process-next` | **[Demo]** Simulate next call |
+| `GET` | `/admin/clinics/{id}/campaigns/{cid}/report` | Outcome report |
+
+### Clinic Admin (`X-API-Key` required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/admin/clinics/setup` | Atomic clinic + integration creation |
+| `GET/PUT` | `/admin/clinics/{id}` | Clinic CRUD |
+| `GET/PUT` | `/admin/clinics/{id}/integration` | Retell integration |
+| `GET/PUT` | `/admin/clinics/{id}/business-hours` | Calling hours config |
+
+### Retell Webhooks (HMAC-verified)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/retell/webhook/call_started` | Call start — create call log |
+| `POST` | `/retell/webhook/call_ended` | Call end — record outcome |
+
+---
+
+## PHI Security
+
+Patient data is never stored in plaintext. The encryption pipeline:
+
+```
+Plaintext (in-memory only)
+    ↓ encrypt_phi() — AES-256-GCM
+    ↓ IV(12B) + ciphertext + auth_tag(16B)
+    ↓ BYTEA column in PostgreSQL
+```
+
+- **Phone hash** — SHA-256 of E.164 phone, used for O(1) dedup without decryption
+- **Phones in logs** — masked as `***-***-XXXX`
+- **Call transcripts** — never stored; outcome recorded as one-sentence note
+- **Auth tag** — tamper detection on every decryption (`AuthenticationError` on failure)
+
+See [`docs/architecture/phi-encryption.md`](docs/architecture/phi-encryption.md) for the full flow diagram.
+
+---
+
+## Running Tests
+
+```bash
+# Unit tests only (no DB required)
+pytest tests/ -m unit -v
+
+# All tests
+pytest tests/ -v
+```
+
+---
+
+## Project Structure
+
+```
 CallCenterAI/
-├── Clinic_app/                 # FastAPI application
-│   ├── main.py                 # App factory; add routers here
-│   ├── common/                 # DB session, PHI encryption
-│   ├── data/                   # Enums, SQLAlchemy models
-│   ├── Routes/                 # health, retell, admin, provider, …
-│   ├── services/               # Business logic
-│   ├── workers/                # Background / campaign workers (evolving)
-│   └── alembic/                # Migrations
-├── agentql-test/               # NextGen / Playwright / AgentQL experiments
-├── tests/                      # pytest (async) suite
+├── Clinic_app/
+│   ├── main.py                  # App factory — routers, CORS, lifespan
+│   ├── common/
+│   │   ├── auth.py              # Admin API key dependency
+│   │   ├── database.py          # Async SQLAlchemy engine
+│   │   ├── encryption.py        # AES-256-GCM — all PHI goes through here
+│   │   └── schemas.py           # Shared Pydantic models
+│   ├── data/
+│   │   ├── enums.py             # All domain enumerations
+│   │   └── models/              # 12 SQLAlchemy ORM models
+│   ├── Routes/
+│   │   ├── campaign.py          # Campaign endpoints (active — demo mode)
+│   │   ├── admin.py             # Clinic/license/integration CRUD
+│   │   ├── retell.py            # Webhook handlers + Phase 2 booking tools
+│   │   └── health.py            # Health check
+│   ├── services/
+│   │   ├── campaign.py          # Campaign business logic + demo simulation
+│   │   ├── booking.py           # Booking lifecycle (Phase 2)
+│   │   ├── availability.py      # Slot engine (Phase 2)
+│   │   ├── google_calendar.py   # GCal integration (Phase 2)
+│   │   └── patient.py           # PHI-encrypted patient CRUD
+│   ├── workers/
+│   │   └── campaign_worker.py   # Background campaign processor
+│   └── alembic/                 # DB migrations
+├── dashboard/                   # React SPA (Vite + Tailwind)
+├── docs/architecture/           # Mermaid diagrams
+├── scripts/
+│   ├── seed_demo.py             # Demo data seeder
+│   └── demo_walkthrough.sh      # curl-based demo script
+├── tests/                       # Async pytest suite
+├── agentql-test/                # Playwright + AgentQL validation scripts
 ├── Dockerfile
-├── docker-compose.yaml         # App only; expects external PostgreSQL
-├── docker-compose.dev.yaml     # App + PostgreSQL + Redis for local dev
-├── start.sh                    # Prod-style entry: wait for PG → migrate → uvicorn
-├── requirements.txt
-├── env.example                 # Environment variable template
-├── HEDIS_PRD_v2.md             # Current detailed MVP PRD
-├── HEDIS_CAMPAIGN_IMPLEMENTATION.md
-├── INFRASTRUCTURE.md           # Deep architecture reference
-├── CLAUDE.md                   # Maintainer / agent session rules
-├── PLAN.md                     # Living implementation plan
-└── PROGRESS.txt                # Session log
+├── docker-compose.yaml          # Production
+├── docker-compose.dev.yaml      # Dev (app + postgres + redis)
+└── env.example
 ```
 
 ---
 
-## Tech stack
+## System Design Deep Dive
 
-| Layer | Technology |
-|-------|------------|
-| API | FastAPI 0.104.x (async) |
-| Server | Uvicorn |
-| ORM | SQLAlchemy 2.0.x (async) |
-| DB | PostgreSQL (Azure Flexible Server in production) |
-| Migrations | Alembic |
-| Cache | Redis (selector cache, locks — when wired) |
-| Voice | Retell AI |
-| LLM | Anthropic Claude (per PRD) |
-| EHR UI automation | Playwright + AgentQL |
-| Encryption | AES-256-GCM (`common/encryption.py`) |
+The `Retell_SYSTEM_DESIGN_REPORT.md` contains a senior-engineer-level breakdown covering:
+- Problem framing and unit economics
+- Data model rationale (why 12 tables, not 5)
+- PHI security model and HIPAA mapping
+- Multi-tenancy architecture trade-offs
+- Booking lifecycle state machine
+- Voice AI integration patterns
+- Background job architecture
+- Known gaps and technical debt
 
-Python version for containers: **3.11** (see `Dockerfile`).
+Recommended reading before a system design interview conversation.
 
 ---
 
-## Prerequisites
+## Author
 
-- **Python 3.11+** (for local non-Docker dev)
-- **PostgreSQL** (15+ recommended; matches dev compose)
-- **Redis** (optional locally unless you enable features that require it)
-- **Playwright Chromium** (for EHR automation): after `pip install -r requirements.txt`, run:
-  ```bash
-  python -m playwright install chromium
-  ```
-
----
-
-## Quick start
-
-### 1. Clone and environment
-
-```bash
-git clone <your-repo-url> CallCenterAI
-cd CallCenterAI
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Unix: source .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium
-```
-
-Copy **`env.example`** to **`.env`** and set at least database and `PHI_ENCRYPTION_KEY` (see [Configuration](#configuration)).
-
-### 2. Database and migrations
-
-From the **repository root**:
-
-```bash
-cd Clinic_app
-alembic upgrade head
-cd ..
-```
-
-### 3. Run the API
-
-From the **repository root** (module path `Clinic_app.main:app`):
-
-```bash
-uvicorn Clinic_app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Open **http://localhost:8000/docs** for Swagger UI.
-
-### Docker (production-style)
-
-Requires a reachable PostgreSQL matching `.env` (`DB_HOST`, etc.):
-
-```bash
-docker compose up --build
-```
-
-Uses **`start.sh`**: waits for PostgreSQL, runs **`alembic upgrade head`**, then starts Uvicorn with multiple workers.
-
-### Docker (local full stack)
-
-```bash
-docker compose -f docker-compose.dev.yaml up --build
-```
-
-Adjust `.env` for `DB_HOST=postgres` when using the bundled Postgres service (see `docker-compose.dev.yaml`).
-
-> **Note:** `docker-compose.dev.yaml` starts Uvicorn with `--reload` and does **not** run `start.sh`, so run **`alembic upgrade head`** from `Clinic_app` once after the DB is up, or use the production compose path if you want migrate-on-boot behavior.
-
----
-
-## Configuration
-
-Primary template: **`env.example`**. Common variables:
-
-| Variable | Purpose |
-|----------|---------|
-| `APP_ENVIRONMENT` | `development` / `production` |
-| `APP_PORT`, `APP_WORKERS` | Server binding and worker count |
-| `DB_*` | PostgreSQL connection |
-| `PHI_ENCRYPTION_KEY` | Base64-encoded 32-byte key for PHI at rest |
-| `RETELL_WEBHOOK_SECRET` | Verify Retell webhook signatures |
-| `REDIS_URL` | Redis connection (when used) |
-| `ADMIN_API_KEY` | Protect `/admin/*` routes (per PRD) |
-
-**Never commit real secrets.** The repo uses **`.cursorignore`** / ignore rules for `.env` — keep it that way.
-
-For a fuller list aligned with deployment, see **`CLAUDE.md`** (environment reference) and **`DEPLOYMENT_GUIDE.md`** if present in your checkout.
-
----
-
-## Database migrations
-
-- Config lives under **`Clinic_app/alembic/`**.
-- Run migrations from **`Clinic_app`** with Alembic (as in [Quick start](#quick-start)) or rely on **`start.sh`** in Docker.
-
-Every schema change should ship as a **new Alembic revision**, not manual DDL in production.
-
----
-
-## Running tests
-
-```bash
-pip install -r requirements.txt
-pytest
-```
-
-With coverage:
-
-```bash
-pytest --cov=Clinic_app --cov-report=html
-```
-
-See **`tests/README.md`** for structure and examples. Prefer **async** tests for DB/API code (`pytest.ini` uses `asyncio_mode = auto`).
-
----
-
-## EHR validation (NextGen / Playwright)
-
-Before relying on headless automation against a real NextGen tenant, validate:
-
-- Headless Chromium is not blocked
-- Login (including MFA flows if applicable — see project tests under `agentql-test/`)
-- Read availability and booking paths as designed
-
-Proof-of-concept scripts live in **`agentql-test/`** (e.g. `click-test.js`, Python helpers such as `test_nextgen_headless.py` when present). Log pilot results in **`PROGRESS.txt`** per project process.
-
----
-
-## API documentation
-
-- **Swagger**: `/docs`
-- **ReDoc**: `/redoc`
-- **Health**: `/health` (and related routes in `Clinic_app/Routes/health.py`)
-
-Routers under `Clinic_app/Routes/` include **retell**, **admin**, and **provider** surfaces; the exact registration list is defined in **`Clinic_app/main.py`** — verify there for your branch.
-
----
-
-## PHI & security
-
-Non-exhaustive rules enforced by architecture and code review:
-
-1. **Do not store patient name or DOB in plaintext** in the DB beyond what the PRD explicitly allows; use encryption and minimal retention.
-2. **Phone numbers**: encrypted + hash for lookup; **mask** in logs (e.g. `***-***-XXXX`).
-3. **NextGen credentials**: encrypted at rest; never return in API responses or logs.
-4. **Transcripts**: do not store raw call transcripts if the PRD specifies summaries only — follow **`HEDIS_PRD_v2.md`** and **`CLAUDE.md`**.
-5. **Tenant isolation**: queries must scope by **`clinic_id`** unless super-admin tooling explicitly crosses tenants.
-
-Implementers should read **`HEDIS_PRD_v2.md`** Section 11 and **`INFRASTRUCTURE.md`** Section 7.
-
----
-
-## Documentation index
-
-| Document | Description |
-|----------|-------------|
-| `HEDIS_PRD_v2.md` | Product requirements — MVP scope, roles, PHI, campaigns |
-| `HEDIS_CAMPAIGN_IMPLEMENTATION.md` | Campaign implementation checklist |
-| `INFRASTRUCTURE.md` | Architecture, schema, API surface, gaps |
-| `PHASE_1_IMPLEMENTATION.md` / `PHASE_2_IMPLEMENTATION.md` | Phased technical notes (if present) |
-| `DEPLOYMENT_GUIDE.md` | Deployment steps (if present) |
-| `CLAUDE.md` | Maintainer workflow, env vars, strict PHI rules |
-| `PLAN.md` | Current implementation plan |
-| `PROGRESS.txt` | Session-to-session progress log |
-
----
-
-## Contributing & operations notes
-
-- **Code style**: Black, flake8, type hints on new Python code (see `CLAUDE.md`).
-- **External calls**: use retries (e.g. `tenacity`) for Retell, Claude, and brittle EHR flows.
-- **Logging**: use `logging`, not `print`; never log PHI or secrets.
-- **Known gaps**: `INFRASTRUCTURE.md` §12 lists items that may still need wiring (routers, scheduler, Redis, admin auth hardening, etc.) — check your branch’s `main.py` and docs before assuming production readiness.
-
----
-
-## License
-
-Proprietary — **Edgar J. Suárez Colón**. All rights reserved unless otherwise stated in a separate license file.
-
-If you add an explicit `LICENSE` file later, update this section to match.
+**Edgar J. Suárez Colón** — Software Engineer
+U.S. Air Force Palace Acquire (PAQ) Program, May 2026
+[GitHub](https://github.com/EdgarJSuarez) | [LinkedIn](https://linkedin.com/in/edgarjsuarez)

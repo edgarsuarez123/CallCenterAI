@@ -45,6 +45,8 @@ from Clinic_app.data.models import (
     BookingAudit,
     PhoneRoute,
     CallLog,
+    Campaign,
+    CampaignContact,
 )
 
 # this is the Alembic Config object, which provides

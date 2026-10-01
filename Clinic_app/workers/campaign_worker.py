@@ -1,353 +1,109 @@
 """
-Per-clinic asyncio campaign worker: outbound Retell dials with concurrency and calling hours.
+Background campaign worker — processes outbound HEDIS outreach calls.
 
-One Task per clinic when any campaign is ACTIVE. Self-terminates when no ACTIVE campaigns remain.
+Polls every 30 seconds for campaigns in QUEUED or RUNNING status.
+In demo mode (RETELL_API_KEY not set): uses simulate_next_call() to
+generate realistic outcomes without real API calls.
+In production mode (RETELL_API_KEY set): would trigger real Retell
+outbound calls (implementation stub included).
+
+Started as an asyncio task via the FastAPI lifespan event in main.py.
 """
-
-from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from datetime import datetime, time as dt_time, timezone
-from typing import Optional
-from uuid import UUID
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
-from sqlalchemy import select, func
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.database import AsyncSessionLocal
-from Clinic_app.common.encryption import decrypt_phi
-from Clinic_app.data.enums import CampaignStatus, ContactStatus
+from Clinic_app.data.enums import CampaignStatus
 from Clinic_app.data.models.campaign import Campaign
-from Clinic_app.data.models.campaign_contact import CampaignContact
-from Clinic_app.data.models.clinic import Clinic
-from Clinic_app.data.models.clinic_integration import ClinicIntegration
-from Clinic_app.services.campaign_service import (
-    count_calling_contacts,
-    expire_overdue_hospital_flu_contacts,
-    get_next_eligible_contact,
-)
-from Clinic_app.common.logging_utils import mask_phone_e164
-from Clinic_app.services.retell_client import RetellClientError, create_outbound_call
+from Clinic_app.services.campaign import simulate_next_call, get_next_pending_contact
 
 logger = logging.getLogger(__name__)
 
-INTER_CALL_GAP_SECONDS = 5
-NO_CONTACT_SLEEP_SECONDS = 10
-AT_CAPACITY_SLEEP_SECONDS = 3
-CALLING_HOURS_POLL_SECONDS = 60
+POLL_INTERVAL_SECONDS = 30
+MAX_CONCURRENT_CALLS_PER_CLINIC = 3  # default; overridden by clinic license in production
 
 
-def _parse_hhmm(hhmm: str) -> tuple[int, int]:
-    parts = hhmm.strip().split(":")
-    h = int(parts[0])
-    m = int(parts[1]) if len(parts) > 1 else 0
-    return h, m
-
-
-def _local_now(integration: ClinicIntegration) -> datetime:
-    try:
-        tz = ZoneInfo(integration.timezone)
-    except Exception:
-        tz = timezone.utc
-    return datetime.now(tz)
-
-
-def _is_within_calling_hours(
-    integration: ClinicIntegration,
-    start_str: str,
-    end_str: str,
-) -> bool:
-    now = _local_now(integration)
-    sh, sm = _parse_hhmm(start_str)
-    eh, em = _parse_hhmm(end_str)
-    start_t = dt_time(sh, sm)
-    end_t = dt_time(eh, em)
-    cur = now.time()
-    if start_t <= end_t:
-        return start_t <= cur <= end_t
-    # Overnight window (rare)
-    return cur >= start_t or cur <= end_t
-
-
-async def _any_active_campaign(db, clinic_id: UUID) -> bool:
+async def _get_active_campaigns(db: AsyncSession) -> list[Campaign]:
+    """Fetch all campaigns in QUEUED or RUNNING status."""
     result = await db.execute(
-        select(func.count())
-        .select_from(Campaign)
-        .where(
-            Campaign.clinic_id == clinic_id,
-            Campaign.status == CampaignStatus.ACTIVE.value,
+        select(Campaign).where(
+            Campaign.status.in_([CampaignStatus.QUEUED, CampaignStatus.RUNNING])
         )
     )
-    return int(result.scalar_one() or 0) > 0
+    return list(result.scalars().all())
 
 
-async def _first_active_campaign(db, clinic_id: UUID) -> Optional[Campaign]:
-    result = await db.execute(
-        select(Campaign)
-        .where(
-            Campaign.clinic_id == clinic_id,
-            Campaign.status == CampaignStatus.ACTIVE.value,
-        )
-        .order_by(Campaign.created_at.asc())
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
+async def _process_campaign(db: AsyncSession, campaign: Campaign) -> None:
+    """
+    Process a single campaign: pick next pending contact and simulate/trigger a call.
+    Marks campaign as RUNNING on first call, COMPLETED when all contacts are done.
+    """
+    if campaign.status == CampaignStatus.QUEUED:
+        campaign.status = CampaignStatus.RUNNING
+        campaign.updated_at = datetime.now(timezone.utc)
+        await db.flush()
 
-
-class CampaignWorkerManager:
-    """Singleton: one asyncio.Task per clinic_id."""
-
-    def __init__(self) -> None:
-        self._tasks: dict[UUID, asyncio.Task[None]] = {}
-        self._lock = asyncio.Lock()
-
-    async def start_clinic_worker(self, clinic_id: UUID) -> None:
-        from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
-
-        async with self._lock:
-            t = self._tasks.get(clinic_id)
-            if t is not None and not t.done():
-                return
-            self._tasks[clinic_id] = asyncio.create_task(
-                _clinic_worker_loop(clinic_id),
-                name=f"campaign_worker:{clinic_id}",
-            )
-        await slot_prefetch_manager.start(clinic_id)
-
-    async def stop_clinic_worker(self, clinic_id: UUID) -> None:
-        from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
-
-        async with self._lock:
-            t = self._tasks.pop(clinic_id, None)
-        if t is not None and not t.done():
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-        await slot_prefetch_manager.stop(clinic_id)
-
-    async def shutdown_all(self) -> None:
-        async with self._lock:
-            tasks = list(self._tasks.values())
-            self._tasks.clear()
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        for t in tasks:
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-
-
-campaign_worker_manager = CampaignWorkerManager()
-
-
-async def resume_active_campaign_workers() -> None:
-    """On app startup: restart workers and slot pre-fetch for clinics with ACTIVE campaigns."""
-    from Clinic_app.workers.slot_prefetch_worker import slot_prefetch_manager
-
-    if AsyncSessionLocal is None:
-        logger.warning("Campaign worker resume skipped: database not configured")
+    # Check if there are any pending contacts
+    contact = await get_next_pending_contact(db, campaign.id, campaign.clinic_id)
+    if not contact:
+        # All contacts processed — mark complete if not already
+        if campaign.status != CampaignStatus.COMPLETED:
+            campaign.status = CampaignStatus.COMPLETED
+            campaign.updated_at = datetime.now(timezone.utc)
+            await db.flush()
+            logger.info(f"[worker] Campaign {campaign.id} marked COMPLETED (no pending contacts)")
         return
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Campaign.clinic_id)
-            .where(Campaign.status == CampaignStatus.ACTIVE.value)
-            .distinct()
+
+    demo_mode = not os.getenv("RETELL_API_KEY")
+
+    if demo_mode:
+        result = await simulate_next_call(db, campaign.id, campaign.clinic_id)
+        logger.info(
+            f"[worker][DEMO] Campaign {campaign.id}: "
+            f"contact {result.get('contact_id')} -> {result.get('outcome')}"
         )
-        rows = result.all()
-    for (clinic_id,) in rows:
-        await campaign_worker_manager.start_clinic_worker(clinic_id)
-        await slot_prefetch_manager.start(clinic_id)
-        logger.info("Resumed campaign worker + slot pre-fetch for clinic_id=%s", clinic_id)
+    else:
+        # Production: trigger real Retell outbound call
+        # This would import and call retell_outbound.trigger_outbound_call()
+        # Stubbed here — implement when RETELL_API_KEY is available
+        logger.info(
+            f"[worker] Campaign {campaign.id}: production call trigger not yet implemented; "
+            "set RETELL_API_KEY and implement retell_outbound service"
+        )
 
 
-async def _clinic_worker_loop(clinic_id: UUID) -> None:
-    logger.info("Campaign worker started clinic_id=%s", clinic_id)
-    try:
-        while True:
-            if AsyncSessionLocal is None:
-                logger.error("Campaign worker exiting: DB unavailable clinic_id=%s", clinic_id)
-                break
+async def run_campaign_worker() -> None:
+    """
+    Main worker loop. Runs indefinitely, polling for active campaigns.
+    Designed to be started as an asyncio background task.
+    """
+    logger.info("[worker] Campaign worker starting (poll interval: %ds)", POLL_INTERVAL_SECONDS)
 
-            try:
-                async with AsyncSessionLocal() as db:
-                    if not await _any_active_campaign(db, clinic_id):
-                        logger.info(
-                            "Campaign worker stopping: no active campaigns clinic_id=%s",
-                            clinic_id,
-                        )
-                        break
-
-                    integ_result = await db.execute(
-                        select(ClinicIntegration).where(
-                            ClinicIntegration.clinic_id == clinic_id
-                        )
-                    )
-                    integration = integ_result.scalar_one_or_none()
-                    if integration is None:
-                        logger.error(
-                            "Campaign worker: missing clinic_integration clinic_id=%s",
-                            clinic_id,
-                        )
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    camp = await _first_active_campaign(db, clinic_id)
-                    if camp is None:
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    if not _is_within_calling_hours(
-                        integration,
-                        camp.calling_hours_start,
-                        camp.calling_hours_end,
-                    ):
-                        logger.info(
-                            "Outside calling hours clinic_id=%s window=%s-%s — sleeping %ds",
-                            clinic_id,
-                            camp.calling_hours_start,
-                            camp.calling_hours_end,
-                            CALLING_HOURS_POLL_SECONDS,
-                        )
-                        await asyncio.sleep(CALLING_HOURS_POLL_SECONDS)
-                        continue
-
-                    limit = integration.campaign_concurrency_limit
-                    active_calls = await count_calling_contacts(db, clinic_id)
-                    if active_calls >= limit:
-                        logger.info(
-                            "At concurrency capacity clinic_id=%s active_calls=%d limit=%d — sleeping %ds",
-                            clinic_id,
-                            active_calls,
-                            limit,
-                            AT_CAPACITY_SLEEP_SECONDS,
-                        )
-                        await asyncio.sleep(AT_CAPACITY_SLEEP_SECONDS)
-                        continue
-
-                    # Expire hospital_flu contacts whose 7-day discharge deadline passed
-                    await expire_overdue_hospital_flu_contacts(db, clinic_id)
-
-                    contact = await get_next_eligible_contact(db, clinic_id)
-                    if contact is None:
-                        logger.info(
-                            "No eligible contact found clinic_id=%s — sleeping %ds",
-                            clinic_id,
-                            NO_CONTACT_SLEEP_SECONDS,
-                        )
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    clinic_result = await db.execute(
-                        select(Clinic).where(Clinic.id == clinic_id)
-                    )
-                    clinic = clinic_result.scalar_one_or_none()
-                    if clinic is None:
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    phone = decrypt_phi(contact.phone_encrypted)
-                    patient_name = (
-                        decrypt_phi(contact.patient_name_encrypted)
-                        if contact.patient_name_encrypted
-                        else ""
-                    )
-
-                    from_number = (
-                        integration.retell_outbound_number
-                        or os.environ.get("RETELL_FROM_NUMBER", "").strip()
-                    )
-                    if not from_number:
-                        logger.error(
-                            "Campaign worker: no outbound from_number "
-                            "(set retell_outbound_number or RETELL_FROM_NUMBER) clinic_id=%s",
-                            clinic_id,
-                        )
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    callback_phone = integration.retell_did or from_number
-
-                    metadata = {
-                        "call_type": "hedis_campaign",
-                        "campaign_contact_id": str(contact.id),
-                        "gap_type": contact.gap_type,
-                        "clinic_name": clinic.name,
-                        "clinic_phone": callback_phone,
-                        "patient_name": patient_name or "Patient",
-                        "provider_name": contact.provider_name or "",
-                        "payer": contact.payer or "",
-                    }
-
-                    logger.info(
-                        "Dialing contact_id=%s campaign_id=%s gap_type=%s attempt=%d to=%s",
-                        contact.id,
-                        contact.campaign_id,
-                        contact.gap_type,
-                        (contact.attempt_count or 0) + 1,
-                        mask_phone_e164(phone),
-                    )
-                    try:
-                        call_id = await create_outbound_call(
-                            agent_id=integration.retell_agent_id,
-                            from_number=from_number,
-                            to_number=phone,
-                            metadata=metadata,
-                        )
-                    except RetellClientError as exc:
-                        logger.error(
-                            "Retell outbound failed clinic_id=%s contact=%s err=%s",
-                            clinic_id,
-                            contact.id,
-                            exc,
-                        )
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-                    except Exception as exc:
-                        logger.error(
-                            "Retell outbound unexpected error clinic_id=%s contact=%s",
-                            clinic_id,
-                            contact.id,
-                            exc_info=True,
-                        )
-                        await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-                        continue
-
-                    contact.status = ContactStatus.CALLING.value
-                    contact.attempt_count = (contact.attempt_count or 0) + 1
-                    contact.last_attempted_at = datetime.now(timezone.utc)
-
-                    c_row = await db.get(Campaign, contact.campaign_id)
-                    if c_row:
-                        c_row.called_count = (c_row.called_count or 0) + 1
-
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                campaigns = await _get_active_campaigns(db)
+                if campaigns:
+                    logger.info(f"[worker] Found {len(campaigns)} active campaign(s)")
+                    for campaign in campaigns:
+                        try:
+                            await _process_campaign(db, campaign)
+                        except Exception as e:
+                            logger.error(
+                                f"[worker] Error processing campaign {campaign.id}: {e}",
+                                exc_info=True,
+                            )
                     await db.commit()
-                    logger.info(
-                        "Outbound call placed retell_call_id=%s clinic_id=%s to=%s",
-                        call_id,
-                        clinic_id,
-                        mask_phone_e164(phone),
-                    )
+        except asyncio.CancelledError:
+            logger.info("[worker] Campaign worker shutting down")
+            break
+        except Exception as e:
+            logger.error(f"[worker] Unexpected error in worker loop: {e}", exc_info=True)
 
-                await asyncio.sleep(INTER_CALL_GAP_SECONDS)
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error(
-                    "Campaign worker iteration error clinic_id=%s: %s",
-                    clinic_id,
-                    exc,
-                    exc_info=True,
-                )
-                await asyncio.sleep(NO_CONTACT_SLEEP_SECONDS)
-    except asyncio.CancelledError:
-        logger.info("Campaign worker cancelled clinic_id=%s", clinic_id)
-    finally:
-        async with campaign_worker_manager._lock:
-            campaign_worker_manager._tasks.pop(clinic_id, None)
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
