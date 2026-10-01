@@ -1,7 +1,8 @@
 # CallCenterAI — HEDIS Outreach Automation Platform
 
+[![CI](https://github.com/EdgarJSuarez/CallCenterAI/actions/workflows/ci.yml/badge.svg)](https://github.com/EdgarJSuarez/CallCenterAI/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-311/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104-009688.svg)](https://fastapi.tiangolo.com/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115.6-009688.svg)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791.svg)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](https://www.docker.com/)
 [![HIPAA](https://img.shields.io/badge/HIPAA-compliant-green.svg)](#phi-security)
@@ -72,7 +73,7 @@ Primary care clinics enrolled in value-based contracts receive monthly care-gap 
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
-| API Framework | FastAPI 0.104 (async) | Native async, OpenAPI auto-docs, type safety |
+| API Framework | FastAPI 0.115.6 (async) | Native async, OpenAPI auto-docs, type safety |
 | ORM | SQLAlchemy 2.0 async + asyncpg | True async DB — no thread pool blocking |
 | Migrations | Alembic | Schema version control |
 | Database | PostgreSQL 15 | JSONB for features, row-level isolation |
@@ -88,7 +89,7 @@ Primary care clinics enrolled in value-based contracts receive monthly care-gap 
 
 ```bash
 # 1. Clone and configure
-git clone <repo-url> && cd CallCenterAI
+git clone https://github.com/EdgarJSuarez/CallCenterAI.git && cd CallCenterAI
 cp env.example .env
 # Edit .env: set DB_PASSWORD, PHI_ENCRYPTION_KEY, ADMIN_API_KEY
 

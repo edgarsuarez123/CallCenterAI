@@ -1389,6 +1389,26 @@ async def _update_hedis_campaign_contact_from_call_end(
     Apply call_ended outcome to campaign contact + campaign counters.
     Shared by CallLog and no-CallLog code paths.
     """
+    # Contact-level idempotency: if contact is already in a terminal state,
+    # a duplicate call_ended webhook must not re-apply counters.
+    _terminal_statuses = {
+        "booked",
+        "declined",
+        "exhausted",
+        "order_agreed",
+        "order_declined",
+        "not_yet_eligible",
+        "expired",
+        "human_requested",
+    }
+    if contact.status and contact.status in _terminal_statuses:
+        logger.info(
+            "Contact %s already terminal (status=%s), skipping duplicate call_ended",
+            contact.id,
+            contact.status,
+        )
+        return
+
     has_appt = bool(contact.ehr_appointment_id and str(contact.ehr_appointment_id).strip())
     outcome = _map_disconnection_to_outcome(webhook.disconnection_reason, has_appt)
     is_order_based = contact.gap_type in {gt.value for gt in ORDER_BASED_GAP_TYPES}
@@ -1762,6 +1782,18 @@ async def _handle_call_ended(db: AsyncSession, call_obj: Dict[str, Any]) -> Dict
                 )
                 await db.rollback()
             return {"status": "ok", "warning": "CallLog not found"}
+
+        # Idempotency guard: if a terminal outcome is already recorded, skip reprocessing.
+        # Retell can deliver call_ended more than once on network retry; a second delivery
+        # must not double-increment campaign counters or overwrite a resolved state.
+        _non_terminal = {None, "active", "unknown"}
+        if call_log.outcome not in _non_terminal:
+            logger.info(
+                "Duplicate call_ended for %s (outcome=%s already recorded), skipping",
+                webhook.call_id,
+                call_log.outcome,
+            )
+            return {"status": "ok", "note": "already_processed"}
 
         duration_seconds = None
         if webhook.start_timestamp and webhook.end_timestamp:

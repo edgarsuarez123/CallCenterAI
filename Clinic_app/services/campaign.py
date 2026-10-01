@@ -20,7 +20,7 @@ from uuid import UUID
 
 import re
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.encryption import encrypt_phi, decrypt_phi
@@ -469,8 +469,15 @@ async def get_next_pending_contact(
     db: AsyncSession,
     campaign_id: UUID,
     clinic_id: UUID,
+    max_attempts: int = 3,
 ) -> Optional[CampaignContact]:
-    """Get the next PENDING contact in a campaign (FIFO order)."""
+    """Get the next eligible PENDING contact in a campaign (FIFO order).
+
+    Enforces:
+    - outcome == PENDING (not already called/processing)
+    - attempt_count < max_attempts (not exhausted)
+    - next_attempt_after is None or in the past (retry window has elapsed)
+    """
     result = await db.execute(
         select(CampaignContact)
         .where(
@@ -478,6 +485,11 @@ async def get_next_pending_contact(
                 CampaignContact.campaign_id == campaign_id,
                 CampaignContact.clinic_id == clinic_id,
                 CampaignContact.outcome == ContactOutcome.PENDING,
+                CampaignContact.attempt_count < max_attempts,
+                or_(
+                    CampaignContact.next_attempt_after.is_(None),
+                    CampaignContact.next_attempt_after <= func.now(),
+                ),
             )
         )
         .order_by(CampaignContact.created_at.asc())
@@ -490,6 +502,7 @@ async def simulate_next_call(
     db: AsyncSession,
     campaign_id: UUID,
     clinic_id: UUID,
+    max_attempts: int = 3,
 ) -> dict:
     """
     Demo mode: pick the next PENDING contact and simulate a call outcome.
@@ -500,13 +513,14 @@ async def simulate_next_call(
 
     Returns a dict describing what happened.
     """
-    contact = await get_next_pending_contact(db, campaign_id, clinic_id)
+    contact = await get_next_pending_contact(db, campaign_id, clinic_id, max_attempts)
     if not contact:
         return {"status": "no_pending_contacts", "message": "All contacts have been processed"}
 
     # Simulate in-progress state
     contact.outcome = ContactOutcome.CALLING
     contact.attempt_count += 1
+    contact.last_attempted_at = datetime.now(timezone.utc)
     contact.updated_at = datetime.now(timezone.utc)
     await db.flush()
 

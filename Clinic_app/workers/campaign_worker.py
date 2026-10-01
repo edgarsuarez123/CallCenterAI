@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from Clinic_app.common.database import AsyncSessionLocal
 from Clinic_app.data.enums import CampaignStatus
 from Clinic_app.data.models.campaign import Campaign
+from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.services.campaign import simulate_next_call, get_next_pending_contact
 
 logger = logging.getLogger(__name__)
@@ -109,14 +110,37 @@ async def _process_campaign(db: AsyncSession, campaign: Campaign) -> None:
     """
     Process a single campaign: pick next pending contact and simulate/trigger a call.
     Marks campaign as RUNNING on first call, COMPLETED when all contacts are done.
+    Skips processing outside configured calling hours (9am-6pm clinic timezone by default).
     """
+    # ── Calling hours enforcement ──────────────────────────────────────────────
+    integ_result = await db.execute(
+        select(ClinicIntegration).where(ClinicIntegration.clinic_id == campaign.clinic_id)
+    )
+    integ = integ_result.scalar_one_or_none()
+
+    if integ is not None:
+        start_str = campaign.calling_hours_start or integ.calling_hours_start or "09:00"
+        end_str = campaign.calling_hours_end or integ.calling_hours_end or "18:00"
+        if not _is_within_calling_hours(integ, start_str, end_str):
+            logger.info(
+                "[worker] Campaign %s: outside calling hours (%s-%s %s), skipping",
+                campaign.id,
+                start_str,
+                end_str,
+                integ.timezone or "UTC",
+            )
+            return
+    # No integration row → demo mode; skip hours enforcement
+
     if campaign.status == CampaignStatus.QUEUED:
         campaign.status = CampaignStatus.RUNNING
         campaign.updated_at = datetime.now(timezone.utc)
         await db.flush()
 
+    max_attempts = campaign.max_attempts or 3
+
     # Check if there are any pending contacts
-    contact = await get_next_pending_contact(db, campaign.id, campaign.clinic_id)
+    contact = await get_next_pending_contact(db, campaign.id, campaign.clinic_id, max_attempts)
     if not contact:
         # All contacts processed — mark complete if not already
         if campaign.status != CampaignStatus.COMPLETED:
@@ -129,7 +153,7 @@ async def _process_campaign(db: AsyncSession, campaign: Campaign) -> None:
     demo_mode = not os.getenv("RETELL_API_KEY")
 
     if demo_mode:
-        result = await simulate_next_call(db, campaign.id, campaign.clinic_id)
+        result = await simulate_next_call(db, campaign.id, campaign.clinic_id, max_attempts)
         logger.info(
             f"[worker][DEMO] Campaign {campaign.id}: "
             f"contact {result.get('contact_id')} -> {result.get('outcome')}"
