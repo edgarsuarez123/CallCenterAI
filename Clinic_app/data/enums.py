@@ -50,3 +50,36 @@ class CallState(str, Enum):
     TRANSFER_LIVE = "transfer_live"  # Deciding to forward call to human staff
     END_CALL = "end_call"  # Wrap-up or goodbye
 
+
+# ============================================================================
+# CAMPAIGN SYSTEM ENUMS (Outbound HEDIS Outreach)
+# ============================================================================
+
+class CampaignStatus(str, Enum):
+    """Lifecycle status for outbound calling campaigns."""
+    DRAFT = "draft"          # Created but contacts not yet uploaded
+    QUEUED = "queued"        # Ready to run, waiting for worker to pick up
+    RUNNING = "running"      # Worker is actively processing contacts
+    PAUSED = "paused"        # Manually paused, can be resumed
+    COMPLETED = "completed"  # All contacts processed
+
+
+class ContactOutcome(str, Enum):
+    """
+    Outcome recorded per patient contact after an outbound call attempt.
+
+    PENDING  -- Not yet called
+    CALLING  -- Call in progress (transient state)
+    ACCEPTED -- Patient agreed / acknowledged the outreach
+    DECLINED -- Patient explicitly declined
+    VOICEMAIL -- Reached voicemail, message left
+    NO_ANSWER -- Phone rang, no answer, no voicemail
+    FAILED   -- Call could not be placed (bad number, carrier error)
+    """
+    PENDING = "pending"
+    CALLING = "calling"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    VOICEMAIL = "voicemail"
+    NO_ANSWER = "no_answer"
+    FAILED = "failed"
