@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "retell"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint — Black (format check)
+        run: black --check Clinic_app/ tests/ scripts/ --line-length 100
+
+      - name: Lint — Flake8
+        run: flake8 Clinic_app/ tests/ --max-line-length 100 --extend-ignore E203,W503
+
+      - name: Run unit tests
+        env:
+          DB_HOST: localhost
+          DB_NAME: test
+          DB_USER: test
+          DB_PASSWORD: test
+          PHI_ENCRYPTION_KEY: dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
+          ADMIN_API_KEY: test-admin-key
+          RETELL_WEBHOOK_SECRET: test-secret
+          ANTHROPIC_API_KEY: test-key
+        run: pytest tests/ -m unit --tb=short -q

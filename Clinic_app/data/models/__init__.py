@@ -9,5 +9,20 @@ from .patient import Patient
 from .booking import Booking
 from .booking_audit import BookingAudit
 from .call_log import CallLog
+from .campaign import Campaign
+from .campaign_contact import CampaignContact
 
-__all__ = ["Clinic", "License", "ClinicIntegration", "PhoneRoute", "Provider", "AvailabilitySlot", "Patient", "Booking", "BookingAudit", "CallLog"]
+__all__ = [
+    "Clinic",
+    "License",
+    "ClinicIntegration",
+    "PhoneRoute",
+    "Provider",
+    "AvailabilitySlot",
+    "Patient",
+    "Booking",
+    "BookingAudit",
+    "CallLog",
+    "Campaign",
+    "CampaignContact",
+]
