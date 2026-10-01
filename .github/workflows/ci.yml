@@ -34,7 +34,7 @@ jobs:
           DB_NAME: test
           DB_USER: test
           DB_PASSWORD: test
-          PHI_ENCRYPTION_KEY: dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXQ=
+          PHI_ENCRYPTION_KEY: dGVzdGtleXRlc3RrZXl0ZXN0a2V5dGVzdGtleXRlc3Q=
           ADMIN_API_KEY: test-admin-key
           RETELL_WEBHOOK_SECRET: test-secret
           ANTHROPIC_API_KEY: test-key
