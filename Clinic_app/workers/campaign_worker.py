@@ -29,6 +29,16 @@ POLL_INTERVAL_SECONDS = 30
 MAX_CONCURRENT_CALLS_PER_CLINIC = 3  # default; overridden by clinic license in production
 
 
+class _CampaignWorkerManager:
+    """Compatibility shim — the global poll loop handles all clinics; per-clinic start is a no-op."""
+
+    async def start_clinic_worker(self, clinic_id) -> None:  # noqa: ARG002
+        pass  # global worker already running
+
+
+campaign_worker_manager = _CampaignWorkerManager()
+
+
 async def _get_active_campaigns(db: AsyncSession) -> list[Campaign]:
     """Fetch all campaigns in QUEUED or RUNNING status."""
     result = await db.execute(

@@ -1,7 +1,18 @@
 # data/models/campaign_contact.py
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Integer, Text, LargeBinary, ForeignKey, Index
+from sqlalchemy import (
+    Column,
+    String,
+    DateTime,
+    Date,
+    Integer,
+    SmallInteger,
+    Text,
+    LargeBinary,
+    ForeignKey,
+    Index,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from Clinic_app.common.database import Base
@@ -51,10 +62,30 @@ class CampaignContact(Base):
     # SHA-256 of normalized E.164 phone — used for dedup without decryption
     phone_hash = Column(String(64), nullable=False)
 
-    # Per-contact outreach reason (may override campaign default)
-    reason = Column(Text, nullable=False)
+    # HEDIS-specific metadata
+    provider_name = Column(Text, nullable=True)
+    payer = Column(Text, nullable=True)
+    gap_type = Column(String(50), nullable=True, index=True)
+    preferred_language = Column(String(10), nullable=True)
 
-    # Call outcome tracking
+    # Per-contact outreach reason (may override campaign default)
+    reason = Column(Text, nullable=True)
+
+    # Full lifecycle status (ContactStatus enum) — used by advanced campaign_service
+    status = Column(
+        String(50),
+        nullable=False,
+        default="pending",
+        index=True,
+        comment="ContactStatus enum: pending|calling|booked|declined|voicemail|no_answer|error|exhausted|...",
+    )
+
+    # Scheduling
+    priority_order = Column(SmallInteger, nullable=True)
+    next_attempt_after = Column(DateTime(timezone=True), nullable=True)
+    release_date = Column(Date, nullable=True)
+
+    # Call outcome tracking (simple service compat — maps to ContactOutcome)
     outcome = Column(
         String(50),
         nullable=False,

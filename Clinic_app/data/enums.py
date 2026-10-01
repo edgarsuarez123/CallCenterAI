@@ -66,9 +66,12 @@ class CampaignStatus(str, Enum):
     """Lifecycle status for outbound calling campaigns."""
 
     DRAFT = "draft"  # Created but contacts not yet uploaded
+    PENDING = "pending"  # Contacts uploaded, ready to start (alias: DRAFT in simple service)
     QUEUED = "queued"  # Ready to run, waiting for worker to pick up
-    RUNNING = "running"  # Worker is actively processing contacts
+    ACTIVE = "active"  # Worker is actively processing contacts (used by campaign_service)
+    RUNNING = "running"  # Worker is actively processing contacts (used by simple campaign)
     PAUSED = "paused"  # Manually paused, can be resumed
+    CANCELED = "canceled"  # Manually canceled — can be restarted
     COMPLETED = "completed"  # All contacts processed
 
 
