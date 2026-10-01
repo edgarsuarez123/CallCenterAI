@@ -1,0 +1,15 @@
+[flake8]
+max-line-length = 100
+extend-ignore =
+    E203,
+    W503,
+    # E501: long lines in string literals and comments that Black cannot break
+    E501,
+
+per-file-ignores =
+    # Tests import symbols for fixtures, type checking, and test setup
+    tests/*:F401,F811,F841,E401,E402
+    # Alembic env.py imports all models so autogenerate detects schema changes
+    Clinic_app/alembic/env.py:E402,F401
+    # Alembic migration files have auto-generated style
+    Clinic_app/alembic/versions/*:E501,W291,E302

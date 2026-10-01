@@ -159,7 +159,6 @@ async def get_me(
     clinic_list = []
     for m in memberships:
         # Load clinic name — clinic is accessible via FK relationship
-        from sqlalchemy import select as sa_select
         from Clinic_app.data.models.clinic import Clinic
 
         clinic = await db.get(Clinic, m.clinic_id)

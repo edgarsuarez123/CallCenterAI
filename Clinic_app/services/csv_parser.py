@@ -27,7 +27,7 @@ import anthropic
 import openpyxl
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from Clinic_app.data.enums import GapType, APPOINTMENT_BASED_GAP_TYPES
+from Clinic_app.data.enums import GapType
 
 logger = logging.getLogger(__name__)
 

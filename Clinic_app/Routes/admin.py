@@ -8,7 +8,7 @@ Routes handle database operations directly (no service layer).
 import json
 import re
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime, timezone
 
@@ -980,7 +980,7 @@ async def get_ehr_status(
     Response: {"logged_in": bool, "mfa_required": bool}
     """
     from Clinic_app.common.redis import get_redis
-    from Clinic_app.services.playwright_ehr import playwright_ehr_service, MFA_REDIS_PREFIX
+    from Clinic_app.services.playwright_ehr import MFA_REDIS_PREFIX
 
     r = await get_redis()
     mfa_key = f"{MFA_REDIS_PREFIX}:{clinic_id}"
