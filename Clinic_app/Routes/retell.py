@@ -63,7 +63,7 @@ from Clinic_app.services.booking import (
 logger = logging.getLogger(__name__)
 
 # Router setup
-retell_router = APIRouter(prefix="/retell", tags=["retell"])
+retell_router = APIRouter(prefix="/retell", tags=["Retell Webhooks"])
 
 
 # ============================================================================

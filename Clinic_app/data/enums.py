@@ -51,19 +51,45 @@ class CallState(str, Enum):
     END_CALL = "end_call"  # Wrap-up or goodbye
 
 
-# ── HEDIS Campaign Enums ───────────────────────────────────────────────────────
+# ============================================================================
+# HEDIS CAMPAIGN ENUMS — Outbound Outreach
+# ============================================================================
 
 class CampaignStatus(str, Enum):
-    """Lifecycle state of a HEDIS outreach campaign (batch)."""
-    PENDING = "pending"        # Created, not yet started
-    ACTIVE = "active"          # Worker is actively placing calls
-    PAUSED = "paused"          # Manually paused by staff
-    COMPLETED = "completed"    # All contacts reached a final state
-    CANCELED = "canceled"      # Manually canceled
+    """Lifecycle status for outbound calling campaigns."""
+    DRAFT = "draft"          # Created but contacts not yet uploaded
+    QUEUED = "queued"        # Ready to run, waiting for worker to pick up
+    RUNNING = "running"      # Worker is actively processing contacts
+    PAUSED = "paused"        # Manually paused, can be resumed
+    COMPLETED = "completed"  # All contacts processed
+
+
+class ContactOutcome(str, Enum):
+    """
+    Outcome recorded per patient contact after an outbound call attempt.
+
+    PENDING   -- Not yet called
+    CALLING   -- Call in progress (transient state)
+    ACCEPTED  -- Patient agreed / acknowledged the outreach
+    DECLINED  -- Patient explicitly declined
+    VOICEMAIL -- Reached voicemail, message left
+    NO_ANSWER -- Phone rang, no answer, no voicemail
+    FAILED    -- Call could not be placed (bad number, carrier error)
+    """
+    PENDING = "pending"
+    CALLING = "calling"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    VOICEMAIL = "voicemail"
+    NO_ANSWER = "no_answer"
+    FAILED = "failed"
 
 
 class ContactStatus(str, Enum):
-    """Lifecycle state of a single patient contact within a campaign."""
+    """
+    Full lifecycle state for HEDIS campaign contacts (production use).
+    More granular than ContactOutcome — used by the advanced campaign_service.
+    """
     PENDING = "pending"                    # Not yet attempted
     CALLING = "calling"                    # Call in progress right now
     BOOKED = "booked"                      # Appointment successfully created in NextGen
@@ -76,12 +102,12 @@ class ContactStatus(str, Enum):
     EXHAUSTED = "exhausted"                # Max attempts reached, no booking — terminal
     HUMAN_REQUESTED = "human_requested"    # Patient asked for human — terminal
     NOT_YET_ELIGIBLE = "not_yet_eligible"  # Preventive visit not yet due — terminal
-    EXPIRED = "expired"                    # Hospital flu 7-day deadline passed before call — terminal
+    EXPIRED = "expired"                    # Hospital flu 7-day deadline passed — terminal
 
 
 class GapType(str, Enum):
     """
-    HEDIS care gap types (Plan 013 finalized taxonomy).
+    HEDIS care gap types.
 
     Appointment-based (Playwright books in NextGen):
       preventive_visit, hospital_flu
@@ -91,8 +117,6 @@ class GapType(str, Enum):
 
     Excluded (filtered at CSV parse — never enters campaign queue):
       medication_review
-
-    Unrecognized gap strings in CSV produce a parse error for that row (no fallback type).
     """
     PREVENTIVE_VISIT = "preventive_visit"    # Annual preventive / wellness visit
     HOSPITAL_FLU = "hospital_flu"            # Hospital follow-up within 7 days of discharge
@@ -118,4 +142,3 @@ ORDER_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
     GapType.KIDNEY,
     GapType.AFR_CMP,
 })
-

@@ -19,14 +19,13 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, field_validator
 
 from Clinic_app.common.database import get_db
+from Clinic_app.common.schemas import APIResponse
 from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.data.models.clinic_staff import ClinicStaff
-from Clinic_app.data.models.booking import Booking
 from Clinic_app.data.models.clinic_ehr_config import ClinicEHRConfig
-from Clinic_app.data.enums import BookingStatus, GapType
+from Clinic_app.data.enums import GapType
 from Clinic_app.common.encryption import encrypt_phi
-from Clinic_app.services.booking import list_bookings, cancel_booking, get_booking_by_id
 from Clinic_app.services.playbook_cache import invalidate_clinic_ehr_cache
 from Clinic_app.services.playwright_ehr import playwright_ehr_service
 from Clinic_app.services.auth_service import create_staff
@@ -34,7 +33,7 @@ from Clinic_app.services.auth_service import create_staff
 logger = logging.getLogger(__name__)
 
 # Router setup
-admin_router = APIRouter(prefix="/admin", tags=["admin"])
+admin_router = APIRouter(prefix="/admin", tags=["Clinic Admin"])
 
 # Validation constants
 VALID_CLINIC_TIERS = ["basic", "pro", "enterprise"]
@@ -112,14 +111,6 @@ def raise_conflict_error(message: str, code: str = "CONFLICT"):
 
 
 # Pydantic Models
-
-class APIResponse(BaseModel):
-    """Standardized API response wrapper."""
-    success: bool
-    data: Optional[Any] = None
-    error: Optional[Dict[str, Any]] = None
-    message: Optional[str] = None
-
 
 class ClinicBase(BaseModel):
     """Base clinic model."""
@@ -861,265 +852,9 @@ async def update_business_hours(
         )
 
 
-# Booking Models
-
-class BookingResponse(BaseModel):
-    """Response model for booking data."""
-    id: UUID
-    clinic_id: UUID
-    provider_id: UUID
-    patient_id: UUID
-    slot_start: datetime
-    slot_end: datetime
-    status: str
-    source: Optional[str]
-    google_event_id: Optional[str]
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class CancelBookingsRequest(BaseModel):
-    """Request model for bulk booking cancellation."""
-    booking_ids: List[UUID]
-    
-    @field_validator('booking_ids')
-    @classmethod
-    def validate_booking_ids(cls, v):
-        if not v:
-            raise ValueError("booking_ids cannot be empty")
-        if len(v) > 100:
-            raise ValueError("Cannot cancel more than 100 bookings at once")
-        return v
-
-
-# Booking Endpoints
-
-@admin_router.get("/clinics/{clinic_id}/bookings", response_model=APIResponse)
-async def list_clinic_bookings(
-    clinic_id: UUID,
-    provider_id: Optional[UUID] = None,
-    patient_id: Optional[UUID] = None,
-    status: Optional[str] = None,
-    start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None,
-    limit: int = 100,
-    offset: int = 0,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """
-    List bookings for a clinic with optional filters.
-    
-    Query parameters:
-    - provider_id: Filter by provider
-    - patient_id: Filter by patient
-    - status: Filter by status (tentative/confirmed/canceled)
-    - start_date: Bookings on or after this date
-    - end_date: Bookings on or before this date
-    - limit: Maximum results (default 100, max 1000)
-    - offset: Pagination offset (default 0)
-    """
-    # Check clinic exists
-    clinic = await db.get(Clinic, clinic_id)
-    if not clinic:
-        raise_not_found("Clinic", clinic_id)
-    
-    # Validate limit
-    if limit > 1000:
-        limit = 1000
-    if limit < 1:
-        limit = 100
-    
-    # Parse status filter
-    status_filter = None
-    if status:
-        try:
-            booking_status = BookingStatus(status)
-            status_filter = [booking_status]
-        except ValueError:
-            raise_validation_error(
-                f"Invalid status: {status}. Must be one of: tentative, confirmed, canceled",
-                "status"
-            )
-    
-    try:
-        bookings, total = await list_bookings(
-            db=db,
-            clinic_id=clinic_id,
-            provider_id=provider_id,
-            patient_id=patient_id,
-            status_filter=status_filter,
-            start_date=start_date,
-            end_date=end_date,
-            limit=limit,
-            offset=offset
-        )
-        
-        return APIResponse(
-            success=True,
-            data={
-                "bookings": [BookingResponse.model_validate(b) for b in bookings],
-                "total": total,
-                "limit": limit,
-                "offset": offset
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"Error listing bookings: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to list bookings"
-            }
-        )
-
-
-@admin_router.delete("/clinics/{clinic_id}/bookings/{booking_id}", response_model=APIResponse)
-async def cancel_clinic_booking(
-    clinic_id: UUID,
-    booking_id: UUID,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """
-    Cancel a single booking.
-    
-    This will:
-    - Delete the Google Calendar event (if exists)
-    - Set booking status to CANCELED
-    - Create audit entry
-    - Free up the time slot for new appointments
-    """
-    # Check clinic exists
-    clinic = await db.get(Clinic, clinic_id)
-    if not clinic:
-        raise_not_found("Clinic", clinic_id)
-    
-    # Check booking exists and belongs to clinic
-    booking = await get_booking_by_id(db, booking_id, clinic_id)
-    if not booking:
-        raise_not_found("Booking", booking_id)
-    
-    try:
-        canceled_booking = await cancel_booking(
-            db=db,
-            booking_id=booking_id,
-            clinic_id=clinic_id,
-            actor="admin"
-        )
-        
-        await db.commit()
-        logger.info(f"Booking canceled: booking_id={booking_id}, clinic_id={clinic_id}")
-        return APIResponse(
-            success=True,
-            message=f"Booking {booking_id} canceled successfully"
-        )
-            
-    except ValueError as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "VALIDATION_ERROR",
-                "message": str(e)
-            }
-        )
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Error canceling booking: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to cancel booking"
-            }
-        )
-
-
-@admin_router.delete("/clinics/{clinic_id}/bookings", response_model=APIResponse)
-async def cancel_clinic_bookings(
-    clinic_id: UUID,
-    request: CancelBookingsRequest,
-    db: AsyncSession = Depends(get_db)
-) -> APIResponse:
-    """
-    Cancel multiple bookings.
-    
-    This will:
-    - Delete Google Calendar events (if exist)
-    - Set booking status to CANCELED
-    - Create audit entries
-    - Free up time slots for new appointments
-    
-    Returns count of successfully canceled bookings.
-    """
-    # Check clinic exists
-    clinic = await db.get(Clinic, clinic_id)
-    if not clinic:
-        raise_not_found("Clinic", clinic_id)
-    
-    canceled_count = 0
-    failed_count = 0
-    errors = []
-    
-    try:
-        for booking_id in request.booking_ids:
-            try:
-                # Check booking exists and belongs to clinic
-                booking = await get_booking_by_id(db, booking_id, clinic_id)
-                if not booking:
-                    errors.append(f"Booking {booking_id} not found")
-                    failed_count += 1
-                    continue
-                
-                await cancel_booking(
-                    db=db,
-                    booking_id=booking_id,
-                    clinic_id=clinic_id,
-                    actor="admin"
-                )
-                
-                canceled_count += 1
-                    
-            except ValueError as e:
-                # Handle validation errors (e.g., already canceled)
-                failed_count += 1
-                errors.append(f"Booking {booking_id}: {str(e)}")
-            except Exception as e:
-                failed_count += 1
-                errors.append(f"Booking {booking_id}: {str(e)}")
-                logger.error(f"Error canceling booking {booking_id}: {str(e)}")
-        
-        await db.commit()
-        
-        logger.info(
-            f"Bulk booking cancellation completed: "
-            f"clinic_id={clinic_id}, canceled={canceled_count}, failed={failed_count}"
-        )
-        
-        return APIResponse(
-            success=True,
-            data={
-                "canceled_count": canceled_count,
-                "failed_count": failed_count,
-                "total_requested": len(request.booking_ids),
-                "errors": errors[:10]  # Limit errors in response
-            },
-            message=f"Canceled {canceled_count} booking(s), {failed_count} failed"
-        )
-        
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Error in bulk booking cancellation: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "INTERNAL_ERROR",
-                "message": "Failed to cancel bookings"
-            }
-        )
+# Note: Booking management endpoints (list/cancel) are part of the Phase 2
+# GCal-based scheduling system. They are implemented in services/booking.py
+# but not wired here to keep the MVP scope focused on outbound campaigns.
 
 
 # ── NextGen EHR (Playwright + AgentQL) — super-admin API key only ─────────────
