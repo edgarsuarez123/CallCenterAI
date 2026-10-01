@@ -6,7 +6,7 @@ clinic admins from the dashboard without needing a superadmin API key.
 """
 
 import logging
-from zoneinfo import available_timezones, ZoneInfoNotFoundError
+from zoneinfo import available_timezones
 from uuid import UUID
 
 from fastapi import HTTPException

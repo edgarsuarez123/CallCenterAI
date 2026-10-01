@@ -6,7 +6,6 @@ Handles authentication, CRUD operations, error handling, and thread pool executi
 """
 
 import json
-import os
 import asyncio
 import time
 from typing import Optional, List, Dict, Any, Tuple
@@ -195,7 +194,7 @@ class GoogleCalendarService:
                 result = await GoogleCalendarService._run_in_thread(sync_func)
                 duration_ms = int((time.time() - start_time) * 1000)
                 logger.info(
-                    f"Google Calendar API operation successful",
+                    "Google Calendar API operation successful",
                     extra={
                         "clinic_id": str(clinic_id),
                         "calendar_id": calendar_id,
@@ -214,7 +213,7 @@ class GoogleCalendarService:
                 if e.resp.status == 404:
                     duration_ms = int((time.time() - start_time) * 1000)
                     logger.warning(
-                        f"Google Calendar resource not found",
+                        "Google Calendar resource not found",
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
@@ -230,7 +229,7 @@ class GoogleCalendarService:
                 if e.resp.status == 403:
                     duration_ms = int((time.time() - start_time) * 1000)
                     logger.error(
-                        f"Google Calendar API access denied",
+                        "Google Calendar API access denied",
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
@@ -257,7 +256,7 @@ class GoogleCalendarService:
                         delay = 2**attempt
 
                     logger.warning(
-                        f"Google Calendar API operation failed, retrying",
+                        "Google Calendar API operation failed, retrying",
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
@@ -290,7 +289,7 @@ class GoogleCalendarService:
 
         if graceful_degradation:
             logger.warning(
-                f"Google Calendar API operation failed after retries - graceful degradation",
+                "Google Calendar API operation failed after retries - graceful degradation",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
@@ -304,7 +303,7 @@ class GoogleCalendarService:
             return None
         else:
             logger.error(
-                f"Google Calendar API operation failed after retries",
+                "Google Calendar API operation failed after retries",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
@@ -542,7 +541,7 @@ class GoogleCalendarService:
 
         if event:
             logger.info(
-                f"Google Calendar event created successfully",
+                "Google Calendar event created successfully",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
@@ -730,7 +729,7 @@ class GoogleCalendarService:
                     return (event_id, result if result is not None else False)
                 except Exception as e:
                     logger.warning(
-                        f"Failed to delete event in bulk operation",
+                        "Failed to delete event in bulk operation",
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
@@ -749,7 +748,7 @@ class GoogleCalendarService:
             for result in results:
                 if isinstance(result, Exception):
                     logger.warning(
-                        f"Exception in bulk delete operation",
+                        "Exception in bulk delete operation",
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
@@ -764,7 +763,7 @@ class GoogleCalendarService:
             duration_ms = int((time.time() - start_time) * 1000)
             success_count = sum(1 for v in result_dict.values() if v)
             logger.info(
-                f"Google Calendar bulk delete operation completed",
+                "Google Calendar bulk delete operation completed",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
@@ -781,7 +780,7 @@ class GoogleCalendarService:
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             logger.error(
-                f"Google Calendar bulk delete operation failed",
+                "Google Calendar bulk delete operation failed",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
@@ -874,4 +873,4 @@ class GoogleCalendarService:
             raise
         except GoogleCalendarError:
             # Re-raise other Google Calendar errors as GoogleCalendarNotFoundError
-            raise GoogleCalendarNotFoundError(f"Failed to validate calendar access")
+            raise GoogleCalendarNotFoundError("Failed to validate calendar access")

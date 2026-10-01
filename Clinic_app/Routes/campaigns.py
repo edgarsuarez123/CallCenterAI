@@ -34,7 +34,6 @@ from Clinic_app.data.enums import CampaignStatus, ContactStatus
 from Clinic_app.data.models.campaign_audit import CampaignAudit
 from Clinic_app.services.campaign_service import (
     CampaignCreateResult,
-    SkippedContact,
     cancel_campaign,
     create_campaign,
     get_campaign,
@@ -47,7 +46,7 @@ from Clinic_app.services.campaign_service import (
 from Clinic_app.workers.campaign_worker import campaign_worker_manager
 from Clinic_app.services.auth_service import get_staff_for_clinic
 from Clinic_app.services.clinic_service import get_clinic_settings
-from Clinic_app.services.csv_parser import ParseError, parse_file
+from Clinic_app.services.csv_parser import parse_file
 
 logger = logging.getLogger(__name__)
 

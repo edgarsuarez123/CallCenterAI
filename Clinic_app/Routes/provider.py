@@ -6,9 +6,9 @@ Routes handle database operations directly (no service layer).
 """
 
 import logging
-from typing import Optional, List, Any, Dict
+from typing import Optional, Any, Dict
 from uuid import UUID
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -423,7 +423,7 @@ async def list_providers(
     # Build query
     stmt = select(Provider).where(Provider.clinic_id == clinic_id)
     if active_only:
-        stmt = stmt.where(Provider.active == True)
+        stmt = stmt.where(Provider.active.is_(True))
 
     result = await db.execute(stmt)
     providers = result.scalars().all()

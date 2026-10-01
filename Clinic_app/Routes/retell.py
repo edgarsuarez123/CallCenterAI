@@ -21,7 +21,6 @@ from sqlalchemy import select, and_, func, cast, String
 from pydantic import BaseModel, ConfigDict
 
 from Clinic_app.common.database import get_db
-from Clinic_app.data.models.clinic import Clinic
 from Clinic_app.data.models.clinic_integration import ClinicIntegration
 from Clinic_app.data.models.provider import Provider
 from Clinic_app.data.models.booking import Booking
@@ -33,7 +32,6 @@ from Clinic_app.data.models.campaign_audit import CampaignAudit
 from Clinic_app.data.enums import (
     BookingStatus,
     ContactStatus,
-    CampaignStatus,
     ORDER_BASED_GAP_TYPES,
 )
 from Clinic_app.common.auth import verify_admin_api_key
@@ -223,7 +221,7 @@ async def _find_providers_by_name(db: AsyncSession, clinic_id: UUID, name: str) 
             and_(
                 Provider.clinic_id == clinic_id,
                 Provider.display_name.ilike(f"%{name}%"),
-                Provider.active == True,
+                Provider.active.is_(True),
             )
         )
     )
@@ -262,7 +260,7 @@ async def _get_providers_by_workload(db: AsyncSession, clinic_id: UUID) -> List[
     result = await db.execute(
         select(Provider, func.coalesce(booking_count_subq.c.booking_count, 0).label("count"))
         .outerjoin(booking_count_subq, Provider.id == booking_count_subq.c.provider_id)
-        .where(and_(Provider.clinic_id == clinic_id, Provider.active == True))
+        .where(and_(Provider.clinic_id == clinic_id, Provider.active.is_(True)))
         .order_by(func.coalesce(booking_count_subq.c.booking_count, 0).asc())
     )
 
@@ -334,7 +332,6 @@ async def verify_retell_signature(request: Request, body_bytes: bytes) -> None:
     """
     # Get environment mode
     app_env = os.environ.get("APP_ENVIRONMENT", "").lower()
-    is_production = app_env in ["production", "prod"]
     # Only bypass signature enforcement in explicit local development; staging enforces it
     is_development = app_env in ["development", "dev", "local", ""]
 

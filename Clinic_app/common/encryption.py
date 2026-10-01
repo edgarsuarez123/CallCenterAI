@@ -203,7 +203,7 @@ def decrypt_phi(encrypted: bytes) -> str:
         # Associated data is empty (must match encryption)
         try:
             plaintext_bytes = aesgcm.decrypt(iv, ciphertext_with_tag, None)
-        except Exception as e:
+        except Exception:
             # GCM will raise exception if auth tag verification fails
             logger.warning("Authentication tag verification failed - possible tampering detected")
             raise AuthenticationError(

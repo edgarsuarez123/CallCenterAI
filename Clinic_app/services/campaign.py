@@ -20,7 +20,7 @@ from uuid import UUID
 
 import re
 
-from sqlalchemy import select, and_, func
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.encryption import encrypt_phi, decrypt_phi
@@ -515,7 +515,7 @@ async def simulate_next_call(
     simulated_duration = random.randint(15, 180) if outcome != ContactOutcome.FAILED else 0
     fake_call_id = f"demo_{contact.id.hex[:8]}"
 
-    updated_contact = await record_outcome(
+    await record_outcome(
         db=db,
         contact_id=contact.id,
         clinic_id=clinic_id,

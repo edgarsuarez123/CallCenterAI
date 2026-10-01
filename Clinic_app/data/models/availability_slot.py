@@ -1,6 +1,5 @@
 # Clinic_app/data/models/availability_slot.py
 import uuid
-from datetime import datetime
 from sqlalchemy import (
     Column,
     DateTime,
