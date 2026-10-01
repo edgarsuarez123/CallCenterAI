@@ -45,8 +45,10 @@ campaign_router = APIRouter(
 # PYDANTIC MODELS
 # ============================================================================
 
+
 class CampaignCreateRequest(BaseModel):
     """Request body for creating a new outreach campaign."""
+
     name: str
     reason: str
 
@@ -62,6 +64,7 @@ class CampaignCreateRequest(BaseModel):
 
 class CampaignResponse(BaseModel):
     """Campaign summary returned by list and detail endpoints."""
+
     id: str
     clinic_id: str
     name: str
@@ -95,6 +98,7 @@ def _campaign_to_dict(c) -> dict:
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
+
 
 @campaign_router.post(
     "",
@@ -134,7 +138,9 @@ async def create_campaign_endpoint(
 )
 async def list_campaigns_endpoint(
     clinic_id: UUID,
-    status: Optional[str] = Query(None, description="Filter by status: draft|queued|running|paused|completed"),
+    status: Optional[str] = Query(
+        None, description="Filter by status: draft|queued|running|paused|completed"
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     campaigns = await list_campaigns(db, clinic_id, status_filter=status)

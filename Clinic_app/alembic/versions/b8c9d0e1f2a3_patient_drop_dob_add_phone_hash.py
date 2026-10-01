@@ -27,10 +27,7 @@ def upgrade() -> None:
     op.drop_column("patient", "dob_token")
 
     # Add phone_hash for efficient dedup without decryption — PHI Rule #8
-    op.add_column(
-        "patient",
-        sa.Column("phone_hash", sa.String(64), nullable=True)
-    )
+    op.add_column("patient", sa.Column("phone_hash", sa.String(64), nullable=True))
     op.create_index("idx_patient_clinic_phone_hash", "patient", ["clinic_id", "phone_hash"])
 
 
@@ -39,7 +36,4 @@ def downgrade() -> None:
     op.drop_column("patient", "phone_hash")
 
     # Restore dob_token as nullable (we cannot recover the original data)
-    op.add_column(
-        "patient",
-        sa.Column("dob_token", sa.LargeBinary(), nullable=True)
-    )
+    op.add_column("patient", sa.Column("dob_token", sa.LargeBinary(), nullable=True))

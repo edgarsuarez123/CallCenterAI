@@ -20,15 +20,15 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check database error: {e}", exc_info=True)
         db_status = "disconnected"
-    
+
     # Determine overall status
     overall_status = "healthy" if db_status == "connected" else "unhealthy"
-    
+
     return {
         "status": overall_status,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "service": "CallCenterAI API",
-        "database": db_status
+        "database": db_status,
     }
 
 
@@ -36,4 +36,3 @@ async def health_check():
 async def ping():
     """Simple ping endpoint - fastest response."""
     return {"pong": datetime.now(timezone.utc).isoformat()}
-

@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 
 _raw_origins = os.environ.get("ALLOWED_ORIGINS", "").strip()
 _allowed_origins: list[str] = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-_is_dev = os.environ.get("APP_ENVIRONMENT", "development").lower() in ("development", "dev", "local")
+_is_dev = os.environ.get("APP_ENVIRONMENT", "development").lower() in (
+    "development",
+    "dev",
+    "local",
+)
 
 if not _allowed_origins:
     # Fall back to CORS_ORIGINS env var (retell branch convention)

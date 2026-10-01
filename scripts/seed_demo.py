@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Load .env if present
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -52,26 +53,76 @@ DEMO_CLINIC_NAME = "Sunshine Family Practice"
 # Realistic patient dataset (names/phones are fictional)
 DEMO_PATIENTS = [
     # Completed campaign patients (varied outcomes)
-    {"name": "Maria Garcia",      "phone": "+17875550101", "outcome": "accepted",  "notes": "Patient acknowledged annual visit is overdue and agreed to schedule."},
-    {"name": "James Wilson",      "phone": "+17875550102", "outcome": "voicemail", "notes": "Voicemail reached; message left with clinic callback number."},
-    {"name": "Angela Torres",     "phone": "+17875550103", "outcome": "accepted",  "notes": "Patient expressed intent to call clinic and schedule within the week."},
-    {"name": "Robert Kim",        "phone": "+17875550104", "outcome": "declined",  "notes": "Patient stated they recently had a visit at another location."},
-    {"name": "Linda Morales",     "phone": "+17875550105", "outcome": "no_answer", "notes": "No answer after four rings; no voicemail detected."},
-    {"name": "David Chen",        "phone": "+17875550106", "outcome": "accepted",  "notes": "Patient was receptive; confirmed intent to schedule A1C follow-up."},
-    {"name": "Patricia Johnson",  "phone": "+17875550107", "outcome": "voicemail", "notes": "Voicemail reached; message left."},
-    {"name": "Carlos Rivera",     "phone": "+17875550108", "outcome": "accepted",  "notes": "Patient agreed; requested morning appointment preference noted."},
-    {"name": "Susan Lee",         "phone": "+17875550109", "outcome": "declined",  "notes": "Patient declined; stated they are no longer a patient at this clinic."},
-    {"name": "Michael Patel",     "phone": "+17875550110", "outcome": "no_answer", "notes": "No answer; attempt count recorded."},
+    {
+        "name": "Maria Garcia",
+        "phone": "+17875550101",
+        "outcome": "accepted",
+        "notes": "Patient acknowledged annual visit is overdue and agreed to schedule.",
+    },
+    {
+        "name": "James Wilson",
+        "phone": "+17875550102",
+        "outcome": "voicemail",
+        "notes": "Voicemail reached; message left with clinic callback number.",
+    },
+    {
+        "name": "Angela Torres",
+        "phone": "+17875550103",
+        "outcome": "accepted",
+        "notes": "Patient expressed intent to call clinic and schedule within the week.",
+    },
+    {
+        "name": "Robert Kim",
+        "phone": "+17875550104",
+        "outcome": "declined",
+        "notes": "Patient stated they recently had a visit at another location.",
+    },
+    {
+        "name": "Linda Morales",
+        "phone": "+17875550105",
+        "outcome": "no_answer",
+        "notes": "No answer after four rings; no voicemail detected.",
+    },
+    {
+        "name": "David Chen",
+        "phone": "+17875550106",
+        "outcome": "accepted",
+        "notes": "Patient was receptive; confirmed intent to schedule A1C follow-up.",
+    },
+    {
+        "name": "Patricia Johnson",
+        "phone": "+17875550107",
+        "outcome": "voicemail",
+        "notes": "Voicemail reached; message left.",
+    },
+    {
+        "name": "Carlos Rivera",
+        "phone": "+17875550108",
+        "outcome": "accepted",
+        "notes": "Patient agreed; requested morning appointment preference noted.",
+    },
+    {
+        "name": "Susan Lee",
+        "phone": "+17875550109",
+        "outcome": "declined",
+        "notes": "Patient declined; stated they are no longer a patient at this clinic.",
+    },
+    {
+        "name": "Michael Patel",
+        "phone": "+17875550110",
+        "outcome": "no_answer",
+        "notes": "No answer; attempt count recorded.",
+    },
     # Draft campaign patients (pending)
-    {"name": "Jennifer Adams",    "phone": "+17875550201", "outcome": "pending",   "notes": None},
-    {"name": "Thomas Martinez",   "phone": "+17875550202", "outcome": "pending",   "notes": None},
-    {"name": "Dorothy Hernandez", "phone": "+17875550203", "outcome": "pending",   "notes": None},
-    {"name": "Richard Lopez",     "phone": "+17875550204", "outcome": "pending",   "notes": None},
-    {"name": "Margaret Brown",    "phone": "+17875550205", "outcome": "pending",   "notes": None},
+    {"name": "Jennifer Adams", "phone": "+17875550201", "outcome": "pending", "notes": None},
+    {"name": "Thomas Martinez", "phone": "+17875550202", "outcome": "pending", "notes": None},
+    {"name": "Dorothy Hernandez", "phone": "+17875550203", "outcome": "pending", "notes": None},
+    {"name": "Richard Lopez", "phone": "+17875550204", "outcome": "pending", "notes": None},
+    {"name": "Margaret Brown", "phone": "+17875550205", "outcome": "pending", "notes": None},
 ]
 
 COMPLETED_PATIENTS = [p for p in DEMO_PATIENTS if p["outcome"] != "pending"]
-PENDING_PATIENTS   = [p for p in DEMO_PATIENTS if p["outcome"] == "pending"]
+PENDING_PATIENTS = [p for p in DEMO_PATIENTS if p["outcome"] == "pending"]
 
 
 def _hash_phone(phone: str) -> str:
@@ -80,12 +131,14 @@ def _hash_phone(phone: str) -> str:
 
 def _random_call_date(days_ago_max: int = 14) -> datetime:
     import random
+
     delta = timedelta(days=random.randint(0, days_ago_max), hours=random.randint(9, 17))
     return datetime.now(timezone.utc) - delta
 
 
 def _random_duration(outcome: str) -> int | None:
     import random
+
     if outcome in ("accepted", "declined"):
         return random.randint(45, 180)
     elif outcome == "voicemail":
@@ -103,9 +156,7 @@ async def seed(db: AsyncSession) -> None:
     # ------------------------------------------------------------------
     # Clinic
     # ------------------------------------------------------------------
-    existing = await db.execute(
-        select(Clinic).where(Clinic.name == DEMO_CLINIC_NAME)
-    )
+    existing = await db.execute(select(Clinic).where(Clinic.name == DEMO_CLINIC_NAME))
     clinic = existing.scalar_one_or_none()
 
     if clinic:
@@ -191,11 +242,11 @@ async def seed(db: AsyncSession) -> None:
         print(f"[OK]   Created campaign 1 (COMPLETED): {campaign1.id}")
 
         for p in COMPLETED_PATIENTS:
-            enc_name  = encrypt_phi(p["name"])
+            enc_name = encrypt_phi(p["name"])
             enc_phone = encrypt_phi(p["phone"])
-            ph_hash   = _hash_phone(p["phone"])
+            ph_hash = _hash_phone(p["phone"])
             call_date = _random_call_date() if p["outcome"] != "pending" else None
-            duration  = _random_duration(p["outcome"])
+            duration = _random_duration(p["outcome"])
 
             contact = CampaignContact(
                 campaign_id=campaign1.id,
@@ -242,9 +293,9 @@ async def seed(db: AsyncSession) -> None:
         print(f"[OK]   Created campaign 2 (DRAFT): {campaign2.id}")
 
         for p in PENDING_PATIENTS:
-            enc_name  = encrypt_phi(p["name"])
+            enc_name = encrypt_phi(p["name"])
             enc_phone = encrypt_phi(p["phone"])
-            ph_hash   = _hash_phone(p["phone"])
+            ph_hash = _hash_phone(p["phone"])
             contact = CampaignContact(
                 campaign_id=campaign2.id,
                 clinic_id=clinic_id,

@@ -24,6 +24,7 @@ os.environ.setdefault("PHI_HASH_KEY", "aGFzaGtleWhhc2hrZXloYXNoa2V5aGFzaGtleQ=="
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_request(ip: str = "1.2.3.4") -> MagicMock:
     """Build a minimal fake starlette Request with a given client IP."""
     req = MagicMock()
@@ -43,9 +44,9 @@ def _make_redis(current_count: int) -> AsyncMock:
 
 # ── make_rate_limit_dep ───────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestMakeRateLimitDep:
-
     @pytest.mark.asyncio
     async def test_allows_request_under_limit(self):
         """First request (count=1) must pass for a limit of 20/minute."""
@@ -147,9 +148,9 @@ class TestMakeRateLimitDep:
 
 # ── claude_rate_limit ─────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestClaudeRateLimit:
-
     @pytest.mark.asyncio
     async def test_allows_first_call(self):
         """First call for a clinic (count=1) must return True."""

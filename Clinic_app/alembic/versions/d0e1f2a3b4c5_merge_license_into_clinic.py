@@ -62,9 +62,7 @@ def downgrade() -> None:
         sa.Column("status", sa.String(50), nullable=False, server_default="active"),
         sa.Column("tier", sa.String(50), nullable=False),
         sa.Column("max_concurrency", sa.Integer(), nullable=False),
-        sa.Column(
-            "features", postgresql.JSONB(), nullable=False, server_default="{}"
-        ),
+        sa.Column("features", postgresql.JSONB(), nullable=False, server_default="{}"),
         sa.Column(
             "issued_at",
             sa.DateTime(timezone=True),

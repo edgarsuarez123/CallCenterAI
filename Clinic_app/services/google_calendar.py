@@ -31,21 +31,25 @@ _executor = ThreadPoolExecutor(max_workers=10)
 # Custom Exceptions
 class GoogleCalendarError(Exception):
     """Base exception for Google Calendar operations."""
+
     pass
 
 
 class GoogleCalendarAuthError(GoogleCalendarError):
     """Authentication/authorization failures."""
+
     pass
 
 
 class GoogleCalendarNotFoundError(GoogleCalendarError):
     """Event or calendar not found."""
+
     pass
 
 
 class GoogleCalendarRateLimitError(GoogleCalendarError):
     """Rate limit exceeded."""
+
     pass
 
 
@@ -62,10 +66,10 @@ class GoogleCalendarService:
     def _validate_service_account_json(json_data: Dict) -> bool:
         """
         Validate service account JSON has required fields.
-        
+
         Args:
             json_data: Parsed JSON dictionary
-            
+
         Returns:
             True if valid, False otherwise
         """
@@ -76,14 +80,14 @@ class GoogleCalendarService:
     async def get_credentials(clinic_id: UUID, db: AsyncSession):
         """
         Get service account credentials for clinic.
-        
+
         Args:
             clinic_id: UUID of the clinic
             db: Database session
-            
+
         Returns:
             google.oauth2.service_account.Credentials object
-            
+
         Raises:
             GoogleCalendarAuthError: If clinic_integration not found or JSON invalid
         """
@@ -91,10 +95,10 @@ class GoogleCalendarService:
         stmt = select(ClinicIntegration).where(ClinicIntegration.clinic_id == clinic_id)
         result = await db.execute(stmt)
         integration = result.scalar_one_or_none()
-        
+
         if not integration:
             raise GoogleCalendarAuthError(f"ClinicIntegration not found for clinic_id: {clinic_id}")
-        
+
         # Parse service account JSON — must be a JSON object, never a file path (M5: path traversal prevention)
         json_str = integration.google_service_account_json
         if not json_str or not json_str.strip().startswith("{"):
@@ -105,11 +109,11 @@ class GoogleCalendarService:
             json_data = json.loads(json_str)
         except json.JSONDecodeError as e:
             raise GoogleCalendarAuthError(f"Invalid service account JSON: {e}")
-        
+
         # Validate JSON structure
         if not GoogleCalendarService._validate_service_account_json(json_data):
             raise GoogleCalendarAuthError("Service account JSON missing required fields")
-        
+
         # Create credentials
         try:
             credentials = service_account.Credentials.from_service_account_info(json_data)
@@ -121,21 +125,21 @@ class GoogleCalendarService:
     async def get_calendar_service(clinic_id: UUID, db: AsyncSession):
         """
         Get Google Calendar API v3 service client.
-        
+
         Args:
             clinic_id: UUID of the clinic
             db: Database session
-            
+
         Returns:
             googleapiclient.discovery.Resource (Calendar API service)
-            
+
         Raises:
             GoogleCalendarAuthError: On auth failures
         """
         credentials = await GoogleCalendarService.get_credentials(clinic_id, db)
-        
+
         try:
-            service = build('calendar', 'v3', credentials=credentials)
+            service = build("calendar", "v3", credentials=credentials)
             return service
         except Exception as e:
             raise GoogleCalendarAuthError(f"Failed to build calendar service: {e}")
@@ -160,11 +164,11 @@ class GoogleCalendarService:
         db: AsyncSession,
         graceful_degradation: bool = False,
         return_on_404: Optional[Any] = None,
-        **log_context
+        **log_context,
     ) -> Optional[Any]:
         """
         Execute a Google Calendar API operation with retry logic.
-        
+
         Args:
             operation_name: Name of operation for logging
             clinic_id: Clinic UUID
@@ -174,10 +178,10 @@ class GoogleCalendarService:
             graceful_degradation: If True, return None/return_on_404 on failure instead of raising
             return_on_404: Value to return on 404 error (default: None)
             **log_context: Additional context for logging
-            
+
         Returns:
             Result of operation, or None/return_on_404 if graceful_degradation=True and operation failed
-            
+
         Raises:
             GoogleCalendarAuthError: On 403 errors (always raised)
             GoogleCalendarError: On other errors if graceful_degradation=False
@@ -185,7 +189,7 @@ class GoogleCalendarService:
         start_time = time.time()
         max_attempts = 3
         last_error = None
-        
+
         for attempt in range(max_attempts):
             try:
                 result = await GoogleCalendarService._run_in_thread(sync_func)
@@ -198,14 +202,14 @@ class GoogleCalendarService:
                         "operation": operation_name,
                         "attempt": attempt + 1,
                         "duration_ms": duration_ms,
-                        **log_context
-                    }
+                        **log_context,
+                    },
                 )
                 return result
-                
+
             except HttpError as e:
                 last_error = e
-                
+
                 # Handle 404 (not found)
                 if e.resp.status == 404:
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -217,11 +221,11 @@ class GoogleCalendarService:
                             "operation": operation_name,
                             "error_code": e.resp.status,
                             "duration_ms": duration_ms,
-                            **log_context
-                        }
+                            **log_context,
+                        },
                     )
                     return return_on_404
-                
+
                 # Handle 403 (access denied) - always raise
                 if e.resp.status == 403:
                     duration_ms = int((time.time() - start_time) * 1000)
@@ -233,15 +237,15 @@ class GoogleCalendarService:
                             "operation": operation_name,
                             "error_code": e.resp.status,
                             "duration_ms": duration_ms,
-                            **log_context
-                        }
+                            **log_context,
+                        },
                     )
                     raise GoogleCalendarAuthError(f"Access denied to calendar {calendar_id}")
-                
+
                 # Don't retry on non-retryable errors
                 if not GoogleCalendarService._should_retry_error(e):
                     break
-                
+
                 # Retry logic
                 if attempt < max_attempts - 1:
                     # Calculate backoff delay
@@ -250,8 +254,8 @@ class GoogleCalendarService:
                         delay = [5, 10, 20][min(attempt, 2)]
                     else:
                         # Standard backoff: 1s, 2s, 4s
-                        delay = 2 ** attempt
-                    
+                        delay = 2**attempt
+
                     logger.warning(
                         f"Google Calendar API operation failed, retrying",
                         extra={
@@ -262,26 +266,28 @@ class GoogleCalendarService:
                             "attempt": attempt + 1,
                             "max_attempts": max_attempts,
                             "retry_delay": delay,
-                            **log_context
-                        }
+                            **log_context,
+                        },
                     )
                     await asyncio.sleep(delay)
                 else:
                     # Last attempt failed
                     break
-                    
+
             except Exception as e:
                 last_error = e
                 if attempt < max_attempts - 1:
-                    delay = 2 ** attempt
+                    delay = 2**attempt
                     await asyncio.sleep(delay)
                 else:
                     break
-        
+
         # All retries exhausted
         duration_ms = int((time.time() - start_time) * 1000)
-        error_code = last_error.resp.status if (last_error and isinstance(last_error, HttpError)) else None
-        
+        error_code = (
+            last_error.resp.status if (last_error and isinstance(last_error, HttpError)) else None
+        )
+
         if graceful_degradation:
             logger.warning(
                 f"Google Calendar API operation failed after retries - graceful degradation",
@@ -292,8 +298,8 @@ class GoogleCalendarService:
                     "error_code": error_code,
                     "attempts": max_attempts,
                     "duration_ms": duration_ms,
-                    **log_context
-                }
+                    **log_context,
+                },
             )
             return None
         else:
@@ -306,9 +312,9 @@ class GoogleCalendarService:
                     "error_code": error_code,
                     "attempts": max_attempts,
                     "duration_ms": duration_ms,
-                    **log_context
+                    **log_context,
                 },
-                exc_info=True
+                exc_info=True,
             )
             if isinstance(last_error, HttpError):
                 raise GoogleCalendarError(f"Failed {operation_name}: {last_error}")
@@ -316,15 +322,17 @@ class GoogleCalendarService:
                 raise GoogleCalendarError(f"Failed {operation_name}: {last_error}")
 
     @staticmethod
-    def build_extended_properties(booking_id: UUID, clinic_id: UUID, reminded: bool = False) -> Dict:
+    def build_extended_properties(
+        booking_id: UUID, clinic_id: UUID, reminded: bool = False
+    ) -> Dict:
         """
         Build extended properties metadata dict.
-        
+
         Args:
             booking_id: UUID of the booking
             clinic_id: UUID of the clinic
             reminded: Whether reminder has been sent
-            
+
         Returns:
             Dict with extendedProperties.private structure
         """
@@ -334,7 +342,7 @@ class GoogleCalendarService:
                     "source": "callcenter_ai",
                     "booking_id": str(booking_id),
                     "clinic_id": str(clinic_id),
-                    "reminded": "true" if reminded else "false"
+                    "reminded": "true" if reminded else "false",
                 }
             }
         }
@@ -343,48 +351,52 @@ class GoogleCalendarService:
     def parse_extended_properties(event: Dict) -> Optional[Dict]:
         """
         Extract extended properties from event.
-        
+
         Args:
             event: Google Calendar event dictionary
-            
+
         Returns:
             Dict with private extended properties or None if not found
         """
         return event.get("extendedProperties", {}).get("private")
 
     @staticmethod
-    def count_overlapping_events(events: List[Dict], slot_start: datetime, slot_end: datetime) -> int:
+    def count_overlapping_events(
+        events: List[Dict], slot_start: datetime, slot_end: datetime
+    ) -> int:
         """
         Count events that overlap with a time slot.
-        
+
         Args:
             events: List of Google Calendar event dictionaries
             slot_start: Start datetime of the slot
             slot_end: End datetime of the slot
-            
+
         Returns:
             Count of overlapping events
         """
         count = 0
         for event in events:
-            event_start_str = event.get("start", {}).get("dateTime") or event.get("start", {}).get("date")
+            event_start_str = event.get("start", {}).get("dateTime") or event.get("start", {}).get(
+                "date"
+            )
             event_end_str = event.get("end", {}).get("dateTime") or event.get("end", {}).get("date")
-            
+
             if not event_start_str or not event_end_str:
                 continue
-            
+
             # Parse datetime strings (RFC3339 format)
             try:
-                event_start = datetime.fromisoformat(event_start_str.replace('Z', '+00:00'))
-                event_end = datetime.fromisoformat(event_end_str.replace('Z', '+00:00'))
-                
+                event_start = datetime.fromisoformat(event_start_str.replace("Z", "+00:00"))
+                event_end = datetime.fromisoformat(event_end_str.replace("Z", "+00:00"))
+
                 # Overlap logic: event.start < slot_end AND event.end > slot_start
                 if event_start < slot_end and event_end > slot_start:
                     count += 1
             except (ValueError, AttributeError):
                 # Skip events with invalid datetime formats
                 continue
-        
+
         return count
 
     @staticmethod
@@ -394,11 +406,11 @@ class GoogleCalendarService:
         time_max: datetime,
         clinic_id: UUID,
         db: AsyncSession,
-        filter_by_source: Optional[str] = None
+        filter_by_source: Optional[str] = None,
     ) -> List[Dict]:
         """
         List events from Google Calendar API.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             time_min: Start datetime (timezone-aware)
@@ -406,26 +418,30 @@ class GoogleCalendarService:
             clinic_id: For authentication
             db: Database session
             filter_by_source: Optional filter (e.g., "callcenter_ai")
-            
+
         Returns:
             List of event dictionaries
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         # Format datetimes as RFC3339
         time_min_str = time_min.isoformat()
         time_max_str = time_max.isoformat()
-        
+
         def _list_events_sync():
             """Synchronous function to list events."""
-            return service.events().list(
-                calendarId=calendar_id,
-                timeMin=time_min_str,
-                timeMax=time_max_str,
-                singleEvents=True,
-                orderBy='startTime'
-            ).execute()
-        
+            return (
+                service.events()
+                .list(
+                    calendarId=calendar_id,
+                    timeMin=time_min_str,
+                    timeMax=time_max_str,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
+            )
+
         # Execute with retry logic (graceful degradation - return empty list on failure)
         response = await GoogleCalendarService._execute_with_retry(
             operation_name="list_events",
@@ -435,18 +451,18 @@ class GoogleCalendarService:
             db=db,
             graceful_degradation=True,
             return_on_404=None,
-            event_count=0
+            event_count=0,
         )
-        
+
         if response is None:
             return []
-        
+
         # Handle case where response might be a list (from return_on_404) or a dict
         if isinstance(response, list):
             events = response
         else:
-            events = response.get('items', [])
-        
+            events = response.get("items", [])
+
         # Filter by source if requested
         if filter_by_source:
             filtered_events = []
@@ -455,7 +471,7 @@ class GoogleCalendarService:
                 if metadata and metadata.get("source") == filter_by_source:
                     filtered_events.append(event)
             events = filtered_events
-        
+
         return events
 
     @staticmethod
@@ -467,11 +483,11 @@ class GoogleCalendarService:
         description: Optional[str],
         extended_properties: Dict,
         clinic_id: UUID,
-        db: AsyncSession
+        db: AsyncSession,
     ) -> Optional[Dict]:
         """
         Create new calendar event.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             start: Start datetime (timezone-aware, RFC3339 format)
@@ -481,46 +497,39 @@ class GoogleCalendarService:
             extended_properties: Dict with extendedProperties structure
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             Event dictionary with 'id' field, or None if creation failed (graceful degradation)
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         # Format datetimes as RFC3339
         # Get timezone string from datetime object
         timezone_str = None
         if start.tzinfo:
-            if hasattr(start.tzinfo, 'zone'):
+            if hasattr(start.tzinfo, "zone"):
                 timezone_str = start.tzinfo.zone
-            elif hasattr(start.tzinfo, 'key'):
+            elif hasattr(start.tzinfo, "key"):
                 timezone_str = start.tzinfo.key
-        
+
         event_body = {
             "summary": summary,
-            "start": {
-                "dateTime": start.isoformat()
-            },
-            "end": {
-                "dateTime": end.isoformat()
-            },
-            **extended_properties
+            "start": {"dateTime": start.isoformat()},
+            "end": {"dateTime": end.isoformat()},
+            **extended_properties,
         }
-        
+
         if timezone_str:
             event_body["start"]["timeZone"] = timezone_str
             event_body["end"]["timeZone"] = timezone_str
-        
+
         if description:
             event_body["description"] = description
-        
+
         def _create_event_sync():
             """Synchronous function to create event."""
-            return service.events().insert(
-                calendarId=calendar_id,
-                body=event_body
-            ).execute()
-        
+            return service.events().insert(calendarId=calendar_id, body=event_body).execute()
+
         # Execute with retry logic (graceful degradation - allow booking to proceed if GCal fails)
         event = await GoogleCalendarService._execute_with_retry(
             operation_name="create_event",
@@ -528,19 +537,19 @@ class GoogleCalendarService:
             calendar_id=calendar_id,
             sync_func=_create_event_sync,
             db=db,
-            graceful_degradation=True
+            graceful_degradation=True,
         )
-        
+
         if event:
             logger.info(
                 f"Google Calendar event created successfully",
                 extra={
                     "clinic_id": str(clinic_id),
                     "calendar_id": calendar_id,
-                    "event_id": event.get("id")
-                }
+                    "event_id": event.get("id"),
+                },
             )
-        
+
         return event
 
     @staticmethod
@@ -552,11 +561,11 @@ class GoogleCalendarService:
         summary: Optional[str],
         extended_properties: Optional[Dict],
         clinic_id: UUID,
-        db: AsyncSession
+        db: AsyncSession,
     ) -> Optional[Dict]:
         """
         Update existing calendar event.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             event_id: Google Calendar event ID
@@ -566,19 +575,16 @@ class GoogleCalendarService:
             extended_properties: Optional new extended properties
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             Updated event dictionary, or None if event not found
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         # Fetch existing event first (with retry)
         def _get_event_sync():
-            return service.events().get(
-                calendarId=calendar_id,
-                eventId=event_id
-            ).execute()
-        
+            return service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+
         existing_event = await GoogleCalendarService._execute_with_retry(
             operation_name="get_event_for_update",
             clinic_id=clinic_id,
@@ -586,53 +592,49 @@ class GoogleCalendarService:
             sync_func=_get_event_sync,
             db=db,
             graceful_degradation=False,
-            event_id=event_id
+            event_id=event_id,
         )
-        
+
         if existing_event is None:
             return None
-        
+
         # Merge updates
         if start:
             timezone_str = None
             if start.tzinfo:
-                if hasattr(start.tzinfo, 'zone'):
+                if hasattr(start.tzinfo, "zone"):
                     timezone_str = start.tzinfo.zone
-                elif hasattr(start.tzinfo, 'key'):
+                elif hasattr(start.tzinfo, "key"):
                     timezone_str = start.tzinfo.key
-            
-            existing_event["start"] = {
-                "dateTime": start.isoformat()
-            }
+
+            existing_event["start"] = {"dateTime": start.isoformat()}
             if timezone_str:
                 existing_event["start"]["timeZone"] = timezone_str
-                
+
         if end:
             timezone_str = None
             if end.tzinfo:
-                if hasattr(end.tzinfo, 'zone'):
+                if hasattr(end.tzinfo, "zone"):
                     timezone_str = end.tzinfo.zone
-                elif hasattr(end.tzinfo, 'key'):
+                elif hasattr(end.tzinfo, "key"):
                     timezone_str = end.tzinfo.key
-            
-            existing_event["end"] = {
-                "dateTime": end.isoformat()
-            }
+
+            existing_event["end"] = {"dateTime": end.isoformat()}
             if timezone_str:
                 existing_event["end"]["timeZone"] = timezone_str
         if summary:
             existing_event["summary"] = summary
         if extended_properties:
             existing_event.update(extended_properties)
-        
+
         # Update event (with retry)
         def _update_event_sync():
-            return service.events().update(
-                calendarId=calendar_id,
-                eventId=event_id,
-                body=existing_event
-            ).execute()
-        
+            return (
+                service.events()
+                .update(calendarId=calendar_id, eventId=event_id, body=existing_event)
+                .execute()
+            )
+
         event = await GoogleCalendarService._execute_with_retry(
             operation_name="update_event",
             clinic_id=clinic_id,
@@ -640,39 +642,33 @@ class GoogleCalendarService:
             sync_func=_update_event_sync,
             db=db,
             graceful_degradation=False,
-            event_id=event_id
+            event_id=event_id,
         )
-        
+
         return event
 
     @staticmethod
     async def delete_event(
-        calendar_id: str,
-        event_id: str,
-        clinic_id: UUID,
-        db: AsyncSession
+        calendar_id: str, event_id: str, clinic_id: UUID, db: AsyncSession
     ) -> bool:
         """
         Delete calendar event.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             event_id: Google Calendar event ID
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             True if deleted, False if event not found
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         def _delete_event_sync():
-            service.events().delete(
-                calendarId=calendar_id,
-                eventId=event_id
-            ).execute()
+            service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
             return True
-        
+
         # Execute with retry logic (return False on 404, raise on other errors)
         result = await GoogleCalendarService._execute_with_retry(
             operation_name="delete_event",
@@ -682,48 +678,43 @@ class GoogleCalendarService:
             db=db,
             graceful_degradation=False,
             return_on_404=False,
-            event_id=event_id
+            event_id=event_id,
         )
-        
+
         return result if result is not None else False
 
     @staticmethod
     async def delete_multiple_events(
-        calendar_id: str,
-        event_ids: List[str],
-        clinic_id: UUID,
-        db: AsyncSession
+        calendar_id: str, event_ids: List[str], clinic_id: UUID, db: AsyncSession
     ) -> Dict[str, bool]:
         """
         Delete multiple calendar events in parallel (optimized).
-        
+
         Creates service client once and reuses it for all deletions.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             event_ids: List of Google Calendar event IDs
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             Dict mapping event_id -> True (success) or False (failed)
         """
         start_time = time.time()
         operation = "delete_multiple_events"
-        
+
         try:
             # Create service client once (optimization)
             service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-            
+
             async def _delete_single_event(event_id: str) -> Tuple[str, bool]:
                 """Helper to delete a single event with retry logic."""
+
                 def _delete_sync():
-                    service.events().delete(
-                        calendarId=calendar_id,
-                        eventId=event_id
-                    ).execute()
+                    service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
                     return True
-                
+
                 # Execute with retry logic
                 try:
                     result = await GoogleCalendarService._execute_with_retry(
@@ -734,7 +725,7 @@ class GoogleCalendarService:
                         db=db,
                         graceful_degradation=True,
                         return_on_404=False,
-                        event_id=event_id
+                        event_id=event_id,
                     )
                     return (event_id, result if result is not None else False)
                 except Exception as e:
@@ -744,15 +735,15 @@ class GoogleCalendarService:
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
                             "event_id": event_id,
-                            "error": str(e)
-                        }
+                            "error": str(e),
+                        },
                     )
                     return (event_id, False)
-            
+
             # Delete all events in parallel
             delete_tasks = [_delete_single_event(event_id) for event_id in event_ids]
             results = await asyncio.gather(*delete_tasks, return_exceptions=True)
-            
+
             # Build result dict
             result_dict = {}
             for result in results:
@@ -762,14 +753,14 @@ class GoogleCalendarService:
                         extra={
                             "clinic_id": str(clinic_id),
                             "calendar_id": calendar_id,
-                            "error": str(result)
-                        }
+                            "error": str(result),
+                        },
                     )
                     # Can't determine which event_id failed, skip it
                     continue
                 event_id, success = result
                 result_dict[event_id] = success
-            
+
             duration_ms = int((time.time() - start_time) * 1000)
             success_count = sum(1 for v in result_dict.values() if v)
             logger.info(
@@ -781,12 +772,12 @@ class GoogleCalendarService:
                     "total_events": len(event_ids),
                     "successful": success_count,
                     "failed": len(event_ids) - success_count,
-                    "duration_ms": duration_ms
-                }
+                    "duration_ms": duration_ms,
+                },
             )
-            
+
             return result_dict
-            
+
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             logger.error(
@@ -796,40 +787,34 @@ class GoogleCalendarService:
                     "calendar_id": calendar_id,
                     "operation": operation,
                     "error": str(e),
-                    "duration_ms": duration_ms
+                    "duration_ms": duration_ms,
                 },
-                exc_info=True
+                exc_info=True,
             )
             # Return all False on service client creation failure
             return {event_id: False for event_id in event_ids}
 
     @staticmethod
     async def get_event(
-        calendar_id: str,
-        event_id: str,
-        clinic_id: UUID,
-        db: AsyncSession
+        calendar_id: str, event_id: str, clinic_id: UUID, db: AsyncSession
     ) -> Optional[Dict]:
         """
         Retrieve specific event by ID.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             event_id: Google Calendar event ID
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             Event dictionary or None if not found
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         def _get_event_sync():
-            return service.events().get(
-                calendarId=calendar_id,
-                eventId=event_id
-            ).execute()
-        
+            return service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+
         # Execute with retry logic (return None on 404, raise on other errors)
         event = await GoogleCalendarService._execute_with_retry(
             operation_name="get_event",
@@ -839,36 +824,32 @@ class GoogleCalendarService:
             db=db,
             graceful_degradation=False,
             return_on_404=None,
-            event_id=event_id
+            event_id=event_id,
         )
-        
+
         return event
 
     @staticmethod
-    async def validate_calendar_access(
-        calendar_id: str,
-        clinic_id: UUID,
-        db: AsyncSession
-    ) -> bool:
+    async def validate_calendar_access(calendar_id: str, clinic_id: UUID, db: AsyncSession) -> bool:
         """
         Validate that service account can access the calendar.
-        
+
         Args:
             calendar_id: Provider's google_calendar_id
             clinic_id: For authentication
             db: Database session
-            
+
         Returns:
             True if accessible, False if not found or not shared
-            
+
         Raises:
             GoogleCalendarNotFoundError: If calendar not accessible
         """
         service = await GoogleCalendarService.get_calendar_service(clinic_id, db)
-        
+
         def _get_calendar_sync():
             return service.calendars().get(calendarId=calendar_id).execute()
-        
+
         # Execute with retry logic (raise exception on 404/403, not graceful degradation)
         try:
             result = await GoogleCalendarService._execute_with_retry(
@@ -877,19 +858,20 @@ class GoogleCalendarService:
                 calendar_id=calendar_id,
                 sync_func=_get_calendar_sync,
                 db=db,
-                graceful_degradation=False
+                graceful_degradation=False,
             )
-            
+
             # If result is None, it means 404 was returned
             if result is None:
-                raise GoogleCalendarNotFoundError(f"Calendar {calendar_id} not found or not shared with service account")
-            
+                raise GoogleCalendarNotFoundError(
+                    f"Calendar {calendar_id} not found or not shared with service account"
+                )
+
             return True
-            
+
         except GoogleCalendarAuthError:
             # Re-raise auth errors as-is
             raise
         except GoogleCalendarError:
             # Re-raise other Google Calendar errors as GoogleCalendarNotFoundError
             raise GoogleCalendarNotFoundError(f"Failed to validate calendar access")
-

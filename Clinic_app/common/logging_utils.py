@@ -14,6 +14,8 @@ def mask_phone_e164(e164: str) -> str:
 
 def mask_phone_in_string(text: str) -> str:
     """Replace any phone-like digit sequences (7+ digits) in a string with masked form."""
+
     def _replace(match: re.Match) -> str:
         return mask_phone_e164(match.group(0))
+
     return _E164_PATTERN.sub(_replace, text)

@@ -42,37 +42,37 @@ if DB_HOST and DB_NAME and DB_USER and DB_PASSWORD:
             pool_pre_ping=True,  # Test connections before using
             echo=False,  # Set to True for SQL query logging
             future=True,
-            connect_args={
-                "ssl": ssl_enabled
-            }
+            connect_args={"ssl": ssl_enabled},
         )
-        
+
         logger.info("Database engine created successfully")
     except Exception as e:
         # If engine creation fails (e.g., asyncpg not installed), log warning but continue
         # This allows imports to work for migrations even if asyncpg isn't available
-        logger.warning(f"Could not create database engine: {e}. This is OK for migration generation.")
+        logger.warning(
+            f"Could not create database engine: {e}. This is OK for migration generation."
+        )
         engine = None
 else:
-    logger.debug("Database environment variables not set. Engine creation skipped (OK for migration generation).")
+    logger.debug(
+        "Database environment variables not set. Engine creation skipped (OK for migration generation)."
+    )
 
 # Create async session factory (only if engine was created)
 AsyncSessionLocal = None
 if engine is not None:
-    AsyncSessionLocal = async_sessionmaker(
-        engine,
-        class_=AsyncSession,
-        expire_on_commit=False
-    )
+    AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 # Base for models
 Base = declarative_base()
+
 
 # Async dependency for FastAPI
 async def get_db():
     """Dependency to get database session."""
     if AsyncSessionLocal is None:
-        raise RuntimeError("Database engine not initialized. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables.")
+        raise RuntimeError(
+            "Database engine not initialized. Please set DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables."
+        )
     async with AsyncSessionLocal() as session:
         yield session
-

@@ -11,9 +11,7 @@ from Clinic_app.services import retell_client
 
 @pytest.mark.unit
 def test_normalize_metadata_coerces_to_str() -> None:
-    meta = retell_client._normalize_metadata(
-        {"a": 1, "b": None, "c": "x"}
-    )
+    meta = retell_client._normalize_metadata({"a": 1, "b": None, "c": "x"})
     assert meta == {"a": "1", "c": "x"}
 
 
@@ -52,7 +50,10 @@ async def test_create_outbound_call_missing_key_raises() -> None:
         os.environ.pop("RETELL_API_KEY", None)
         with pytest.raises(retell_client.RetellClientError, match="RETELL_API_KEY"):
             await retell_client.create_outbound_call(
-                "a", "+1", "+1", {},
+                "a",
+                "+1",
+                "+1",
+                {},
                 client=AsyncMock(),
             )
 
@@ -75,7 +76,10 @@ async def test_create_outbound_call_retries_on_500() -> None:
 
     with patch.dict(os.environ, {"RETELL_API_KEY": "k"}):
         cid = await retell_client.create_outbound_call(
-            "agent", "+15551111111", "+15552222222", {"x": "y"},
+            "agent",
+            "+15551111111",
+            "+15552222222",
+            {"x": "y"},
             client=client,
         )
     assert cid == "ok"

@@ -9,9 +9,10 @@ from Clinic_app.services import call_summarizer
 
 @pytest.mark.unit
 def test_summarize_empty_transcript() -> None:
-    assert "no usable transcript" in call_summarizer.summarize_transcript_sync(
-        "", "colorectal"
-    ).lower()
+    assert (
+        "no usable transcript"
+        in call_summarizer.summarize_transcript_sync("", "colorectal").lower()
+    )
 
 
 @pytest.mark.unit
@@ -68,8 +69,6 @@ def test_extract_order_notes_unparseable_returns_fallback() -> None:
 
     with patch.object(call_summarizer, "_get_anthropic_client", return_value=mock_client):
         with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "x"}):
-            out = call_summarizer.extract_order_based_notes_sync(
-                "some transcript", "colorectal"
-            )
+            out = call_summarizer.extract_order_based_notes_sync("some transcript", "colorectal")
     assert out["patient_agreed"] is None
     assert "unavailable" in out["note"].lower()

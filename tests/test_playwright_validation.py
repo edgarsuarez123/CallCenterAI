@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 # Contract: PlaywrightEHRService interface                                    #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.unit
 class TestPlaywrightEHRServiceContract:
     """
@@ -57,8 +58,7 @@ class TestPlaywrightEHRServiceContract:
         ]
 
         result = await mock_service.get_available_slots(
-            provider_name="Dr. Smith",
-            date="2026-04-01"
+            provider_name="Dr. Smith", date="2026-04-01"
         )
 
         assert isinstance(result, list), "get_available_slots must return a list"
@@ -71,7 +71,9 @@ class TestPlaywrightEHRServiceContract:
             # Times must include timezone offset for Retell to format correctly
             assert "T" in slot["start_time"], "start_time must be ISO 8601 with time component"
             assert (
-                "+" in slot["start_time"] or slot["start_time"].endswith("Z") or "-05" in slot["start_time"]
+                "+" in slot["start_time"]
+                or slot["start_time"].endswith("Z")
+                or "-05" in slot["start_time"]
             ), "start_time must include timezone offset"
 
     @pytest.mark.asyncio
@@ -81,8 +83,7 @@ class TestPlaywrightEHRServiceContract:
         mock_service.get_available_slots.return_value = []
 
         result = await mock_service.get_available_slots(
-            provider_name="Dr. Smith",
-            date="2026-04-01"
+            provider_name="Dr. Smith", date="2026-04-01"
         )
 
         assert result == [], "No availability must return [], not None or raise"
@@ -188,6 +189,7 @@ class TestPlaywrightEHRServiceContract:
 # Contract: Redis EHR slot cache key format                                   #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.unit
 class TestEHRSlotCacheKeys:
     """
@@ -223,4 +225,5 @@ class TestEHRSlotCacheKeys:
     def test_slot_cache_ttl_is_90_seconds(self):
         """EHR slot cache TTL must be 90s (pre-fetch runs every 60s, 30s buffer)."""
         from Clinic_app.services.playbook_cache import SLOT_CACHE_TTL_SECONDS
+
         assert SLOT_CACHE_TTL_SECONDS == 90

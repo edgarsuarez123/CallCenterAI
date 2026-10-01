@@ -28,9 +28,7 @@ def _slot_key(clinic_id: UUID, provider_name: str) -> str:
     return f"{SLOT_CACHE_PREFIX}:{clinic_id}:{safe_provider}"
 
 
-async def get_cached_slots(
-    clinic_id: UUID, provider_name: str
-) -> Optional[list[dict[str, Any]]]:
+async def get_cached_slots(clinic_id: UUID, provider_name: str) -> Optional[list[dict[str, Any]]]:
     """Return pre-fetched slot list, or None on cache miss."""
     r = await get_redis()
     key = _slot_key(clinic_id, provider_name)
@@ -40,7 +38,9 @@ async def get_cached_slots(
     try:
         return json.loads(val)
     except json.JSONDecodeError:
-        logger.warning("Corrupt slot cache for clinic %s provider %s — ignoring", clinic_id, provider_name)
+        logger.warning(
+            "Corrupt slot cache for clinic %s provider %s — ignoring", clinic_id, provider_name
+        )
         return None
 
 
@@ -53,7 +53,10 @@ async def set_cached_slots(
     await r.set(key, json.dumps(slots), ex=SLOT_CACHE_TTL_SECONDS)
     logger.debug(
         "Cached %d slots for clinic %s provider '%s' (TTL=%ds)",
-        len(slots), clinic_id, provider_name, SLOT_CACHE_TTL_SECONDS,
+        len(slots),
+        clinic_id,
+        provider_name,
+        SLOT_CACHE_TTL_SECONDS,
     )
 
 

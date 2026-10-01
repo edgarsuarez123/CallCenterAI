@@ -125,20 +125,25 @@ async def _prefetch_loop(clinic_id: UUID) -> None:
                             await set_cached_slots(clinic_id, provider_name, slots)
                             logger.info(
                                 "Pre-fetched %d slots for clinic %s provider '%s'",
-                                len(slots), clinic_id, provider_name,
+                                len(slots),
+                                clinic_id,
+                                provider_name,
                             )
                         else:
                             logger.warning(
                                 "No slots returned for clinic %s provider '%s' — "
                                 "EHR may be fully booked or navigation failed",
-                                clinic_id, provider_name,
+                                clinic_id,
+                                provider_name,
                             )
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
                         logger.error(
                             "slot_prefetch_loop error for clinic %s provider '%s': %s",
-                            clinic_id, provider_name, e,
+                            clinic_id,
+                            provider_name,
+                            e,
                         )
 
             except asyncio.CancelledError:

@@ -125,7 +125,7 @@ def run_migrations_online() -> None:
         # This allows migration generation without a database connection
         database_url = "postgresql+psycopg2://dummy:dummy@localhost/dummy"
         config.set_main_option("sqlalchemy.url", database_url)
-    
+
     try:
         connectable = engine_from_config(
             config.get_section(config.config_ini_section, {}),
@@ -146,6 +146,7 @@ def run_migrations_online() -> None:
     except Exception as e:
         # Re-raise the actual error instead of falling back to offline mode
         import logging
+
         logging.error(f"Migration failed: {e}")
         raise
 

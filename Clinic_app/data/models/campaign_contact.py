@@ -22,6 +22,7 @@ class CampaignContact(Base):
 
     Tenant isolation: every query MUST include clinic_id filter.
     """
+
     __tablename__ = "campaign_contact"
 
     id = Column(
@@ -61,7 +62,9 @@ class CampaignContact(Base):
         index=True,
         comment="ContactOutcome enum: pending|calling|accepted|declined|voicemail|no_answer|failed",
     )
-    retell_call_id = Column(String(255), nullable=True, comment="Retell call ID for correlation to call logs")
+    retell_call_id = Column(
+        String(255), nullable=True, comment="Retell call ID for correlation to call logs"
+    )
     call_duration_seconds = Column(Integer, nullable=True)
     call_date = Column(DateTime(timezone=True), nullable=True)
     attempt_count = Column(Integer, nullable=False, default=0)

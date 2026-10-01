@@ -39,11 +39,24 @@ class TestContactStatus:
     def test_all_values_present(self):
         values = {s.value for s in ContactStatus}
         # Core values — must always be present
-        assert {"pending", "calling", "booked", "declined",
-                "voicemail", "no_answer", "error", "exhausted"}.issubset(values)
+        assert {
+            "pending",
+            "calling",
+            "booked",
+            "declined",
+            "voicemail",
+            "no_answer",
+            "error",
+            "exhausted",
+        }.issubset(values)
         # Plan 013 additions
-        assert {"order_agreed", "order_declined", "not_yet_eligible", "expired",
-                "human_requested"}.issubset(values)
+        assert {
+            "order_agreed",
+            "order_declined",
+            "not_yet_eligible",
+            "expired",
+            "human_requested",
+        }.issubset(values)
 
     def test_is_str_enum(self):
         assert isinstance(ContactStatus.BOOKED, str)
@@ -74,9 +87,14 @@ class TestGapType:
     def test_plan_013_measures_present(self):
         """Verify the finalized Plan 013 gap type taxonomy is present."""
         expected = {
-            "preventive_visit", "hospital_flu",
-            "colorectal", "eye_exam", "breast_cancer",
-            "kidney", "afr_cmp", "medication_review",
+            "preventive_visit",
+            "hospital_flu",
+            "colorectal",
+            "eye_exam",
+            "breast_cancer",
+            "kidney",
+            "afr_cmp",
+            "medication_review",
         }
         assert {g.value for g in GapType} == expected
 

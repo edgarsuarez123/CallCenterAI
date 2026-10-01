@@ -23,9 +23,7 @@ class TestApptTypesPutRequest:
     def test_accepts_valid_gap_keys(self):
         from Clinic_app.Routes.admin import ApptTypesPutRequest
 
-        m = ApptTypesPutRequest(
-            mapping={"colorectal": "FIT", "kidney": "DM1"}
-        )
+        m = ApptTypesPutRequest(mapping={"colorectal": "FIT", "kidney": "DM1"})
         assert m.mapping["colorectal"] == "FIT"
 
 
@@ -85,7 +83,9 @@ class TestUpsertEhrConfigHandler:
             nextgen_password="secret",
         )
 
-        with patch("Clinic_app.Routes.admin.encrypt_phi", side_effect=lambda s: b"enc_" + s.encode()), patch(
+        with patch(
+            "Clinic_app.Routes.admin.encrypt_phi", side_effect=lambda s: b"enc_" + s.encode()
+        ), patch(
             "Clinic_app.Routes.admin.invalidate_clinic_ehr_cache", new_callable=AsyncMock
         ) as inv:
             await upsert_ehr_config(cid, req, mock_db)
@@ -107,9 +107,7 @@ class TestEhrTestCredentials:
         mock_db.execute = AsyncMock(return_value=mock_result)
         mock_db.commit = AsyncMock()
 
-        with patch(
-            "Clinic_app.Routes.admin.playwright_ehr_service"
-        ) as svc:
+        with patch("Clinic_app.Routes.admin.playwright_ehr_service") as svc:
             svc.test_credentials = AsyncMock(return_value={"success": True})
             resp = await ehr_test_credentials(cid, mock_db)
 

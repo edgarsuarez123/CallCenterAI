@@ -16,6 +16,7 @@ class TestVerifyAdminApiKey:
     async def test_valid_key_passes(self):
         with patch.dict(os.environ, {"ADMIN_API_KEY": "secret-key-123"}):
             from Clinic_app.common.auth import verify_admin_api_key
+
             result = await verify_admin_api_key("secret-key-123")
             assert result == "secret-key-123"
 
@@ -23,6 +24,7 @@ class TestVerifyAdminApiKey:
     async def test_missing_key_raises_401(self):
         with patch.dict(os.environ, {"ADMIN_API_KEY": "secret-key-123"}):
             from Clinic_app.common.auth import verify_admin_api_key
+
             with pytest.raises(HTTPException) as exc_info:
                 await verify_admin_api_key(None)
             assert exc_info.value.status_code == 401
@@ -32,6 +34,7 @@ class TestVerifyAdminApiKey:
     async def test_wrong_key_raises_403(self):
         with patch.dict(os.environ, {"ADMIN_API_KEY": "secret-key-123"}):
             from Clinic_app.common.auth import verify_admin_api_key
+
             with pytest.raises(HTTPException) as exc_info:
                 await verify_admin_api_key("wrong-key")
             assert exc_info.value.status_code == 403
@@ -41,6 +44,7 @@ class TestVerifyAdminApiKey:
     async def test_empty_string_key_raises_401(self):
         with patch.dict(os.environ, {"ADMIN_API_KEY": "secret-key-123"}):
             from Clinic_app.common.auth import verify_admin_api_key
+
             with pytest.raises(HTTPException) as exc_info:
                 await verify_admin_api_key("")
             assert exc_info.value.status_code == 401
@@ -51,6 +55,7 @@ class TestVerifyAdminApiKey:
         env = {k: v for k, v in os.environ.items() if k != "ADMIN_API_KEY"}
         with patch.dict(os.environ, env, clear=True):
             from Clinic_app.common.auth import verify_admin_api_key
+
             with pytest.raises(HTTPException) as exc_info:
                 await verify_admin_api_key("some-key")
             assert exc_info.value.status_code == 500

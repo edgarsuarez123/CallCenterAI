@@ -10,6 +10,7 @@ from .booking_audit import BookingAudit
 from .call_log import CallLog
 from .campaign import Campaign
 from .campaign_contact import CampaignContact
+
 # HEDIS / advanced models
 from .clinic_staff import ClinicStaff
 from .campaign_audit import CampaignAudit

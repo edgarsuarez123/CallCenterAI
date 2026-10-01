@@ -4,6 +4,7 @@ from enum import Enum
 
 class SlotStatus(str, Enum):
     """Status for availability slots."""
+
     FREE = "free"  # available to book
     BOOKED = "booked"  # already has a booking
     BLOCKED = "blocked"  # intentionally unavailable
@@ -11,12 +12,14 @@ class SlotStatus(str, Enum):
 
 class SlotSource(str, Enum):
     """Source of availability slot data."""
+
     CSV = "csv"  # imported from CSV
     GCAL = "gcal"  # synced from Google Calendar
 
 
 class BookingStatus(str, Enum):
     """Status for bookings."""
+
     TENTATIVE = "tentative"  # temporary hold
     CONFIRMED = "confirmed"  # finalized booking
     CANCELED = "canceled"  # canceled appointment
@@ -24,6 +27,7 @@ class BookingStatus(str, Enum):
 
 class BookingAction(str, Enum):
     """Actions that can be performed on bookings (for audit log)."""
+
     HOLD = "hold"  # Temporary reservation placed
     CONFIRM = "confirm"  # Booking confirmed
     CANCEL = "cancel"  # Booking canceled
@@ -32,6 +36,7 @@ class BookingAction(str, Enum):
 
 class CallStatus(str, Enum):
     """Status for call sessions."""
+
     ACTIVE = "active"  # call in progress
     ENDED = "ended"  # call completed normally
     TRANSFERRED = "transferred"  # call transferred to staff
@@ -40,6 +45,7 @@ class CallStatus(str, Enum):
 
 class CallState(str, Enum):
     """State machine for call flow."""
+
     GREETING = "greeting"  # Initial greeting or clinic intro
     INTENT_DETECTION = "intent_detection"  # Waiting for user intent
     BOOKING_INFO = "booking_info"  # Gathering patient info
@@ -55,12 +61,14 @@ class CallState(str, Enum):
 # HEDIS CAMPAIGN ENUMS — Outbound Outreach
 # ============================================================================
 
+
 class CampaignStatus(str, Enum):
     """Lifecycle status for outbound calling campaigns."""
-    DRAFT = "draft"          # Created but contacts not yet uploaded
-    QUEUED = "queued"        # Ready to run, waiting for worker to pick up
-    RUNNING = "running"      # Worker is actively processing contacts
-    PAUSED = "paused"        # Manually paused, can be resumed
+
+    DRAFT = "draft"  # Created but contacts not yet uploaded
+    QUEUED = "queued"  # Ready to run, waiting for worker to pick up
+    RUNNING = "running"  # Worker is actively processing contacts
+    PAUSED = "paused"  # Manually paused, can be resumed
     COMPLETED = "completed"  # All contacts processed
 
 
@@ -76,6 +84,7 @@ class ContactOutcome(str, Enum):
     NO_ANSWER -- Phone rang, no answer, no voicemail
     FAILED    -- Call could not be placed (bad number, carrier error)
     """
+
     PENDING = "pending"
     CALLING = "calling"
     ACCEPTED = "accepted"
@@ -90,19 +99,20 @@ class ContactStatus(str, Enum):
     Full lifecycle state for HEDIS campaign contacts (production use).
     More granular than ContactOutcome — used by the advanced campaign_service.
     """
-    PENDING = "pending"                    # Not yet attempted
-    CALLING = "calling"                    # Call in progress right now
-    BOOKED = "booked"                      # Appointment successfully created in NextGen
-    ORDER_AGREED = "order_agreed"          # Order-based gap: patient agreed, staff sends order
-    ORDER_DECLINED = "order_declined"      # Order-based gap: patient declined — terminal
-    DECLINED = "declined"                  # Patient explicitly declined appointment — terminal
-    VOICEMAIL = "voicemail"                # Reached voicemail — will retry
-    NO_ANSWER = "no_answer"                # No answer — will retry
-    ERROR = "error"                        # Technical error — will retry
-    EXHAUSTED = "exhausted"                # Max attempts reached, no booking — terminal
-    HUMAN_REQUESTED = "human_requested"    # Patient asked for human — terminal
+
+    PENDING = "pending"  # Not yet attempted
+    CALLING = "calling"  # Call in progress right now
+    BOOKED = "booked"  # Appointment successfully created in NextGen
+    ORDER_AGREED = "order_agreed"  # Order-based gap: patient agreed, staff sends order
+    ORDER_DECLINED = "order_declined"  # Order-based gap: patient declined — terminal
+    DECLINED = "declined"  # Patient explicitly declined appointment — terminal
+    VOICEMAIL = "voicemail"  # Reached voicemail — will retry
+    NO_ANSWER = "no_answer"  # No answer — will retry
+    ERROR = "error"  # Technical error — will retry
+    EXHAUSTED = "exhausted"  # Max attempts reached, no booking — terminal
+    HUMAN_REQUESTED = "human_requested"  # Patient asked for human — terminal
     NOT_YET_ELIGIBLE = "not_yet_eligible"  # Preventive visit not yet due — terminal
-    EXPIRED = "expired"                    # Hospital flu 7-day deadline passed — terminal
+    EXPIRED = "expired"  # Hospital flu 7-day deadline passed — terminal
 
 
 class GapType(str, Enum):
@@ -118,27 +128,32 @@ class GapType(str, Enum):
     Excluded (filtered at CSV parse — never enters campaign queue):
       medication_review
     """
-    PREVENTIVE_VISIT = "preventive_visit"    # Annual preventive / wellness visit
-    HOSPITAL_FLU = "hospital_flu"            # Hospital follow-up within 7 days of discharge
-    COLORECTAL = "colorectal"                # Colorectal cancer screening / stool test
-    EYE_EXAM = "eye_exam"                    # Eye exam / retinal exam
-    BREAST_CANCER = "breast_cancer"          # Breast cancer screening / mammogram
-    KIDNEY = "kidney"                        # Kidney function lab
-    AFR_CMP = "afr_cmp"                      # Albumin/creatinine ratio + urinalysis
+
+    PREVENTIVE_VISIT = "preventive_visit"  # Annual preventive / wellness visit
+    HOSPITAL_FLU = "hospital_flu"  # Hospital follow-up within 7 days of discharge
+    COLORECTAL = "colorectal"  # Colorectal cancer screening / stool test
+    EYE_EXAM = "eye_exam"  # Eye exam / retinal exam
+    BREAST_CANCER = "breast_cancer"  # Breast cancer screening / mammogram
+    KIDNEY = "kidney"  # Kidney function lab
+    AFR_CMP = "afr_cmp"  # Albumin/creatinine ratio + urinalysis
     MEDICATION_REVIEW = "medication_review"  # Excluded — filtered at parse, never called
 
 
 # Gap types that are appointment-based (Playwright books in NextGen EHR)
-APPOINTMENT_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
-    GapType.PREVENTIVE_VISIT,
-    GapType.HOSPITAL_FLU,
-})
+APPOINTMENT_BASED_GAP_TYPES: frozenset[GapType] = frozenset(
+    {
+        GapType.PREVENTIVE_VISIT,
+        GapType.HOSPITAL_FLU,
+    }
+)
 
 # Gap types that are order-based (voice call only — staff sends order manually)
-ORDER_BASED_GAP_TYPES: frozenset[GapType] = frozenset({
-    GapType.COLORECTAL,
-    GapType.EYE_EXAM,
-    GapType.BREAST_CANCER,
-    GapType.KIDNEY,
-    GapType.AFR_CMP,
-})
+ORDER_BASED_GAP_TYPES: frozenset[GapType] = frozenset(
+    {
+        GapType.COLORECTAL,
+        GapType.EYE_EXAM,
+        GapType.BREAST_CANCER,
+        GapType.KIDNEY,
+        GapType.AFR_CMP,
+    }
+)

@@ -57,6 +57,7 @@ def _make_mock_anthropic(response_json: dict = None):
 
 # ── normalize_phone ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestNormalizePhone:
     def test_10_digit_no_formatting(self):
@@ -89,6 +90,7 @@ class TestNormalizePhone:
 
 # ── map_gap_type ───────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestMapGapType:
     def test_known_mapping(self):
@@ -108,6 +110,7 @@ class TestMapGapType:
 
 # ── _detect_delimiter ──────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestDetectDelimiter:
     def test_comma(self):
@@ -121,6 +124,7 @@ class TestDetectDelimiter:
 
 
 # ── _build_column_mapping ──────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestBuildColumnMapping:
@@ -160,6 +164,7 @@ class TestBuildColumnMapping:
 
 # ── parse_file (CSV) ───────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestParseCSV:
     def _make_csv(self, rows: list[dict], delimiter: str = ",") -> bytes:
@@ -171,12 +176,26 @@ class TestParseCSV:
 
     def test_valid_csv_parses_correctly(self):
         # Uses canonical GapType values — direct header mapping handles this without Claude
-        csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "es",
-             "Member Name": "Juan Perez", "DOB": "1970-01-01", "Plan ID": "ABC"},
-            {"Member Phone": "7875559999", "HEDIS Measure": "kidney", "Language": "en",
-             "Member Name": "Maria Lopez", "DOB": "1980-06-15", "Plan ID": "XYZ"},
-        ])
+        csv_bytes = self._make_csv(
+            [
+                {
+                    "Member Phone": "7875551234",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "es",
+                    "Member Name": "Juan Perez",
+                    "DOB": "1970-01-01",
+                    "Plan ID": "ABC",
+                },
+                {
+                    "Member Phone": "7875559999",
+                    "HEDIS Measure": "kidney",
+                    "Language": "en",
+                    "Member Name": "Maria Lopez",
+                    "DOB": "1980-06-15",
+                    "Plan ID": "XYZ",
+                },
+            ]
+        )
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 2
         assert len(errors) == 0
@@ -187,20 +206,36 @@ class TestParseCSV:
         assert rows[1].gap_type == GapType.KIDNEY
 
     def test_bad_phone_goes_to_errors_not_raises(self):
-        csv_bytes = self._make_csv([
-            {"Member Phone": "NOT_A_PHONE", "HEDIS Measure": "colorectal", "Language": "en",
-             "Member Name": "Test", "DOB": "", "Plan ID": ""},
-        ])
+        csv_bytes = self._make_csv(
+            [
+                {
+                    "Member Phone": "NOT_A_PHONE",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "en",
+                    "Member Name": "Test",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+            ]
+        )
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 0
         assert len(errors) == 1
         assert "NOT_A_PHONE" in errors[0].reason or errors[0].row_number == 2
 
     def test_unrecognized_gap_type_is_parse_error(self):
-        csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "UNKNOWN_GAP", "Language": "en",
-             "Member Name": "", "DOB": "", "Plan ID": ""},
-        ])
+        csv_bytes = self._make_csv(
+            [
+                {
+                    "Member Phone": "7875551234",
+                    "HEDIS Measure": "UNKNOWN_GAP",
+                    "Language": "en",
+                    "Member Name": "",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+            ]
+        )
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 0
         assert len(errors) == 1
@@ -212,23 +247,52 @@ class TestParseCSV:
             parse_file(b"", filename="empty.csv")
 
     def test_mixed_valid_and_invalid_rows(self):
-        csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
-             "Member Name": "", "DOB": "", "Plan ID": ""},
-            {"Member Phone": "BADINPUT", "HEDIS Measure": "colorectal", "Language": "en",
-             "Member Name": "", "DOB": "", "Plan ID": ""},
-            {"Member Phone": "7875559999", "HEDIS Measure": "eye_exam", "Language": "es",
-             "Member Name": "", "DOB": "", "Plan ID": ""},
-        ])
+        csv_bytes = self._make_csv(
+            [
+                {
+                    "Member Phone": "7875551234",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "en",
+                    "Member Name": "",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+                {
+                    "Member Phone": "BADINPUT",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "en",
+                    "Member Name": "",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+                {
+                    "Member Phone": "7875559999",
+                    "HEDIS Measure": "eye_exam",
+                    "Language": "es",
+                    "Member Name": "",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+            ]
+        )
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 2
         assert len(errors) == 1
 
     def test_pipe_delimited_csv(self):
-        csv_bytes = self._make_csv([
-            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
-             "Member Name": "Test", "DOB": "", "Plan ID": ""},
-        ], delimiter="|")
+        csv_bytes = self._make_csv(
+            [
+                {
+                    "Member Phone": "7875551234",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "en",
+                    "Member Name": "Test",
+                    "DOB": "",
+                    "Plan ID": "",
+                },
+            ],
+            delimiter="|",
+        )
         rows, errors = parse_file(csv_bytes, filename="patients.csv")
         assert len(rows) == 1
         assert rows[0].phone_e164 == "+17875551234"
@@ -236,10 +300,12 @@ class TestParseCSV:
 
 # ── parse_file (Excel) ─────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestParseExcel:
     def _make_xlsx(self, rows: list[dict]) -> bytes:
         import openpyxl, io
+
         wb = openpyxl.Workbook()
         ws = wb.active
         headers = list(rows[0].keys())
@@ -251,10 +317,18 @@ class TestParseExcel:
         return buf.getvalue()
 
     def test_valid_xlsx_parses_correctly(self):
-        xlsx_bytes = self._make_xlsx([
-            {"Member Phone": "7875551234", "HEDIS Measure": "colorectal", "Language": "en",
-             "Member Name": "Test", "DOB": "1970-01-01", "Plan ID": "A"},
-        ])
+        xlsx_bytes = self._make_xlsx(
+            [
+                {
+                    "Member Phone": "7875551234",
+                    "HEDIS Measure": "colorectal",
+                    "Language": "en",
+                    "Member Name": "Test",
+                    "DOB": "1970-01-01",
+                    "Plan ID": "A",
+                },
+            ]
+        )
         rows, errors = parse_file(xlsx_bytes, filename="patients.xlsx")
         assert len(rows) == 1
         assert rows[0].phone_e164 == "+17875551234"
@@ -262,6 +336,7 @@ class TestParseExcel:
 
     def test_empty_xlsx_raises(self):
         import openpyxl, io
+
         wb = openpyxl.Workbook()
         buf = io.BytesIO()
         wb.save(buf)
@@ -270,6 +345,7 @@ class TestParseExcel:
 
 
 # ── _try_direct_header_mapping ─────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestDirectHeaderMapping:
@@ -329,6 +405,7 @@ class TestDirectHeaderMapping:
     def test_parse_file_uses_direct_mapping_for_standard_headers(self):
         # No Claude mock needed — direct mapping should succeed
         import io as _io
+
         csv_content = "Member Phone,Care Gap\n7875551234,preventive_visit\n"
         rows, errors = parse_file(csv_content.encode(), filename="test.csv")
         assert len(rows) == 1
@@ -338,6 +415,7 @@ class TestDirectHeaderMapping:
         # Headers not in alias table → direct mapping returns None → Claude called
         from unittest.mock import patch, MagicMock
         import json
+
         mock_resp = {
             "column_mapping": {"Mbr_Ph": "phone", "Measure_Cd": "gap_type"},
             "gap_type_values": {"COL": "colorectal"},
@@ -349,7 +427,9 @@ class TestDirectHeaderMapping:
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_response
 
-        with patch("Clinic_app.services.csv_parser._get_anthropic_client", return_value=mock_client):
+        with patch(
+            "Clinic_app.services.csv_parser._get_anthropic_client", return_value=mock_client
+        ):
             csv_content = "Mbr_Ph,Measure_Cd\n7875551234,COL\n"
             rows, errors = parse_file(csv_content.encode(), filename="test.csv")
         assert len(rows) == 1

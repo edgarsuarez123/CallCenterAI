@@ -36,6 +36,7 @@ class TestGoogleLoginRedirect:
         """GET /auth/google must return a 302 redirect to Google."""
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/auth/google", follow_redirects=False)
         assert response.status_code == 302
@@ -47,6 +48,7 @@ class TestGoogleLoginRedirect:
     def test_redirect_url_contains_required_params(self):
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/auth/google", follow_redirects=False)
         location = response.headers["location"]
@@ -59,17 +61,20 @@ class TestGoogleCallback:
     def _make_id_token(self, sub: str = "sub123", email: str = "staff@clinic.com") -> str:
         """Create a minimal Google-style ID token (unsigned — we skip verification)."""
         import jwt as pyjwt
+
         payload = {"sub": sub, "email": email, "aud": "test-client-id"}
         return pyjwt.encode(payload, "any-key", algorithm="HS256")
 
     def _valid_state(self) -> str:
         from Clinic_app.common.jwt import create_state_token
+
         return create_state_token()
 
     def test_invalid_state_returns_400(self):
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
         from Clinic_app.common.database import get_db
+
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
         client = TestClient(app, raise_server_exceptions=False)
@@ -88,10 +93,18 @@ class TestGoogleCallback:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock) as mock_exchange, \
-             patch("Clinic_app.Routes.auth.extract_google_user", return_value=("sub123", "staff@clinic.com")), \
-             patch("Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock), \
-             patch("Clinic_app.Routes.auth.get_staff_clinics", new_callable=AsyncMock, return_value=[mock_staff]):
+        with patch(
+            "Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock
+        ) as mock_exchange, patch(
+            "Clinic_app.Routes.auth.extract_google_user",
+            return_value=("sub123", "staff@clinic.com"),
+        ), patch(
+            "Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock
+        ), patch(
+            "Clinic_app.Routes.auth.get_staff_clinics",
+            new_callable=AsyncMock,
+            return_value=[mock_staff],
+        ):
             mock_exchange.return_value = {"id_token": self._make_id_token()}
 
             client = TestClient(app, raise_server_exceptions=False)
@@ -116,10 +129,18 @@ class TestGoogleCallback:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock) as mock_exchange, \
-             patch("Clinic_app.Routes.auth.extract_google_user", return_value=("sub123", "staff@clinic.com")), \
-             patch("Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock), \
-             patch("Clinic_app.Routes.auth.get_staff_clinics", new_callable=AsyncMock, return_value=[staff1, staff2]):
+        with patch(
+            "Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock
+        ) as mock_exchange, patch(
+            "Clinic_app.Routes.auth.extract_google_user",
+            return_value=("sub123", "staff@clinic.com"),
+        ), patch(
+            "Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock
+        ), patch(
+            "Clinic_app.Routes.auth.get_staff_clinics",
+            new_callable=AsyncMock,
+            return_value=[staff1, staff2],
+        ):
             mock_exchange.return_value = {"id_token": self._make_id_token()}
 
             client = TestClient(app, raise_server_exceptions=False)
@@ -140,10 +161,15 @@ class TestGoogleCallback:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock) as mock_exchange, \
-             patch("Clinic_app.Routes.auth.extract_google_user", return_value=("sub123", "e@e.com")), \
-             patch("Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock), \
-             patch("Clinic_app.Routes.auth.get_staff_clinics", new_callable=AsyncMock, return_value=[]):
+        with patch(
+            "Clinic_app.Routes.auth.exchange_code_for_tokens", new_callable=AsyncMock
+        ) as mock_exchange, patch(
+            "Clinic_app.Routes.auth.extract_google_user", return_value=("sub123", "e@e.com")
+        ), patch(
+            "Clinic_app.Routes.auth.upsert_staff_email", new_callable=AsyncMock
+        ), patch(
+            "Clinic_app.Routes.auth.get_staff_clinics", new_callable=AsyncMock, return_value=[]
+        ):
             mock_exchange.return_value = {"id_token": self._make_id_token()}
 
             client = TestClient(app, raise_server_exceptions=False)
@@ -159,11 +185,13 @@ class TestGoogleCallback:
 class TestGetMe:
     def _scoped_token(self, clinic_id: uuid.UUID) -> str:
         from Clinic_app.common.jwt import create_scoped_token
+
         return create_scoped_token("sub123", "staff@clinic.com", clinic_id, "admin")
 
     def test_no_token_returns_401(self):
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.get("/auth/me")
         assert response.status_code == 401
@@ -178,7 +206,11 @@ class TestGetMe:
         mock_clinic = MagicMock()
         mock_clinic.name = "Test Clinic"
 
-        with patch("Clinic_app.Routes.auth.get_staff_clinics", new_callable=AsyncMock, return_value=[mock_staff_row]):
+        with patch(
+            "Clinic_app.Routes.auth.get_staff_clinics",
+            new_callable=AsyncMock,
+            return_value=[mock_staff_row],
+        ):
             client = TestClient(app, raise_server_exceptions=False)
             token = self._scoped_token(clinic_id)
 
@@ -187,6 +219,7 @@ class TestGetMe:
                 mock_db.get = AsyncMock(return_value=mock_clinic)
                 # Provide db via override
                 from Clinic_app.common.database import get_db
+
                 app.dependency_overrides[get_db] = lambda: mock_db
 
                 response = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
@@ -202,11 +235,13 @@ class TestGetMe:
 class TestSelectClinic:
     def _unscoped_token(self) -> str:
         from Clinic_app.common.jwt import create_unscoped_token
+
         return create_unscoped_token("sub123", "staff@clinic.com")
 
     def test_no_token_returns_401(self):
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/auth/select-clinic", json={"clinic_id": str(uuid.uuid4())})
         assert response.status_code == 401
@@ -222,7 +257,11 @@ class TestSelectClinic:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.auth.get_staff_for_clinic", new_callable=AsyncMock, return_value=mock_staff):
+        with patch(
+            "Clinic_app.Routes.auth.get_staff_for_clinic",
+            new_callable=AsyncMock,
+            return_value=mock_staff,
+        ):
             client = TestClient(app, raise_server_exceptions=False)
             token = self._unscoped_token()
             response = client.post(
@@ -244,7 +283,9 @@ class TestSelectClinic:
         mock_db = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.auth.get_staff_for_clinic", new_callable=AsyncMock, return_value=None):
+        with patch(
+            "Clinic_app.Routes.auth.get_staff_for_clinic", new_callable=AsyncMock, return_value=None
+        ):
             client = TestClient(app, raise_server_exceptions=False)
             token = self._unscoped_token()
             response = client.post(
@@ -274,7 +315,9 @@ class TestAdminStaffEndpoints:
         mock_db.commit = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        with patch("Clinic_app.Routes.admin.create_staff", new_callable=AsyncMock, return_value=mock_staff):
+        with patch(
+            "Clinic_app.Routes.admin.create_staff", new_callable=AsyncMock, return_value=mock_staff
+        ):
             client = TestClient(app, raise_server_exceptions=False)
             response = client.post(
                 f"/admin/clinics/{clinic_id}/staff",
@@ -290,6 +333,7 @@ class TestAdminStaffEndpoints:
     def test_provision_staff_missing_admin_key_returns_401(self):
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
             f"/admin/clinics/{uuid.uuid4()}/staff",
@@ -308,8 +352,12 @@ class TestAdminStaffEndpoints:
         mock_db.rollback = AsyncMock()
         app.dependency_overrides[get_db] = lambda: mock_db
 
-        conflict = HTTPException(status_code=409, detail={"code": "ALREADY_PROVISIONED", "message": "Already exists"})
-        with patch("Clinic_app.Routes.admin.create_staff", new_callable=AsyncMock, side_effect=conflict):
+        conflict = HTTPException(
+            status_code=409, detail={"code": "ALREADY_PROVISIONED", "message": "Already exists"}
+        )
+        with patch(
+            "Clinic_app.Routes.admin.create_staff", new_callable=AsyncMock, side_effect=conflict
+        ):
             client = TestClient(app, raise_server_exceptions=False)
             response = client.post(
                 f"/admin/clinics/{clinic_id}/staff",

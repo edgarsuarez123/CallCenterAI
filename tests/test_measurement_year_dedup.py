@@ -35,6 +35,7 @@ def reset_hash_key():
 
 # ── hash_phone ─────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestHashPhone:
     def test_different_phones_different_hashes(self):
@@ -61,6 +62,7 @@ class TestHashPhone:
 
 # ── Dedup status sets ──────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestDedupStatusSets:
     def test_booked_is_in_dedup_block(self):
@@ -86,6 +88,7 @@ class TestDedupStatusSets:
 
 # ── create_campaign dedup behavior ────────────────────────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestCreateCampaignDedup:
@@ -96,6 +99,7 @@ class TestCreateCampaignDedup:
 
     def _make_parsed_row(self, phone: str, gap_type: GapType = GapType.COLORECTAL):
         from Clinic_app.services.csv_parser import ParsedRow
+
         return ParsedRow(
             phone_e164=phone,
             gap_type=gap_type,
@@ -129,9 +133,12 @@ class TestCreateCampaignDedup:
         mock_result.scalar_one_or_none.return_value = existing_contact
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("Clinic_app.services.campaign_service._find_duplicate_contact",
-                   new=AsyncMock(return_value=existing_contact)):
+        with patch(
+            "Clinic_app.services.campaign_service._find_duplicate_contact",
+            new=AsyncMock(return_value=existing_contact),
+        ):
             from Clinic_app.services.campaign_service import create_campaign
+
             result = await create_campaign(
                 db=mock_db,
                 clinic_id=uuid.uuid4(),
@@ -155,9 +162,12 @@ class TestCreateCampaignDedup:
         mock_db.commit = AsyncMock()
         mock_db.add = MagicMock()
 
-        with patch("Clinic_app.services.campaign_service._find_duplicate_contact",
-                   new=AsyncMock(return_value=existing_contact)):
+        with patch(
+            "Clinic_app.services.campaign_service._find_duplicate_contact",
+            new=AsyncMock(return_value=existing_contact),
+        ):
             from Clinic_app.services.campaign_service import create_campaign
+
             result = await create_campaign(
                 db=mock_db,
                 clinic_id=uuid.uuid4(),
@@ -177,11 +187,12 @@ class TestCreateCampaignDedup:
         mock_db.commit = AsyncMock()
         mock_db.add = MagicMock()
 
-        with patch("Clinic_app.services.campaign_service._find_duplicate_contact",
-                   new=AsyncMock(return_value=None)), \
-             patch("Clinic_app.services.campaign_service.encrypt_phi",
-                   return_value=b"encrypted"):
+        with patch(
+            "Clinic_app.services.campaign_service._find_duplicate_contact",
+            new=AsyncMock(return_value=None),
+        ), patch("Clinic_app.services.campaign_service.encrypt_phi", return_value=b"encrypted"):
             from Clinic_app.services.campaign_service import create_campaign
+
             result = await create_campaign(
                 db=mock_db,
                 clinic_id=uuid.uuid4(),
@@ -212,11 +223,11 @@ class TestCreateCampaignDedup:
         mock_db.commit = AsyncMock()
         mock_db.add = MagicMock()
 
-        with patch("Clinic_app.services.campaign_service._find_duplicate_contact",
-                   new=no_dup_for_second), \
-             patch("Clinic_app.services.campaign_service.encrypt_phi",
-                   return_value=b"encrypted"):
+        with patch(
+            "Clinic_app.services.campaign_service._find_duplicate_contact", new=no_dup_for_second
+        ), patch("Clinic_app.services.campaign_service.encrypt_phi", return_value=b"encrypted"):
             from Clinic_app.services.campaign_service import create_campaign
+
             result = await create_campaign(
                 db=mock_db,
                 clinic_id=uuid.uuid4(),
@@ -230,5 +241,5 @@ class TestCreateCampaignDedup:
                 clinic_integration=self._make_clinic_integration(),
             )
 
-        assert result.total_contacts == 1   # eye_exam created
+        assert result.total_contacts == 1  # eye_exam created
         assert len(result.skipped_contacts) == 1  # colorectal skipped

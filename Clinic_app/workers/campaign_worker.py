@@ -32,9 +32,7 @@ MAX_CONCURRENT_CALLS_PER_CLINIC = 3  # default; overridden by clinic license in 
 async def _get_active_campaigns(db: AsyncSession) -> list[Campaign]:
     """Fetch all campaigns in QUEUED or RUNNING status."""
     result = await db.execute(
-        select(Campaign).where(
-            Campaign.status.in_([CampaignStatus.QUEUED, CampaignStatus.RUNNING])
-        )
+        select(Campaign).where(Campaign.status.in_([CampaignStatus.QUEUED, CampaignStatus.RUNNING]))
     )
     return list(result.scalars().all())
 
