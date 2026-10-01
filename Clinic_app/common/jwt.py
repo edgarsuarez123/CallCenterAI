@@ -43,16 +43,19 @@ def _secret() -> str:
 
 # ── Payload model ──────────────────────────────────────────────────────────────
 
+
 class StaffToken(BaseModel):
     """Decoded JWT payload for an authenticated clinic staff member."""
+
     google_sub: str
     email: str
-    clinic_id: Optional[UUID] = None   # None in unscoped tokens
-    role: Optional[str] = None          # None in unscoped tokens; "admin" | "viewer" in scoped
-    token_type: str                     # "unscoped" | "scoped"
+    clinic_id: Optional[UUID] = None  # None in unscoped tokens
+    role: Optional[str] = None  # None in unscoped tokens; "admin" | "viewer" in scoped
+    token_type: str  # "unscoped" | "scoped"
 
 
 # ── Token creation ─────────────────────────────────────────────────────────────
+
 
 def create_state_token() -> str:
     """
@@ -124,14 +127,20 @@ def decode_token(token: str) -> StaffToken:
     try:
         payload = jwt.decode(token, _secret(), algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail={"code": "TOKEN_EXPIRED", "message": "Token has expired"})
+        raise HTTPException(
+            status_code=401, detail={"code": "TOKEN_EXPIRED", "message": "Token has expired"}
+        )
     except jwt.PyJWTError as exc:
         logger.warning(f"JWT decode failed: {exc}")
-        raise HTTPException(status_code=401, detail={"code": "INVALID_TOKEN", "message": "Invalid token"})
+        raise HTTPException(
+            status_code=401, detail={"code": "INVALID_TOKEN", "message": "Invalid token"}
+        )
 
     token_type = payload.get("type")
     if token_type not in ("unscoped", "scoped"):
-        raise HTTPException(status_code=401, detail={"code": "INVALID_TOKEN", "message": "Invalid token type"})
+        raise HTTPException(
+            status_code=401, detail={"code": "INVALID_TOKEN", "message": "Invalid token type"}
+        )
 
     clinic_id_raw = payload.get("clinic_id")
     return StaffToken(
@@ -144,6 +153,7 @@ def decode_token(token: str) -> StaffToken:
 
 
 # ── FastAPI dependencies ───────────────────────────────────────────────────────
+
 
 async def get_current_staff(
     credentials: HTTPAuthorizationCredentials = Security(_bearer_scheme),
@@ -172,6 +182,9 @@ async def require_scoped_staff(
     if not staff.clinic_id:
         raise HTTPException(
             status_code=403,
-            detail={"code": "CLINIC_NOT_SELECTED", "message": "Please select a clinic first via /auth/select-clinic"},
+            detail={
+                "code": "CLINIC_NOT_SELECTED",
+                "message": "Please select a clinic first via /auth/select-clinic",
+            },
         )
     return staff

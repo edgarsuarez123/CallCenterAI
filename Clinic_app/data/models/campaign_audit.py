@@ -20,23 +20,44 @@ class CampaignAudit(Base):
       The raw Retell transcript is NEVER stored — discarded after summary generation.
     - No patient phone here — correlate via campaign_contact_id if needed.
     """
+
     __tablename__ = "campaign_audit"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    campaign_contact_id = Column(UUID(as_uuid=True), ForeignKey("campaign_contact.id", ondelete="CASCADE"), nullable=False, index=True)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False, index=True)
-    clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True)
+    campaign_contact_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign_contact.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    campaign_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("campaign.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    clinic_id = Column(
+        UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, index=True
+    )
 
     retell_call_id = Column(String, nullable=False, index=True)  # For webhook correlation
 
-    outcome = Column(String(50), nullable=False)               # ContactStatus value: BOOKED | DECLINED | VOICEMAIL | NO_ANSWER | ERROR
+    outcome = Column(
+        String(50), nullable=False
+    )  # ContactStatus value: BOOKED | DECLINED | VOICEMAIL | NO_ANSWER | ERROR
 
     # PHI — encrypted at rest
-    patient_name_encrypted = Column(BYTEA, nullable=True)      # AES-256-GCM — for dashboard display only
-    call_summary_encrypted = Column(BYTEA, nullable=True)      # One-sentence Claude summary, AES-256-GCM
+    patient_name_encrypted = Column(
+        BYTEA, nullable=True
+    )  # AES-256-GCM — for dashboard display only
+    call_summary_encrypted = Column(
+        BYTEA, nullable=True
+    )  # One-sentence Claude summary, AES-256-GCM
 
-    ehr_appointment_id = Column(String, nullable=True)         # NextGen appointment ID if outcome == BOOKED
-    attempt_number = Column(Integer, nullable=False)           # 1, 2, or 3
+    ehr_appointment_id = Column(
+        String, nullable=True
+    )  # NextGen appointment ID if outcome == BOOKED
+    attempt_number = Column(Integer, nullable=False)  # 1, 2, or 3
 
     called_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

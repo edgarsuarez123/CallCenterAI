@@ -46,10 +46,7 @@ from Clinic_app.services.call_summarizer import (
     summarize_transcript_sync,
 )
 from Clinic_app.services.patient import find_patient, create_patient
-from Clinic_app.services.availability import (
-    get_available_slots,
-    get_next_available_slots
-)
+from Clinic_app.services.availability import get_available_slots, get_next_available_slots
 from Clinic_app.services.playwright_ehr import playwright_ehr_service
 from Clinic_app.services.booking import (
     create_tentative_booking,
@@ -57,7 +54,7 @@ from Clinic_app.services.booking import (
     cancel_booking,
     reschedule_booking,
     get_patient_bookings,
-    get_booking_by_id
+    get_booking_by_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,8 +67,10 @@ retell_router = APIRouter(prefix="/retell", tags=["Retell Webhooks"])
 # PYDANTIC MODELS
 # ============================================================================
 
+
 class ScheduleRequest(BaseModel):
     """Request for scheduling operations (book/cancel/reschedule)."""
+
     call_id: str
     clinic_id: UUID
     patient_name: str
@@ -81,8 +80,12 @@ class ScheduleRequest(BaseModel):
     intent: str  # "book", "cancel", "reschedule"
     preferred_date: Optional[str] = None  # YYYY-MM-DD (new date for reschedule)
     preferred_time_range: Optional[List[str]] = None  # ["09:00", "12:00"] (new time for reschedule)
-    current_appointment_date: Optional[str] = None  # YYYY-MM-DD (existing appointment date to reschedule)
-    current_appointment_time_range: Optional[List[str]] = None  # ["09:00", "12:00"] (existing appointment time to reschedule)
+    current_appointment_date: Optional[
+        str
+    ] = None  # YYYY-MM-DD (existing appointment date to reschedule)
+    current_appointment_time_range: Optional[
+        List[str]
+    ] = None  # ["09:00", "12:00"] (existing appointment time to reschedule)
     provider_preference: Optional[str] = None
     language: str = "en"
     booking_id: Optional[UUID] = None  # For cancel/reschedule
@@ -90,6 +93,7 @@ class ScheduleRequest(BaseModel):
 
 class ScheduleResponse(BaseModel):
     """Response for scheduling operations."""
+
     success: bool
     message: str
     booking: Optional[Dict[str, Any]] = None
@@ -105,12 +109,14 @@ class ScheduleResponse(BaseModel):
 
 class ConfirmRequest(BaseModel):
     """Request to confirm a tentative booking."""
+
     hold_token: UUID
     clinic_id: UUID
 
 
 class ConfirmResponse(BaseModel):
     """Response for booking confirmation."""
+
     success: bool
     message: str
     booking: Optional[Dict[str, Any]] = None
@@ -118,6 +124,7 @@ class ConfirmResponse(BaseModel):
 
 class AvailabilityResponse(BaseModel):
     """Response for availability check."""
+
     success: bool
     message: str
     slots: List[Dict[str, Any]] = []
@@ -125,6 +132,7 @@ class AvailabilityResponse(BaseModel):
 
 class EhrToolSlotsResponse(BaseModel):
     """NextGen EHR slots for Retell mid-call tool (human-readable strings)."""
+
     success: bool
     message: str = ""
     slots: List[str] = []
@@ -133,6 +141,7 @@ class EhrToolSlotsResponse(BaseModel):
 
 class EhrBookAppointmentResponse(BaseModel):
     """NextGen booking result for Retell mid-call tool."""
+
     success: bool
     message: str = ""
     ehr_appointment_id: Optional[str] = None
@@ -140,6 +149,7 @@ class EhrBookAppointmentResponse(BaseModel):
 
 class CallStartedWebhook(BaseModel):
     """Webhook payload for call started event (can be called as custom function or webhook)."""
+
     model_config = ConfigDict(extra="ignore")
 
     call_id: str
@@ -153,6 +163,7 @@ class CallStartedWebhook(BaseModel):
 
 class CallEndedWebhook(BaseModel):
     """Webhook payload for call ended event."""
+
     model_config = ConfigDict(extra="ignore")
 
     call_id: str
@@ -167,17 +178,18 @@ class CallEndedWebhook(BaseModel):
 # HELPER FUNCTIONS
 # ============================================================================
 
+
 async def _get_clinic_by_agent_id(db: AsyncSession, agent_id: str) -> UUID:
     """
     Lookup clinic_id from Retell agent_id.
-    
+
     Args:
         db: Database session
         agent_id: Retell agent identifier
-        
+
     Returns:
         clinic_id UUID
-        
+
     Raises:
         ValueError: If no clinic found for agent
     """
@@ -185,28 +197,24 @@ async def _get_clinic_by_agent_id(db: AsyncSession, agent_id: str) -> UUID:
         select(ClinicIntegration).where(ClinicIntegration.retell_agent_id == agent_id)
     )
     integration = result.scalar_one_or_none()
-    
+
     if not integration:
         logger.warning(f"No clinic found for agent_id: {agent_id}")
         raise ValueError(f"No clinic found for agent_id: {agent_id}")
-    
+
     return integration.clinic_id
 
 
-async def _find_providers_by_name(
-    db: AsyncSession,
-    clinic_id: UUID,
-    name: str
-) -> List[Provider]:
+async def _find_providers_by_name(db: AsyncSession, clinic_id: UUID, name: str) -> List[Provider]:
     """
     Find providers matching a name (case-insensitive partial match).
     Returns LIST to handle multiple matches (e.g., "Dr. Maria Lopez", "Dr. Juan Lopez").
-    
+
     Args:
         db: Database session
         clinic_id: Clinic UUID
         name: Provider name to search for
-        
+
     Returns:
         List of matching Provider instances
     """
@@ -215,76 +223,61 @@ async def _find_providers_by_name(
             and_(
                 Provider.clinic_id == clinic_id,
                 Provider.display_name.ilike(f"%{name}%"),
-                Provider.active == True
+                Provider.active == True,
             )
         )
     )
     return list(result.scalars().all())
 
 
-async def _get_providers_by_workload(
-    db: AsyncSession,
-    clinic_id: UUID
-) -> List[Provider]:
+async def _get_providers_by_workload(db: AsyncSession, clinic_id: UUID) -> List[Provider]:
     """
     Get active providers sorted by workload (least busy first).
     Counts upcoming CONFIRMED bookings per provider for load balancing.
-    
+
     Args:
         db: Database session
         clinic_id: Clinic UUID
-        
+
     Returns:
         List of Provider instances sorted by booking count (ascending)
     """
     now = datetime.now(timezone.utc)
-    
+
     # Subquery to count upcoming confirmed bookings per provider
     booking_count_subq = (
-        select(
-            Booking.provider_id,
-            func.count(Booking.id).label("booking_count")
-        )
+        select(Booking.provider_id, func.count(Booking.id).label("booking_count"))
         .where(
             and_(
                 Booking.clinic_id == clinic_id,
                 cast(Booking.status, String) == BookingStatus.CONFIRMED.value,
-                Booking.slot_start >= now
+                Booking.slot_start >= now,
             )
         )
         .group_by(Booking.provider_id)
         .subquery()
     )
-    
+
     # Get providers with their booking counts, ordered by count ascending
     result = await db.execute(
         select(Provider, func.coalesce(booking_count_subq.c.booking_count, 0).label("count"))
         .outerjoin(booking_count_subq, Provider.id == booking_count_subq.c.provider_id)
-        .where(
-            and_(
-                Provider.clinic_id == clinic_id,
-                Provider.active == True
-            )
-        )
+        .where(and_(Provider.clinic_id == clinic_id, Provider.active == True))
         .order_by(func.coalesce(booking_count_subq.c.booking_count, 0).asc())
     )
-    
+
     # Extract just the Provider objects
     rows = result.all()
     return [row[0] for row in rows]
 
 
-async def _update_call_log_booking(
-    db: AsyncSession,
-    call_id: str,
-    booking_id: UUID
-) -> None:
+async def _update_call_log_booking(db: AsyncSession, call_id: str, booking_id: UUID) -> None:
     """
     Link a tentative booking to a CallLog for cleanup on call_ended.
-    
+
     If multiple CallLog entries exist for the same call_id (e.g., in testing),
     uses the most recent one (ordered by started_at DESC).
-    
+
     Args:
         db: Database session
         call_id: Retell call identifier
@@ -297,7 +290,7 @@ async def _update_call_log_booking(
         .limit(1)
     )
     call_log = result.scalar_one_or_none()
-    
+
     if call_log:
         call_log.tentative_booking_id = booking_id
         await db.flush()
@@ -309,15 +302,15 @@ async def _update_call_log_booking(
 def _booking_to_dict(booking: Booking, provider_name: str) -> Dict[str, Any]:
     """Convert Booking model to response dictionary."""
     # Handle both enum and string values for status
-    status_value = booking.status.value if hasattr(booking.status, 'value') else booking.status
-    
+    status_value = booking.status.value if hasattr(booking.status, "value") else booking.status
+
     return {
         "id": str(booking.id),
         "provider_name": provider_name,
         "start_time": booking.slot_start.isoformat(),
         "end_time": booking.slot_end.isoformat(),
         "status": status_value,
-        "date": booking.slot_start.date().isoformat()
+        "date": booking.slot_start.date().isoformat(),
     }
 
 
@@ -325,19 +318,17 @@ def _booking_to_dict(booking: Booking, provider_name: str) -> Dict[str, Any]:
 # SIGNATURE VERIFICATION
 # ============================================================================
 
-async def verify_retell_signature(
-    request: Request,
-    body_bytes: bytes
-) -> None:
+
+async def verify_retell_signature(request: Request, body_bytes: bytes) -> None:
     """
     Verify Retell webhook signature using HMAC-SHA256.
-    
+
     Implementation matches Retell SDK: HMAC-SHA256(JSON.stringify(body), api_key)
-    
+
     Args:
         request: FastAPI request object
         body_bytes: Raw request body bytes (already read)
-        
+
     Raises:
         HTTPException: If signature is missing or invalid (in production)
     """
@@ -346,29 +337,31 @@ async def verify_retell_signature(
     is_production = app_env in ["production", "prod"]
     # Only bypass signature enforcement in explicit local development; staging enforces it
     is_development = app_env in ["development", "dev", "local", ""]
-    
+
     # Get webhook secret (API key with webhook badge)
     webhook_secret = os.environ.get("RETELL_WEBHOOK_SECRET", "")
-    
+
     # Extract signature header (case-insensitive)
     x_retell_signature_raw = (
-        request.headers.get("x-retell-signature") or 
-        request.headers.get("X-Retell-Signature") or
-        request.headers.get("X-RETELL-SIGNATURE")
+        request.headers.get("x-retell-signature")
+        or request.headers.get("X-Retell-Signature")
+        or request.headers.get("X-RETELL-SIGNATURE")
     )
-    
+
     # Skip verification for playground/test calls — development only (H8: not for staging)
     if is_development:
         try:
             if body_bytes:
-                body_json = json.loads(body_bytes.decode('utf-8'))
-                call_id = (
-                    body_json.get("call_id") or
-                    body_json.get("call", {}).get("call_id") or
-                    ""
-                )
-                if call_id == "playground" or call_id.startswith("test_") or call_id.startswith("playground_"):
-                    logger.info(f"Skipping signature verification for playground/test call: {call_id}")
+                body_json = json.loads(body_bytes.decode("utf-8"))
+                call_id = body_json.get("call_id") or body_json.get("call", {}).get("call_id") or ""
+                if (
+                    call_id == "playground"
+                    or call_id.startswith("test_")
+                    or call_id.startswith("playground_")
+                ):
+                    logger.info(
+                        f"Skipping signature verification for playground/test call: {call_id}"
+                    )
                     return
         except (json.JSONDecodeError, UnicodeDecodeError, KeyError, AttributeError):
             pass
@@ -379,13 +372,13 @@ async def verify_retell_signature(
             logger.error("Missing x-retell-signature header — rejecting request")
             raise HTTPException(
                 status_code=401,
-                detail={"code": "MISSING_SIGNATURE", "message": "Missing signature header"}
+                detail={"code": "MISSING_SIGNATURE", "message": "Missing signature header"},
             )
         if not webhook_secret:
             logger.error("RETELL_WEBHOOK_SECRET not configured — rejecting request")
             raise HTTPException(
                 status_code=500,
-                detail={"code": "CONFIGURATION_ERROR", "message": "Webhook secret not configured"}
+                detail={"code": "CONFIGURATION_ERROR", "message": "Webhook secret not configured"},
             )
 
     # Development: allow requests without signature (for local testing)
@@ -394,7 +387,9 @@ async def verify_retell_signature(
         return
 
     if not webhook_secret:
-        logger.warning("RETELL_WEBHOOK_SECRET not configured — skipping signature verification (development mode)")
+        logger.warning(
+            "RETELL_WEBHOOK_SECRET not configured — skipping signature verification (development mode)"
+        )
         return
 
     # Verify signature
@@ -402,22 +397,20 @@ async def verify_retell_signature(
 
     # Normalize body to compact JSON (matches Retell SDK's JSON.stringify behavior)
     try:
-        body_json = json.loads(body_bytes.decode('utf-8'))
+        body_json = json.loads(body_bytes.decode("utf-8"))
         body_for_signature = json.dumps(body_json, separators=(",", ":"), ensure_ascii=False)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.error(f"Invalid JSON in request body: {str(e)}")
         if not is_development:
             raise HTTPException(
                 status_code=400,
-                detail={"code": "INVALID_JSON", "message": "Invalid JSON in request body"}
+                detail={"code": "INVALID_JSON", "message": "Invalid JSON in request body"},
             )
-        body_for_signature = body_bytes.decode('utf-8', errors='replace')
+        body_for_signature = body_bytes.decode("utf-8", errors="replace")
 
     # Compute expected signature using HMAC-SHA256
     expected = hmac.new(
-        webhook_secret.encode('utf-8'),
-        body_for_signature.encode('utf-8'),
-        hashlib.sha256
+        webhook_secret.encode("utf-8"), body_for_signature.encode("utf-8"), hashlib.sha256
     ).hexdigest()
 
     # Verify using constant-time comparison
@@ -429,7 +422,7 @@ async def verify_retell_signature(
             )
             raise HTTPException(
                 status_code=401,
-                detail={"code": "INVALID_SIGNATURE", "message": "Invalid signature"}
+                detail={"code": "INVALID_SIGNATURE", "message": "Invalid signature"},
             )
         # Development only: log and allow
         logger.warning(
@@ -445,11 +438,9 @@ async def verify_retell_signature(
 # TOOL ENDPOINTS
 # ============================================================================
 
+
 @retell_router.post("/schedule", response_model=ScheduleResponse)
-async def schedule(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-) -> ScheduleResponse:
+async def schedule(request: Request, db: AsyncSession = Depends(get_db)) -> ScheduleResponse:
     """
     Main scheduling endpoint for booking, canceling, or rescheduling appointments.
     Called by Retell AI during voice conversations.
@@ -457,55 +448,46 @@ async def schedule(
     """
     # Read body once
     body_bytes = await request.body()
-    
+
     # Verify Retell signature using the body bytes
     await verify_retell_signature(request, body_bytes)
-    
+
     # Parse JSON from the same body bytes
-    body = json.loads(body_bytes.decode('utf-8'))
+    body = json.loads(body_bytes.decode("utf-8"))
     call_obj = body.get("call", {})
     args = body.get("args", {})
-    
+
     # Extract agent_id from call object and look up clinic_id
     agent_id = call_obj.get("agent_id")
     if not agent_id:
         logger.warning("Missing agent_id in Retell request")
-        return ScheduleResponse(
-            success=False,
-            message="Missing agent_id in request"
-        )
-    
+        return ScheduleResponse(success=False, message="Missing agent_id in request")
+
     try:
         clinic_id = await _get_clinic_by_agent_id(db, agent_id)
     except ValueError as e:
         logger.error(f"Clinic lookup failed for agent_id {agent_id}: {str(e)}")
-        return ScheduleResponse(
-            success=False,
-            message="Clinic not found for this agent"
-        )
-    
+        return ScheduleResponse(success=False, message="Clinic not found for this agent")
+
     # Extract call_id from call object
     call_id = call_obj.get("call_id", "")
-    
+
     # Extract parameters from args
     intent = args.get("intent")
     if not intent:
-        return ScheduleResponse(
-            success=False,
-            message="Missing required parameter: intent"
-        )
-    
+        return ScheduleResponse(success=False, message="Missing required parameter: intent")
+
     patient_name = args.get("patient_name")
     patient_dob = args.get("patient_dob")
     phone = args.get("phone")
-    
+
     # Validate required fields
     if not patient_name or not patient_dob or not phone:
         return ScheduleResponse(
             success=False,
-            message="Missing required parameters: patient_name, patient_dob, and phone are required"
+            message="Missing required parameters: patient_name, patient_dob, and phone are required",
         )
-    
+
     # Build ScheduleRequest object
     schedule_request = ScheduleRequest(
         call_id=call_id,
@@ -521,17 +503,22 @@ async def schedule(
         current_appointment_time_range=args.get("current_appointment_time_range"),
         provider_preference=args.get("provider_preference"),
         language=args.get("language", "en"),
-        booking_id=args.get("booking_id")
+        booking_id=args.get("booking_id"),
     )
-    
+
     logger.info(
         f"Schedule POST request: agent_id={agent_id}, clinic_id={clinic_id}, intent={intent}"
     )
-    
+
     try:
         # 1. Find or create patient
-        patient = await find_patient(db, schedule_request.clinic_id, schedule_request.patient_name, schedule_request.patient_dob)
-        
+        patient = await find_patient(
+            db,
+            schedule_request.clinic_id,
+            schedule_request.patient_name,
+            schedule_request.patient_dob,
+        )
+
         if not patient:
             patient = await create_patient(
                 db=db,
@@ -540,80 +527,75 @@ async def schedule(
                 dob=schedule_request.patient_dob,
                 phone=schedule_request.phone,
                 email=schedule_request.email,
-                language=schedule_request.language
+                language=schedule_request.language,
             )
             logger.info(f"Created new patient: {patient.id}")
-        
+
         # Handle different intents
         if schedule_request.intent == "book":
             return await _handle_book_intent(db, schedule_request, patient)
-        
+
         elif schedule_request.intent == "cancel":
             return await _handle_cancel_intent(db, schedule_request, patient)
-        
+
         elif schedule_request.intent == "reschedule":
             return await _handle_reschedule_intent(db, schedule_request, patient)
-        
+
         else:
             return ScheduleResponse(
-                success=False,
-                message=f"Unknown intent: {schedule_request.intent}"
+                success=False, message=f"Unknown intent: {schedule_request.intent}"
             )
-    
+
     except ValueError as e:
         logger.warning(f"Validation error in schedule: {str(e)}")
         return ScheduleResponse(success=False, message=str(e))
-    
+
     except Exception as e:
         logger.error(f"Error in schedule endpoint: {str(e)}", exc_info=True)
         await db.rollback()
-        return ScheduleResponse(success=False, message="An error occurred while processing your request")
+        return ScheduleResponse(
+            success=False, message="An error occurred while processing your request"
+        )
 
 
 async def _handle_book_intent(
-    db: AsyncSession,
-    request: ScheduleRequest,
-    patient
+    db: AsyncSession, request: ScheduleRequest, patient
 ) -> ScheduleResponse:
     """Handle booking intent - find provider, check availability, create hold."""
-    
+
     # 1. PROVIDER SELECTION
     if request.provider_preference:
         # Patient asked for specific provider
         matching_providers = await _find_providers_by_name(
             db, request.clinic_id, request.provider_preference
         )
-        
+
         if len(matching_providers) == 0:
             return ScheduleResponse(
-                success=False,
-                message=f"No provider found matching '{request.provider_preference}'"
+                success=False, message=f"No provider found matching '{request.provider_preference}'"
             )
-        
+
         if len(matching_providers) > 1:
             # Multiple matches - need clarification
             return ScheduleResponse(
                 success=False,
                 needs_clarification=True,
                 provider_options=[p.display_name for p in matching_providers],
-                message="Multiple providers match that name. Please specify which one."
+                message="Multiple providers match that name. Please specify which one.",
             )
-        
+
         # Single match - use this provider
         preferred_provider = matching_providers[0]
         providers_to_check = [preferred_provider]
-        
+
     else:
         # No preference - get all providers sorted by workload (least busy first)
         providers_to_check = await _get_providers_by_workload(db, request.clinic_id)
         preferred_provider = None
-    
+
     if not providers_to_check:
-        return ScheduleResponse(
-            success=False,
-            message="No providers available at this clinic"
-        )
-    
+        return ScheduleResponse(success=False, message="No providers available at this clinic")
+
     # 2. Parse date/time preferences
     target_date = None
     if request.preferred_date:
@@ -622,13 +604,13 @@ async def _handle_book_intent(
         except ValueError:
             return ScheduleResponse(
                 success=False,
-                message=f"Invalid date format: {request.preferred_date}. Use YYYY-MM-DD."
+                message=f"Invalid date format: {request.preferred_date}. Use YYYY-MM-DD.",
             )
-    
+
     time_range = None
     if request.preferred_time_range and len(request.preferred_time_range) == 2:
         time_range = (request.preferred_time_range[0], request.preferred_time_range[1])
-    
+
     # 3. Check availability for provider(s)
     for provider in providers_to_check:
         if target_date:
@@ -641,13 +623,13 @@ async def _handle_book_intent(
             slots = await get_next_available_slots(
                 db, provider, request.clinic_id, max_days_ahead=14, max_slots=5
             )
-        
+
         if slots:
             # Found availability! Create tentative booking
             slot = slots[0]
             slot_start = datetime.fromisoformat(slot["start_time"])
             slot_end = datetime.fromisoformat(slot["end_time"])
-            
+
             try:
                 booking, hold_token = await create_tentative_booking(
                     db=db,
@@ -656,28 +638,30 @@ async def _handle_book_intent(
                     patient_id=patient.id,
                     slot_start=slot_start,
                     slot_end=slot_end,
-                    source="call"
+                    source="call",
                 )
-                
+
                 # Update CallLog with booking_id for cleanup
                 await _update_call_log_booking(db, request.call_id, booking.id)
                 await db.commit()
-                
+
                 logger.info(f"Created tentative booking: {booking.id}, hold_token={hold_token}")
-                
+
                 return ScheduleResponse(
                     success=True,
                     message=f"Appointment held with {provider.display_name}",
                     booking=_booking_to_dict(booking, provider.display_name),
                     hold_token=hold_token,
-                    alternatives=slots[1:5] if len(slots) > 1 else None  # Include other slots as alternatives
+                    alternatives=slots[1:5]
+                    if len(slots) > 1
+                    else None,  # Include other slots as alternatives
                 )
-                
+
             except ValueError as e:
                 # Slot became unavailable (race condition) - try next
                 logger.warning(f"Slot unavailable: {str(e)}")
                 continue
-    
+
     # 4. No slots found with any provider
     # If patient had a preference, offer alternatives
     if preferred_provider:
@@ -685,19 +669,22 @@ async def _handle_book_intent(
         alt_slots = await get_next_available_slots(
             db, preferred_provider, request.clinic_id, max_days_ahead=14, max_slots=5
         )
-        
+
         if alt_slots:
             return ScheduleResponse(
                 success=False,
                 message=f"{preferred_provider.display_name} is unavailable on that date. Here are their next available times.",
                 alternatives=alt_slots,
-                alternatives_same_provider=True
+                alternatives_same_provider=True,
             )
-        
+
         # No availability at all with preferred - offer other providers
-        other_providers = [p for p in await _get_providers_by_workload(db, request.clinic_id) 
-                          if p.id != preferred_provider.id]
-        
+        other_providers = [
+            p
+            for p in await _get_providers_by_workload(db, request.clinic_id)
+            if p.id != preferred_provider.id
+        ]
+
         for provider in other_providers:
             other_slots = await get_next_available_slots(
                 db, provider, request.clinic_id, max_days_ahead=14, max_slots=3
@@ -707,37 +694,38 @@ async def _handle_book_intent(
                     success=False,
                     message=f"{preferred_provider.display_name} has no upcoming availability. {provider.display_name} is available.",
                     alternatives=other_slots,
-                    alternative_provider=provider.display_name
+                    alternative_provider=provider.display_name,
                 )
-    
+
     return ScheduleResponse(
         success=False,
-        message="No appointments available. Please try again later or call the front desk."
+        message="No appointments available. Please try again later or call the front desk.",
     )
 
 
 async def _handle_cancel_intent(
-    db: AsyncSession,
-    request: ScheduleRequest,
-    patient
+    db: AsyncSession, request: ScheduleRequest, patient
 ) -> ScheduleResponse:
     """
     Handle cancellation intent - find and cancel patient's booking.
-    
+
     Logic:
     - Same call (call_id provided): Check CallLog's tentative_booking_id first
     - Different call (no call_id or not in CallLog): Find by patient name, DOB, and date/time
     - Includes both TENTATIVE and CONFIRMED bookings in search
     """
     booking_to_cancel = None
-    
+
     # If booking_id is explicitly provided, use it
     if request.booking_id:
         booking_to_cancel = await get_booking_by_id(db, request.booking_id, request.clinic_id)
         # Verify it's for this patient and clinic
-        if booking_to_cancel and (booking_to_cancel.patient_id != patient.id or booking_to_cancel.clinic_id != request.clinic_id):
+        if booking_to_cancel and (
+            booking_to_cancel.patient_id != patient.id
+            or booking_to_cancel.clinic_id != request.clinic_id
+        ):
             booking_to_cancel = None
-    
+
     # If call_id is provided (same call scenario), check CallLog first
     elif request.call_id:
         logger.info(f"Cancel in same call, checking CallLog for call_id={request.call_id}")
@@ -748,76 +736,76 @@ async def _handle_cancel_intent(
             .limit(1)
         )
         call_log = result.scalar_one_or_none()
-        
+
         if call_log and call_log.tentative_booking_id:
             # Found booking from this call (could be TENTATIVE or CONFIRMED)
             booking_to_cancel = await get_booking_by_id(
                 db, call_log.tentative_booking_id, request.clinic_id
             )
             if booking_to_cancel:
-                logger.info(f"Found booking from CallLog: {booking_to_cancel.id}, status={booking_to_cancel.status}")
-    
+                logger.info(
+                    f"Found booking from CallLog: {booking_to_cancel.id}, status={booking_to_cancel.status}"
+                )
+
     # If not found in CallLog or no call_id (different call scenario)
     # Find by patient name, DOB - use next upcoming appointment
     if not booking_to_cancel:
-        logger.info(f"Searching for bookings for patient {patient.id} (different call or not in CallLog)")
+        logger.info(
+            f"Searching for bookings for patient {patient.id} (different call or not in CallLog)"
+        )
         # Include both TENTATIVE and CONFIRMED bookings
         bookings = await get_patient_bookings(
-            db, patient.id, request.clinic_id, 
-            [BookingStatus.TENTATIVE, BookingStatus.CONFIRMED]
+            db, patient.id, request.clinic_id, [BookingStatus.TENTATIVE, BookingStatus.CONFIRMED]
         )
-        
+
         # Filter to upcoming only
         now = datetime.now(timezone.utc)
         upcoming_bookings = [b for b in bookings if b.slot_start > now]
-        
+
         if upcoming_bookings:
             # Cancel the next upcoming appointment
             booking_to_cancel = min(upcoming_bookings, key=lambda b: b.slot_start)
-            logger.info(f"Found next upcoming booking to cancel: {booking_to_cancel.id}, date={booking_to_cancel.slot_start.date()}, status={booking_to_cancel.status}")
-    
+            logger.info(
+                f"Found next upcoming booking to cancel: {booking_to_cancel.id}, date={booking_to_cancel.slot_start.date()}, status={booking_to_cancel.status}"
+            )
+
     if not booking_to_cancel:
-        return ScheduleResponse(
-            success=False,
-            message="No upcoming appointments found to cancel"
-        )
-    
+        return ScheduleResponse(success=False, message="No upcoming appointments found to cancel")
+
     # Get provider name for response
     provider = await db.get(Provider, booking_to_cancel.provider_id)
     provider_name = provider.display_name if provider else "Unknown"
-    
+
     # Cancel the booking
     await cancel_booking(db, booking_to_cancel.id, request.clinic_id, actor="patient")
     await db.commit()
-    
+
     logger.info(f"Canceled booking: {booking_to_cancel.id}")
-    
+
     return ScheduleResponse(
         success=True,
         message=f"Your appointment on {booking_to_cancel.slot_start.strftime('%B %d at %I:%M %p')} has been canceled",
-        booking=_booking_to_dict(booking_to_cancel, provider_name)
+        booking=_booking_to_dict(booking_to_cancel, provider_name),
     )
 
 
 async def _handle_reschedule_intent(
-    db: AsyncSession,
-    request: ScheduleRequest,
-    patient
+    db: AsyncSession, request: ScheduleRequest, patient
 ) -> ScheduleResponse:
     """
     Handle reschedule intent - cancel old booking and create new one.
-    
+
     Logic:
     - Same call (call_id provided): Check CallLog's tentative_booking_id first
     - Different call (no call_id or not in CallLog): Find by patient name, DOB, and date/time
     - Includes both TENTATIVE and CONFIRMED bookings in search
     """
     booking_to_reschedule = None
-    
+
     # If booking_id is explicitly provided, use it
     if request.booking_id:
         booking_to_reschedule = await get_booking_by_id(db, request.booking_id, request.clinic_id)
-    
+
     # If call_id is provided (same call scenario), check CallLog first
     elif request.call_id:
         logger.info(f"Reschedule in same call, checking CallLog for call_id={request.call_id}")
@@ -828,116 +816,143 @@ async def _handle_reschedule_intent(
             .limit(1)
         )
         call_log = result.scalar_one_or_none()
-        
+
         if call_log and call_log.tentative_booking_id:
             # Found tentative booking from this call
             booking_to_reschedule = await get_booking_by_id(
                 db, call_log.tentative_booking_id, request.clinic_id
             )
             if booking_to_reschedule:
-                logger.info(f"Found booking from CallLog: {booking_to_reschedule.id}, status={booking_to_reschedule.status}")
-    
+                logger.info(
+                    f"Found booking from CallLog: {booking_to_reschedule.id}, status={booking_to_reschedule.status}"
+                )
+
     # If not found in CallLog or no call_id (different call scenario)
     # Find by patient name, DOB, and the specific date/time they mention
     if not booking_to_reschedule:
-        logger.info(f"Searching for bookings for patient {patient.id} (different call or not in CallLog)")
+        logger.info(
+            f"Searching for bookings for patient {patient.id} (different call or not in CallLog)"
+        )
         # Include both TENTATIVE and CONFIRMED bookings
         bookings = await get_patient_bookings(
-            db, patient.id, request.clinic_id, 
-            [BookingStatus.TENTATIVE, BookingStatus.CONFIRMED]
+            db, patient.id, request.clinic_id, [BookingStatus.TENTATIVE, BookingStatus.CONFIRMED]
         )
-        
+
         now = datetime.now(timezone.utc)
         upcoming = [b for b in bookings if b.slot_start > now]
-        
+
         if upcoming:
             # If patient specified the current appointment date/time, match by that
             if request.current_appointment_date:
                 try:
                     target_date = date.fromisoformat(request.current_appointment_date)
                     matching_by_date = [b for b in upcoming if b.slot_start.date() == target_date]
-                    
-                    if matching_by_date and request.current_appointment_time_range and len(request.current_appointment_time_range) >= 1:
+
+                    if (
+                        matching_by_date
+                        and request.current_appointment_time_range
+                        and len(request.current_appointment_time_range) >= 1
+                    ):
                         # Also match by time if provided
-                        target_time_str = request.current_appointment_time_range[0]  # e.g., "13:00" for 1 PM
+                        target_time_str = request.current_appointment_time_range[
+                            0
+                        ]  # e.g., "13:00" for 1 PM
                         try:
                             from datetime import time as dt_time
+
                             target_hour, target_minute = map(int, target_time_str.split(":"))
                             target_time = dt_time(target_hour, target_minute)
-                            
+
                             # Find booking matching both date and time (within 15 minutes tolerance)
                             for booking in matching_by_date:
                                 booking_time = booking.slot_start.time()
-                                time_diff = abs((booking_time.hour * 60 + booking_time.minute) - 
-                                              (target_time.hour * 60 + target_time.minute))
+                                time_diff = abs(
+                                    (booking_time.hour * 60 + booking_time.minute)
+                                    - (target_time.hour * 60 + target_time.minute)
+                                )
                                 if time_diff <= 15:  # Within 15 minutes
                                     booking_to_reschedule = booking
-                                    logger.info(f"Found booking matching date {target_date} and time {target_time_str}: {booking_to_reschedule.id}")
+                                    logger.info(
+                                        f"Found booking matching date {target_date} and time {target_time_str}: {booking_to_reschedule.id}"
+                                    )
                                     break
-                            
+
                             if not booking_to_reschedule and matching_by_date:
                                 # If no exact time match, use the first booking on that date
-                                booking_to_reschedule = min(matching_by_date, key=lambda b: b.slot_start)
-                                logger.info(f"Found booking matching date {target_date} (no time match): {booking_to_reschedule.id}")
+                                booking_to_reschedule = min(
+                                    matching_by_date, key=lambda b: b.slot_start
+                                )
+                                logger.info(
+                                    f"Found booking matching date {target_date} (no time match): {booking_to_reschedule.id}"
+                                )
                         except (ValueError, IndexError) as e:
-                            logger.warning(f"Invalid time format in current_appointment_time_range: {e}")
+                            logger.warning(
+                                f"Invalid time format in current_appointment_time_range: {e}"
+                            )
                             # Fall back to date-only match
                             if matching_by_date:
-                                booking_to_reschedule = min(matching_by_date, key=lambda b: b.slot_start)
-                                logger.info(f"Found booking matching date {target_date}: {booking_to_reschedule.id}")
+                                booking_to_reschedule = min(
+                                    matching_by_date, key=lambda b: b.slot_start
+                                )
+                                logger.info(
+                                    f"Found booking matching date {target_date}: {booking_to_reschedule.id}"
+                                )
                     elif matching_by_date:
                         # Only date match, no time specified
                         booking_to_reschedule = min(matching_by_date, key=lambda b: b.slot_start)
-                        logger.info(f"Found booking matching date {target_date}: {booking_to_reschedule.id}")
+                        logger.info(
+                            f"Found booking matching date {target_date}: {booking_to_reschedule.id}"
+                        )
                     else:
                         # No match for specified date, use next upcoming
                         booking_to_reschedule = min(upcoming, key=lambda b: b.slot_start)
-                        logger.info(f"No booking found for date {target_date}, using next upcoming: {booking_to_reschedule.id}")
+                        logger.info(
+                            f"No booking found for date {target_date}, using next upcoming: {booking_to_reschedule.id}"
+                        )
                 except ValueError:
                     # Invalid date format, use next upcoming
                     booking_to_reschedule = min(upcoming, key=lambda b: b.slot_start)
-                    logger.info(f"Invalid date format, using next upcoming: {booking_to_reschedule.id}")
+                    logger.info(
+                        f"Invalid date format, using next upcoming: {booking_to_reschedule.id}"
+                    )
             else:
                 # No specific date/time mentioned, use next upcoming appointment
                 booking_to_reschedule = min(upcoming, key=lambda b: b.slot_start)
-                logger.info(f"No specific appointment date mentioned, using next upcoming: {booking_to_reschedule.id}, date={booking_to_reschedule.slot_start.date()}, status={booking_to_reschedule.status}")
-    
+                logger.info(
+                    f"No specific appointment date mentioned, using next upcoming: {booking_to_reschedule.id}, date={booking_to_reschedule.slot_start.date()}, status={booking_to_reschedule.status}"
+                )
+
     if not booking_to_reschedule:
         return ScheduleResponse(
             success=False,
-            message="No appointment found to reschedule. Please make sure you have an existing appointment."
+            message="No appointment found to reschedule. Please make sure you have an existing appointment.",
         )
-    
+
     # Parse new date/time
     if not request.preferred_date:
         return ScheduleResponse(
-            success=False,
-            message="Please specify the new date you'd like to reschedule to"
+            success=False, message="Please specify the new date you'd like to reschedule to"
         )
-    
+
     try:
         new_date = date.fromisoformat(request.preferred_date)
     except ValueError:
         return ScheduleResponse(
-            success=False,
-            message=f"Invalid date format: {request.preferred_date}"
+            success=False, message=f"Invalid date format: {request.preferred_date}"
         )
-    
+
     # Get provider (keep same provider for reschedule)
     provider = await db.get(Provider, booking_to_reschedule.provider_id)
     if not provider:
-        return ScheduleResponse(
-            success=False,
-            message="Provider not found"
-        )
-    
+        return ScheduleResponse(success=False, message="Provider not found")
+
     time_range = None
     if request.preferred_time_range and len(request.preferred_time_range) == 2:
         time_range = (request.preferred_time_range[0], request.preferred_time_range[1])
-    
+
     # Check availability on new date
     slots = await get_available_slots(db, provider, new_date, request.clinic_id, time_range)
-    
+
     if not slots:
         # Offer alternatives
         alt_slots = await get_next_available_slots(db, provider, request.clinic_id)
@@ -945,14 +960,14 @@ async def _handle_reschedule_intent(
             success=False,
             message=f"No availability on {new_date}. Here are the next available times.",
             alternatives=alt_slots,
-            alternatives_same_provider=True
+            alternatives_same_provider=True,
         )
-    
+
     # Reschedule to first available slot
     slot = slots[0]
     new_start = datetime.fromisoformat(slot["start_time"])
     new_end = datetime.fromisoformat(slot["end_time"])
-    
+
     try:
         new_booking, hold_token = await reschedule_booking(
             db=db,
@@ -960,30 +975,29 @@ async def _handle_reschedule_intent(
             clinic_id=request.clinic_id,
             new_slot_start=new_start,
             new_slot_end=new_end,
-            actor="patient"
+            actor="patient",
         )
-        
+
         # Update CallLog
         await _update_call_log_booking(db, request.call_id, new_booking.id)
         await db.commit()
-        
+
         logger.info(f"Rescheduled booking {booking_to_reschedule.id} to {new_booking.id}")
-        
+
         return ScheduleResponse(
             success=True,
             message=f"Your appointment has been rescheduled to {new_start.strftime('%B %d at %I:%M %p')}",
             booking=_booking_to_dict(new_booking, provider.display_name),
-            hold_token=hold_token
+            hold_token=hold_token,
         )
-        
+
     except ValueError as e:
         return ScheduleResponse(success=False, message=str(e))
 
 
 @retell_router.post("/confirm_booking", response_model=ConfirmResponse)
 async def confirm_booking_endpoint(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
+    request: Request, db: AsyncSession = Depends(get_db)
 ) -> ConfirmResponse:
     """
     Confirm a tentative booking.
@@ -992,162 +1006,146 @@ async def confirm_booking_endpoint(
     """
     # Read body once
     body_bytes = await request.body()
-    
+
     # Verify Retell signature using the body bytes
     await verify_retell_signature(request, body_bytes)
-    
+
     # Parse JSON from the same body bytes
-    body = json.loads(body_bytes.decode('utf-8'))
+    body = json.loads(body_bytes.decode("utf-8"))
     call_obj = body.get("call", {})
     args = body.get("args", {})
-    
+
     # Log non-PHI fields only
     logger.info(
         f"Confirm booking request: call_id={call_obj.get('call_id')}, "
         f"agent_id={call_obj.get('agent_id')}, booking_id={args.get('booking_id')}"
     )
-    
+
     # Extract agent_id from call object and look up clinic_id
     agent_id = call_obj.get("agent_id")
     if not agent_id:
         logger.warning("Missing agent_id in Retell request for confirm_booking")
-        return ConfirmResponse(
-            success=False,
-            message="Missing agent_id in request"
-        )
-    
+        return ConfirmResponse(success=False, message="Missing agent_id in request")
+
     try:
         clinic_id = await _get_clinic_by_agent_id(db, agent_id)
     except ValueError as e:
         logger.error(f"Clinic lookup failed for agent_id {agent_id}: {str(e)}")
-        return ConfirmResponse(
-            success=False,
-            message="Clinic not found for this agent"
-        )
-    
+        return ConfirmResponse(success=False, message="Clinic not found for this agent")
+
     # Extract hold_token from args
     hold_token_str = args.get("hold_token")
     if not hold_token_str:
-        logger.warning(f"Missing hold_token in confirm_booking request. Args: {json.dumps(args, default=str)}")
-        return ConfirmResponse(
-            success=False,
-            message="Missing required parameter: hold_token"
+        logger.warning(
+            f"Missing hold_token in confirm_booking request. Args: {json.dumps(args, default=str)}"
         )
-    
+        return ConfirmResponse(success=False, message="Missing required parameter: hold_token")
+
     try:
         hold_token = UUID(hold_token_str)
     except (ValueError, TypeError):
         logger.warning(f"Invalid hold_token format: {hold_token_str}")
-        return ConfirmResponse(
-            success=False,
-            message="Invalid hold_token format"
-        )
-    
-    logger.info(f"Confirm booking request: agent_id={agent_id}, clinic_id={clinic_id}, hold_token={hold_token}")
-    
+        return ConfirmResponse(success=False, message="Invalid hold_token format")
+
+    logger.info(
+        f"Confirm booking request: agent_id={agent_id}, clinic_id={clinic_id}, hold_token={hold_token}"
+    )
+
     try:
         booking = await confirm_booking(db, hold_token, clinic_id)
         await db.commit()
-        
+
         # Get provider name
         provider = await db.get(Provider, booking.provider_id)
         provider_name = provider.display_name if provider else "Unknown"
-        
+
         logger.info(f"Confirmed booking: {booking.id}")
-        
+
         return ConfirmResponse(
             success=True,
             message=f"Your appointment is confirmed for {booking.slot_start.strftime('%B %d at %I:%M %p')}",
-            booking=_booking_to_dict(booking, provider_name)
+            booking=_booking_to_dict(booking, provider_name),
         )
-        
+
     except ValueError as e:
         logger.warning(f"Confirm booking failed: {str(e)}")
         await db.rollback()
-        
+
         error_msg = str(e)
         if "expired" in error_msg.lower():
             return ConfirmResponse(
                 success=False,
-                message="The hold has expired. Please start over and select a new time."
+                message="The hold has expired. Please start over and select a new time.",
             )
         elif "not found" in error_msg.lower():
             return ConfirmResponse(
                 success=False,
-                message="Booking not found. It may have already been confirmed or canceled."
+                message="Booking not found. It may have already been confirmed or canceled.",
             )
         else:
             return ConfirmResponse(success=False, message=error_msg)
-    
+
     except Exception as e:
         logger.error(f"Error confirming booking: {str(e)}", exc_info=True)
         await db.rollback()
         return ConfirmResponse(
-            success=False,
-            message="An error occurred while confirming your appointment"
+            success=False, message="An error occurred while confirming your appointment"
         )
 
-#was a get changed to post because of retell functionality
+
+# was a get changed to post because of retell functionality
 async def _get_availability_internal(
     db: AsyncSession,
     clinic_id: UUID,
     date: Optional[str] = None,
     provider_id: Optional[UUID] = None,
-    provider_name: Optional[str] = None
+    provider_name: Optional[str] = None,
 ) -> AvailabilityResponse:
     """
     Internal function that contains the actual availability logic.
     Called by both GET and POST endpoints.
     """
-    logger.info(f"Availability request: clinic={clinic_id}, date={date}, provider_id={provider_id}, provider_name={provider_name}")
-    
+    logger.info(
+        f"Availability request: clinic={clinic_id}, date={date}, provider_id={provider_id}, provider_name={provider_name}"
+    )
+
     try:
         # Get provider(s)
         if provider_name:
             # Look up provider by name (same logic as schedule endpoint)
             matching_providers = await _find_providers_by_name(db, clinic_id, provider_name)
-            
+
             if len(matching_providers) == 0:
                 return AvailabilityResponse(
-                    success=False,
-                    message=f"No provider found matching '{provider_name}'",
-                    slots=[]
+                    success=False, message=f"No provider found matching '{provider_name}'", slots=[]
                 )
-            
+
             if len(matching_providers) > 1:
                 # Multiple matches - need clarification
                 provider_names = [p.display_name for p in matching_providers]
                 return AvailabilityResponse(
                     success=False,
                     message=f"Multiple providers match '{provider_name}'. Please specify which one: {', '.join(provider_names)}",
-                    slots=[]
+                    slots=[],
                 )
-            
+
             # Single match - use this provider
             providers = matching_providers
-            
+
         elif provider_id:
             provider = await db.get(Provider, provider_id)
             if not provider or provider.clinic_id != clinic_id:
-                return AvailabilityResponse(
-                    success=False,
-                    message="Provider not found",
-                    slots=[]
-                )
+                return AvailabilityResponse(success=False, message="Provider not found", slots=[])
             providers = [provider]
         else:
             # Get all active providers sorted by workload
             providers = await _get_providers_by_workload(db, clinic_id)
-        
+
         if not providers:
-            return AvailabilityResponse(
-                success=False,
-                message="No providers available",
-                slots=[]
-            )
-        
+            return AvailabilityResponse(success=False, message="No providers available", slots=[])
+
         all_slots = []
-        
+
         for provider in providers:
             if date:
                 # Check specific date
@@ -1157,34 +1155,30 @@ async def _get_availability_internal(
                     return AvailabilityResponse(
                         success=False,
                         message=f"Invalid date format: {date}. Use YYYY-MM-DD.",
-                        slots=[]
+                        slots=[],
                     )
-                
+
                 slots = await get_available_slots(db, provider, target_date, clinic_id)
             else:
                 # Get next available slots
                 slots = await get_next_available_slots(db, provider, clinic_id)
-            
+
             all_slots.extend(slots)
-        
+
         # Sort by start time
         all_slots.sort(key=lambda s: s.get("start_time", ""))
-        
+
         # Limit to reasonable number
         all_slots = all_slots[:50]
-        
+
         return AvailabilityResponse(
-            success=True,
-            message=f"Found {len(all_slots)} available slots",
-            slots=all_slots
+            success=True, message=f"Found {len(all_slots)} available slots", slots=all_slots
         )
-        
+
     except Exception as e:
         logger.error(f"Error getting availability: {str(e)}", exc_info=True)
         return AvailabilityResponse(
-            success=False,
-            message="An error occurred while checking availability",
-            slots=[]
+            success=False, message="An error occurred while checking availability", slots=[]
         )
 
 
@@ -1206,8 +1200,7 @@ async def get_availability(
 
 @retell_router.post("/availability", response_model=AvailabilityResponse)
 async def get_availability_post(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
+    request: Request, db: AsyncSession = Depends(get_db)
 ) -> AvailabilityResponse:
     """
     Get available appointment slots (POST - for Retell AI).
@@ -1215,35 +1208,29 @@ async def get_availability_post(
     """
     # Read body once
     body_bytes = await request.body()
-    
+
     # Verify Retell signature using the body bytes
     await verify_retell_signature(request, body_bytes)
-    
+
     # Parse JSON from the same body bytes
-    body = json.loads(body_bytes.decode('utf-8'))
+    body = json.loads(body_bytes.decode("utf-8"))
     call_obj = body.get("call", {})
     args = body.get("args", {})
-    
+
     # Extract agent_id from call object and look up clinic_id
     agent_id = call_obj.get("agent_id")
     if not agent_id:
         logger.warning("Missing agent_id in Retell request")
-        return AvailabilityResponse(
-            success=False,
-            message="Missing agent_id in request",
-            slots=[]
-        )
-    
+        return AvailabilityResponse(success=False, message="Missing agent_id in request", slots=[])
+
     try:
         clinic_id = await _get_clinic_by_agent_id(db, agent_id)
     except ValueError as e:
         logger.error(f"Clinic lookup failed for agent_id {agent_id}: {str(e)}")
         return AvailabilityResponse(
-            success=False,
-            message="Clinic not found for this agent",
-            slots=[]
+            success=False, message="Clinic not found for this agent", slots=[]
         )
-    
+
     # Extract other parameters from args
     date = args.get("date")
     provider_name = args.get("provider_name")
@@ -1253,12 +1240,12 @@ async def get_availability_post(
             provider_id = UUID(args.get("provider_id"))
         except (ValueError, TypeError):
             logger.warning(f"Invalid provider_id format: {args.get('provider_id')}")
-    
+
     logger.info(
         f"Availability POST request: agent_id={agent_id}, clinic_id={clinic_id}, "
         f"date={date}, provider_id={provider_id}, provider_name={provider_name}"
     )
-    
+
     # Call the shared logic
     return await _get_availability_internal(db, clinic_id, date, provider_id, provider_name)
 
@@ -1273,12 +1260,8 @@ def _format_iso_slot_for_voice(iso_start: str) -> str:
         return iso_start
 
 
-async def _get_ehr_config_row(
-    db: AsyncSession, clinic_id: UUID
-) -> Optional[ClinicEHRConfig]:
-    result = await db.execute(
-        select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
-    )
+async def _get_ehr_config_row(db: AsyncSession, clinic_id: UUID) -> Optional[ClinicEHRConfig]:
+    result = await db.execute(select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id))
     return result.scalar_one_or_none()
 
 
@@ -1292,7 +1275,9 @@ def _appt_type_code_for_gap(mapping: Dict[str, Any], gap_type: Optional[str]) ->
     return default
 
 
-def _hedis_metadata_from_call(call_obj: Dict[str, Any], webhook_metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _hedis_metadata_from_call(
+    call_obj: Dict[str, Any], webhook_metadata: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     """Merge metadata from webhook model and raw call object (Retell shape varies)."""
     md = dict(webhook_metadata or {})
     raw_md = call_obj.get("metadata")
@@ -1560,11 +1545,15 @@ async def ehr_get_available_slots(
     try:
         clinic_id = await _get_clinic_by_agent_id(db, agent_id)
     except ValueError:
-        return EhrToolSlotsResponse(success=False, message="Clinic not found for this agent", slots=[])
+        return EhrToolSlotsResponse(
+            success=False, message="Clinic not found for this agent", slots=[]
+        )
 
     cfg = await _get_ehr_config_row(db, clinic_id)
     if not cfg:
-        return EhrToolSlotsResponse(success=False, message="EHR is not configured for this clinic", slots=[])
+        return EhrToolSlotsResponse(
+            success=False, message="EHR is not configured for this clinic", slots=[]
+        )
 
     provider_name = args.get("provider_name") or metadata.get("provider_name")
     if not provider_name:
@@ -1589,7 +1578,9 @@ async def ehr_get_available_slots(
     voice_labels = [_format_iso_slot_for_voice(s["start_time"]) for s in raw_slots]
     return EhrToolSlotsResponse(
         success=True,
-        message=f"Found {len(voice_labels)} available times" if voice_labels else "No open slots in this range",
+        message=f"Found {len(voice_labels)} available times"
+        if voice_labels
+        else "No open slots in this range",
         slots=voice_labels,
         slot_details=raw_slots,
     )
@@ -1619,7 +1610,9 @@ async def ehr_book_appointment(
 
     cfg = await _get_ehr_config_row(db, clinic_id)
     if not cfg:
-        return EhrBookAppointmentResponse(success=False, message="EHR is not configured for this clinic")
+        return EhrBookAppointmentResponse(
+            success=False, message="EHR is not configured for this clinic"
+        )
 
     provider_name = args.get("provider_name")
     chosen_slot = args.get("chosen_slot")
@@ -1871,8 +1864,7 @@ async def _handle_call_analyzed(db: AsyncSession, call_obj: Dict[str, Any]) -> D
     elif not await claude_check(clinic_id):
         # Per-clinic Claude rate limit exceeded — use fallback; audit row still written.
         logger.warning(
-            "call_analyzed: Claude rate limit exceeded for clinic_id=%s; "
-            "using fallback summary",
+            "call_analyzed: Claude rate limit exceeded for clinic_id=%s; " "using fallback summary",
             clinic_id,
         )
         summary = "Call summary unavailable (rate limit)."
@@ -2018,4 +2010,3 @@ async def webhook_call_analyzed(
     body = json.loads(body_bytes.decode("utf-8"))
     call_obj = body.get("call", body)
     return await _handle_call_analyzed(db, call_obj)
-

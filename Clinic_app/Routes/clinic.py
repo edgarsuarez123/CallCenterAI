@@ -27,6 +27,7 @@ clinic_router = APIRouter(prefix="/clinic", tags=["clinic"])
 
 # ── Response schema ────────────────────────────────────────────────────────────
 
+
 class ClinicSettingsResponse(BaseModel):
     timezone: str
     calling_hours_start: str
@@ -40,6 +41,7 @@ class ClinicSettingsResponse(BaseModel):
 
 # ── PATCH request body ─────────────────────────────────────────────────────────
 
+
 class ClinicSettingsPatch(BaseModel):
     calling_hours_start: Optional[str] = None
     calling_hours_end: Optional[str] = None
@@ -52,6 +54,7 @@ class ClinicSettingsPatch(BaseModel):
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
 
 @clinic_router.get("/settings", response_model=ClinicSettingsResponse)
 async def get_settings(

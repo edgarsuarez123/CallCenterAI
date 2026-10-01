@@ -17,6 +17,7 @@ class Campaign(Base):
 
     Tenant isolation: every query MUST include clinic_id filter.
     """
+
     __tablename__ = "campaign"
 
     id = Column(
@@ -66,9 +67,7 @@ class Campaign(Base):
         lazy="select",
     )
 
-    __table_args__ = (
-        Index("idx_campaign_clinic_status", "clinic_id", "status"),
-    )
+    __table_args__ = (Index("idx_campaign_clinic_status", "clinic_id", "status"),)
 
     def __repr__(self) -> str:
         return f"<Campaign(id={self.id}, name={self.name!r}, status={self.status})>"

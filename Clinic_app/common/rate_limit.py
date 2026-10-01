@@ -66,6 +66,7 @@ def make_rate_limit_dep(
     The dependency raises HTTP 429 when the limit is exceeded and is a no-op
     when Redis is unreachable (fail-open with a warning log).
     """
+
     async def _dep(request: Request) -> None:
         limit_str = os.environ.get(env_var, default_limit) if env_var else default_limit
         try:
@@ -90,7 +91,9 @@ def make_rate_limit_dep(
             if count > n:
                 logger.warning(
                     "Rate limit exceeded: ip=%s limit=%s count=%d",
-                    ip, limit_str, count,
+                    ip,
+                    limit_str,
+                    count,
                 )
                 raise HTTPException(
                     status_code=429,
@@ -110,6 +113,7 @@ def make_rate_limit_dep(
 
 # ── Pre-built dependency factories for each tier ────────────────────────────
 # Import these and wrap with Depends() at the call site.
+
 
 def auth_rate_limit():
     """Rate limiter for auth endpoints and campaign mutations (default 20/minute)."""

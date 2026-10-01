@@ -136,10 +136,7 @@ def summarize_transcript_sync(transcript: str, gap_type: str) -> str:
         len(text),
     )
     client = _get_anthropic_client()
-    user_msg = (
-        f"Care gap type (HEDIS measure code): {gap_type}\n\n"
-        f"Call transcript:\n{text}"
-    )
+    user_msg = f"Care gap type (HEDIS measure code): {gap_type}\n\n" f"Call transcript:\n{text}"
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=150,
@@ -171,9 +168,7 @@ def extract_order_based_notes_sync(transcript: str, gap_type: str) -> OrderNotes
     """
     text = (transcript or "").strip()
     if not text:
-        logger.info(
-            "extract_order_based_notes_sync: empty transcript gap_type=%s", gap_type
-        )
+        logger.info("extract_order_based_notes_sync: empty transcript gap_type=%s", gap_type)
         return {
             "patient_agreed": None,
             "action_for_staff": "",
@@ -186,10 +181,7 @@ def extract_order_based_notes_sync(transcript: str, gap_type: str) -> OrderNotes
         len(text),
     )
     client = _get_anthropic_client()
-    user_msg = (
-        f"Care gap type (HEDIS measure code): {gap_type}\n\n"
-        f"Call transcript:\n{text}"
-    )
+    user_msg = f"Care gap type (HEDIS measure code): {gap_type}\n\n" f"Call transcript:\n{text}"
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=400,
@@ -199,9 +191,7 @@ def extract_order_based_notes_sync(transcript: str, gap_type: str) -> OrderNotes
     raw_text = response.content[0].text.strip()
     parsed = _parse_order_notes_json(raw_text)
     if not parsed:
-        logger.warning(
-            "extract_order_based_notes_sync: could not parse JSON from Claude response"
-        )
+        logger.warning("extract_order_based_notes_sync: could not parse JSON from Claude response")
         return _normalize_order_notes(_FALLBACK_UNAVAILABLE)
     result = _normalize_order_notes(parsed)
     logger.info(

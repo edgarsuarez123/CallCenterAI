@@ -20,21 +20,34 @@ class ClinicEHRConfig(Base):
     JSONB chosen because codes are arbitrary per-clinic and change rarely —
     no schema migration needed when a clinic updates their codes.
     """
+
     __tablename__ = "clinic_ehr_config"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    clinic_id = Column(UUID(as_uuid=True), ForeignKey("clinic.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    clinic_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("clinic.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
 
-    nextgen_url = Column(Text, nullable=False)                          # URL Playwright navigates to
-    nextgen_username_encrypted = Column(BYTEA, nullable=False)          # AES-256-GCM
-    nextgen_password_encrypted = Column(BYTEA, nullable=False)          # AES-256-GCM
+    nextgen_url = Column(Text, nullable=False)  # URL Playwright navigates to
+    nextgen_username_encrypted = Column(BYTEA, nullable=False)  # AES-256-GCM
+    nextgen_password_encrypted = Column(BYTEA, nullable=False)  # AES-256-GCM
 
-    appt_type_mapping = Column(JSONB, nullable=False, default=dict)     # GapType.value → NextGen appt type code
+    appt_type_mapping = Column(
+        JSONB, nullable=False, default=dict
+    )  # GapType.value → NextGen appt type code
 
-    connection_verified_at = Column(DateTime(timezone=True), nullable=True)  # Timestamp of last successful credential test
+    connection_verified_at = Column(
+        DateTime(timezone=True), nullable=True
+    )  # Timestamp of last successful credential test
 
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     # Relationships
     clinic = relationship("Clinic", backref="ehr_config")

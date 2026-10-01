@@ -58,9 +58,7 @@ def upgrade() -> None:
     )
     op.create_index("idx_campaign_clinic_id", "campaign", ["clinic_id"])
     op.create_index("idx_campaign_status", "campaign", ["status"])
-    op.create_index(
-        "idx_campaign_clinic_status", "campaign", ["clinic_id", "status"]
-    )
+    op.create_index("idx_campaign_clinic_status", "campaign", ["clinic_id", "status"])
 
     # ── campaign_contact ──────────────────────────────────────────────────
     op.create_table(
@@ -101,9 +99,7 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
     )
-    op.create_index(
-        "idx_campaign_contact_campaign_id", "campaign_contact", ["campaign_id"]
-    )
+    op.create_index("idx_campaign_contact_campaign_id", "campaign_contact", ["campaign_id"])
     op.create_index(
         "idx_campaign_contact_clinic_campaign",
         "campaign_contact",

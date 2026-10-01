@@ -18,12 +18,19 @@ from Clinic_app.services.csv_parser import map_gap_type, normalize_phone, Parsed
 
 # ── GapType enum ──────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestGapTypeEnum:
     def test_plan_013_values_present(self):
         expected = {
-            "preventive_visit", "hospital_flu", "colorectal", "eye_exam",
-            "breast_cancer", "kidney", "afr_cmp", "medication_review",
+            "preventive_visit",
+            "hospital_flu",
+            "colorectal",
+            "eye_exam",
+            "breast_cancer",
+            "kidney",
+            "afr_cmp",
+            "medication_review",
         }
         assert {g.value for g in GapType} == expected
 
@@ -52,6 +59,7 @@ class TestGapTypeEnum:
 
 # ── ContactStatus enum ────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestContactStatusEnum:
     def test_new_terminal_statuses_present(self):
@@ -74,6 +82,7 @@ class TestContactStatusEnum:
 
 
 # ── CSV alias normalization ────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestGapTypeAliasMapping:
@@ -137,6 +146,7 @@ class TestGapTypeAliasMapping:
 
 # ── medication_review exclusion ───────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestMedicationReviewExclusion:
     """medication_review rows must be filtered at parse time."""
@@ -155,6 +165,7 @@ class TestMedicationReviewExclusion:
 
 # ── Hospital flu EXPIRED logic ────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestHospitalFluExpiredLogic:
     """
@@ -165,6 +176,7 @@ class TestHospitalFluExpiredLogic:
     def test_cutoff_date_calculation(self):
         """Contacts with release_date <= today - 7 days should be expired."""
         from Clinic_app.services.campaign_service import HOSPITAL_FLU_DEADLINE_DAYS
+
         today = date.today()
         cutoff = today - timedelta(days=HOSPITAL_FLU_DEADLINE_DAYS)
         # A contact released 8 days ago is overdue
@@ -222,11 +234,13 @@ class TestHospitalFluExpiredLogic:
 
 # ── Priority order assignment ─────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestPriorityOrder:
     def test_hospital_flu_priority_is_zero(self):
         """hospital_flu gets priority_order=0 (first in queue)."""
         from Clinic_app.data.enums import GapType
+
         is_hospital_flu = GapType.HOSPITAL_FLU == GapType.HOSPITAL_FLU
         priority = 0 if is_hospital_flu else 1
         assert priority == 0

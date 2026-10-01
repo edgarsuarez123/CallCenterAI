@@ -460,9 +460,7 @@ def test_call_analyzed_human_request_does_not_override_booked() -> None:
 
     with patch.object(
         retell_mod, "_get_clinic_by_agent_id", new_callable=AsyncMock, return_value=clinic_id
-    ), patch.object(
-        retell_mod, "summarize_transcript_sync", return_value="Booked."
-    ):
+    ), patch.object(retell_mod, "summarize_transcript_sync", return_value="Booked."):
         client = TestClient(app)
         r = client.post(
             "/retell/webhook/call_analyzed",
@@ -486,10 +484,12 @@ def test_call_analyzed_human_request_does_not_override_booked() -> None:
 
 # ── _get_summarizer_mode ───────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 def test_get_summarizer_mode_defaults_to_claude(monkeypatch) -> None:
     monkeypatch.delenv("SUMMARIZER_MODE", raising=False)
     from Clinic_app.Routes.retell import _get_summarizer_mode
+
     assert _get_summarizer_mode() == "claude"
 
 
@@ -497,6 +497,7 @@ def test_get_summarizer_mode_defaults_to_claude(monkeypatch) -> None:
 def test_get_summarizer_mode_retell(monkeypatch) -> None:
     monkeypatch.setenv("SUMMARIZER_MODE", "retell")
     from Clinic_app.Routes.retell import _get_summarizer_mode
+
     assert _get_summarizer_mode() == "retell"
 
 
@@ -504,14 +505,17 @@ def test_get_summarizer_mode_retell(monkeypatch) -> None:
 def test_get_summarizer_mode_invalid_falls_back_to_claude(monkeypatch) -> None:
     monkeypatch.setenv("SUMMARIZER_MODE", "gpt")
     from Clinic_app.Routes.retell import _get_summarizer_mode
+
     assert _get_summarizer_mode() == "claude"
 
 
 # ── _extract_retell_summary ────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 def test_extract_retell_summary_from_call_summary() -> None:
     from Clinic_app.Routes.retell import _extract_retell_summary
+
     call_obj = {"call_analysis": {"call_summary": "Patient agreed to colorectal kit."}}
     assert _extract_retell_summary(call_obj) == "Patient agreed to colorectal kit."
 
@@ -519,6 +523,7 @@ def test_extract_retell_summary_from_call_summary() -> None:
 @pytest.mark.unit
 def test_extract_retell_summary_falls_back_to_summary_key() -> None:
     from Clinic_app.Routes.retell import _extract_retell_summary
+
     call_obj = {"call_analysis": {"summary": "Appointment scheduled."}}
     assert _extract_retell_summary(call_obj) == "Appointment scheduled."
 
@@ -526,6 +531,7 @@ def test_extract_retell_summary_falls_back_to_summary_key() -> None:
 @pytest.mark.unit
 def test_extract_retell_summary_falls_back_to_transcript() -> None:
     from Clinic_app.Routes.retell import _extract_retell_summary
+
     call_obj = {"transcript": "Hello, this is a transcript."}
     assert _extract_retell_summary(call_obj) == "Hello, this is a transcript."
 
@@ -533,10 +539,12 @@ def test_extract_retell_summary_falls_back_to_transcript() -> None:
 @pytest.mark.unit
 def test_extract_retell_summary_no_content_returns_fallback() -> None:
     from Clinic_app.Routes.retell import _extract_retell_summary
+
     assert _extract_retell_summary({}) == "Call completed; no summary available."
 
 
 # ── webhook_call_analyzed with SUMMARIZER_MODE=retell ─────────────────────────
+
 
 @pytest.mark.unit
 def test_call_analyzed_retell_mode_skips_claude(monkeypatch) -> None:
@@ -576,9 +584,7 @@ def test_call_analyzed_retell_mode_skips_claude(monkeypatch) -> None:
 
     with patch.object(
         retell_mod, "_get_clinic_by_agent_id", new_callable=AsyncMock, return_value=clinic_id
-    ) as _, patch.object(
-        retell_mod, "summarize_transcript_sync"
-    ) as claude_mock:
+    ) as _, patch.object(retell_mod, "summarize_transcript_sync") as claude_mock:
         client = TestClient(app)
         r = client.post(
             "/retell/webhook/call_analyzed",
@@ -640,9 +646,7 @@ def test_call_analyzed_retell_mode_order_based_keeps_status(monkeypatch) -> None
 
     with patch.object(
         retell_mod, "_get_clinic_by_agent_id", new_callable=AsyncMock, return_value=clinic_id
-    ), patch.object(
-        retell_mod, "extract_order_based_notes_sync"
-    ) as extract_mock:
+    ), patch.object(retell_mod, "extract_order_based_notes_sync") as extract_mock:
         client = TestClient(app)
         r = client.post(
             "/retell/webhook/call_analyzed",

@@ -21,10 +21,10 @@ from Clinic_app.Routes.admin import validate_e164_phone
 logger = logging.getLogger(__name__)
 
 # Email validation pattern (simple regex)
-EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+EMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 # DOB format (YYYY-MM-DD)
-DOB_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+DOB_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Valid languages
 VALID_LANGUAGES = ["en", "es"]
@@ -47,11 +47,11 @@ async def _validate_patient_inputs(
     dob: str,
     phone: str,
     email: Optional[str] = None,
-    language: str = "en"
+    language: str = "en",
 ) -> None:
     """
     Validate patient input parameters.
-    
+
     Args:
         db: Database session
         clinic_id: Clinic UUID
@@ -60,7 +60,7 @@ async def _validate_patient_inputs(
         phone: Phone number (E.164 format)
         email: Email address (optional)
         language: Language code ("en" or "es")
-        
+
     Raises:
         ValueError: If any validation fails
     """
@@ -69,50 +69,45 @@ async def _validate_patient_inputs(
     clinic = clinic_result.scalar_one_or_none()
     if not clinic:
         raise ValueError(f"Clinic with id {clinic_id} not found")
-    
+
     # Validate name
     if not name or not name.strip():
         raise ValueError("Patient name cannot be empty")
-    
+
     # Validate DOB format
     if not DOB_PATTERN.match(dob.strip()):
         raise ValueError("Date of birth must be in YYYY-MM-DD format")
-    
+
     # Validate phone
     if not validate_e164_phone(phone):
         raise ValueError("Phone number must be in E.164 format (e.g., +15551234567)")
-    
+
     # Validate email if provided
     if email is not None and email.strip():
         if not EMAIL_PATTERN.match(email.strip()):
             raise ValueError("Invalid email format")
-    
+
     # Validate language
     if language not in VALID_LANGUAGES:
         raise ValueError(f"Language must be one of: {', '.join(VALID_LANGUAGES)}")
 
 
-async def find_patient(
-    db: AsyncSession,
-    clinic_id: UUID,
-    name: str,
-    dob: str
-) -> Optional[Patient]:
+async def find_patient(db: AsyncSession, clinic_id: UUID, name: str, dob: str) -> Optional[Patient]:
     """
     Find existing patient by name + DOB within clinic scope.
-    
+
     Uses hash-based lookup for efficiency. Decrypts name and DOB to verify match
     (defense against hash collisions).
-    
+
     Args:
         db: Database session
         clinic_id: Clinic UUID
         name: Patient name
         dob: Date of birth (YYYY-MM-DD format)
-        
+
     Returns:
         Patient if found, None otherwise
-        
+
     Raises:
         ValueError: If inputs are invalid
         DecryptionError: If decryption fails
@@ -120,24 +115,23 @@ async def find_patient(
     # Validate inputs
     if not name or not name.strip():
         raise ValueError("Patient name cannot be empty")
-    
+
     if not DOB_PATTERN.match(dob.strip()):
         raise ValueError("Date of birth must be in YYYY-MM-DD format")
-    
+
     # Compute hash
     name_dob_hash = _compute_name_dob_hash(name, dob)
-    
+
     logger.info(f"Looking up patient by hash in clinic {clinic_id} (hash: {name_dob_hash[:8]}...)")
-    
+
     # Query database
     result = await db.execute(
         select(Patient).where(
-            Patient.clinic_id == clinic_id,
-            Patient.name_dob_hash == name_dob_hash
+            Patient.clinic_id == clinic_id, Patient.name_dob_hash == name_dob_hash
         )
     )
     patient = result.scalar_one_or_none()
-    
+
     if not patient:
         logger.info(f"Patient not found for hash in clinic {clinic_id}")
         return None
@@ -156,11 +150,11 @@ async def create_patient(
     phone: str,
     email: Optional[str] = None,
     language: str = "en",
-    insurance_plan: Optional[str] = None
+    insurance_plan: Optional[str] = None,
 ) -> Patient:
     """
     Create new patient with encrypted PHI.
-    
+
     Args:
         db: Database session
         clinic_id: Clinic UUID
@@ -170,27 +164,27 @@ async def create_patient(
         email: Email address (optional)
         language: Language code ("en" or "es", default: "en")
         insurance_plan: Insurance plan information (optional)
-        
+
     Returns:
         Created Patient instance
-        
+
     Raises:
         ValueError: If inputs are invalid or patient already exists
         EncryptionError: If encryption fails
     """
     # Validate all inputs
     await _validate_patient_inputs(db, clinic_id, name, dob, phone, email, language)
-    
+
     # Compute hash
     name_dob_hash = _compute_name_dob_hash(name, dob)
-    
+
     logger.info(f"Creating patient in clinic {clinic_id} (hash: {name_dob_hash[:8]}...)")
-    
+
     # Check if patient already exists
     existing_patient = await find_patient(db, clinic_id, name, dob)
     if existing_patient:
         raise ValueError("Patient already exists with this name and DOB")
-    
+
     # Encrypt PHI
     try:
         name_token = encrypt_phi(name)
@@ -211,14 +205,13 @@ async def create_patient(
         email_token=email_token,
         name_dob_hash=name_dob_hash,
         language=language,
-        insurance_plan=insurance_plan
+        insurance_plan=insurance_plan,
     )
-    
+
     # Add to session
     db.add(patient)
     await db.flush()
-    
-    logger.info(f"Patient created successfully: {patient.id} in clinic {clinic_id}")
-    
-    return patient
 
+    logger.info(f"Patient created successfully: {patient.id} in clinic {clinic_id}")
+
+    return patient

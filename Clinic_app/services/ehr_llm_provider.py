@@ -61,8 +61,7 @@ def _build_ollama() -> Any:
         from langchain_ollama import ChatOllama
     except ImportError as exc:
         raise RuntimeError(
-            "langchain-ollama is not installed. "
-            "Run: pip install langchain-ollama"
+            "langchain-ollama is not installed. " "Run: pip install langchain-ollama"
         ) from exc
     llm = ChatOllama(model=model, base_url=base_url, temperature=0.0)
     logger.info("EHR LLM: Ollama (model=%s, base_url=%s)", model, base_url)
@@ -76,7 +75,8 @@ def _build_azure_openai() -> Any:
     deployment = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "")
 
     missing = [
-        k for k, v in [
+        k
+        for k, v in [
             ("AZURE_OPENAI_ENDPOINT", endpoint),
             ("AZURE_OPENAI_API_KEY", api_key),
             ("AZURE_OPENAI_DEPLOYMENT_NAME", deployment),
@@ -93,8 +93,7 @@ def _build_azure_openai() -> Any:
         from langchain_openai import AzureChatOpenAI
     except ImportError as exc:
         raise RuntimeError(
-            "langchain-openai is not installed. "
-            "Run: pip install langchain-openai"
+            "langchain-openai is not installed. " "Run: pip install langchain-openai"
         ) from exc
 
     llm = AzureChatOpenAI(

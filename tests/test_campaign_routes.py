@@ -21,8 +21,10 @@ from Clinic_app.common.database import get_db
 
 # ── Test app setup ─────────────────────────────────────────────────────────────
 
+
 def _make_app(staff):
     """Build a minimal FastAPI test app for campaign routes with mocked DB."""
+
     async def mock_db():
         yield AsyncMock()
 
@@ -64,6 +66,7 @@ def _make_campaign(status: str = CampaignStatus.PENDING.value):
 
 def _make_upload_result():
     from Clinic_app.services.campaign_service import CampaignCreateResult
+
     return CampaignCreateResult(
         campaign_id=uuid.uuid4(),
         name="Q1 2026 HEDIS",
@@ -82,6 +85,7 @@ def _make_csv_bytes(rows: int = 3) -> bytes:
 def _make_parsed_rows(n: int = 3):
     from Clinic_app.services.csv_parser import ParsedRow
     from Clinic_app.data.enums import GapType
+
     return [
         ParsedRow(f"+1787555{1000 + i}", GapType.COLORECTAL, "en", raw_row_number=i + 2)
         for i in range(n)
@@ -90,6 +94,7 @@ def _make_parsed_rows(n: int = 3):
 
 # ── POST /campaigns/upload ─────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestUploadEndpoint:
     def test_valid_csv_upload_returns_201(self):
@@ -97,14 +102,17 @@ class TestUploadEndpoint:
         client = TestClient(_make_app(staff))
         upload_result = _make_upload_result()
 
-        with patch("Clinic_app.Routes.campaigns.parse_file",
-                   return_value=(_make_parsed_rows(), [])), \
-             patch("Clinic_app.Routes.campaigns.get_clinic_settings",
-                   new=AsyncMock(return_value=MagicMock())), \
-             patch("Clinic_app.Routes.campaigns.get_staff_for_clinic",
-                   new=AsyncMock(return_value=MagicMock())), \
-             patch("Clinic_app.Routes.campaigns.create_campaign",
-                   new=AsyncMock(return_value=upload_result)):
+        with patch(
+            "Clinic_app.Routes.campaigns.parse_file", return_value=(_make_parsed_rows(), [])
+        ), patch(
+            "Clinic_app.Routes.campaigns.get_clinic_settings",
+            new=AsyncMock(return_value=MagicMock()),
+        ), patch(
+            "Clinic_app.Routes.campaigns.get_staff_for_clinic",
+            new=AsyncMock(return_value=MagicMock()),
+        ), patch(
+            "Clinic_app.Routes.campaigns.create_campaign", new=AsyncMock(return_value=upload_result)
+        ):
             response = client.post(
                 "/campaigns/upload",
                 data={"name": "Q1 2026 HEDIS", "measurement_year": "2026"},
@@ -157,8 +165,10 @@ class TestUploadEndpoint:
         staff = _make_staff("admin")
         client = TestClient(_make_app(staff))
 
-        with patch("Clinic_app.Routes.campaigns.parse_file",
-                   side_effect=ValueError("CSV has no phone column")):
+        with patch(
+            "Clinic_app.Routes.campaigns.parse_file",
+            side_effect=ValueError("CSV has no phone column"),
+        ):
             response = client.post(
                 "/campaigns/upload",
                 data={"name": "Test", "measurement_year": "2026"},
@@ -186,24 +196,33 @@ class TestUploadEndpoint:
         client = TestClient(_make_app(staff))
         upload_result = _make_upload_result()
 
-        with patch("Clinic_app.Routes.campaigns.parse_file",
-                   return_value=(_make_parsed_rows(), [])), \
-             patch("Clinic_app.Routes.campaigns.get_clinic_settings",
-                   new=AsyncMock(return_value=MagicMock())), \
-             patch("Clinic_app.Routes.campaigns.get_staff_for_clinic",
-                   new=AsyncMock(return_value=MagicMock())), \
-             patch("Clinic_app.Routes.campaigns.create_campaign",
-                   new=AsyncMock(return_value=upload_result)):
+        with patch(
+            "Clinic_app.Routes.campaigns.parse_file", return_value=(_make_parsed_rows(), [])
+        ), patch(
+            "Clinic_app.Routes.campaigns.get_clinic_settings",
+            new=AsyncMock(return_value=MagicMock()),
+        ), patch(
+            "Clinic_app.Routes.campaigns.get_staff_for_clinic",
+            new=AsyncMock(return_value=MagicMock()),
+        ), patch(
+            "Clinic_app.Routes.campaigns.create_campaign", new=AsyncMock(return_value=upload_result)
+        ):
             response = client.post(
                 "/campaigns/upload",
                 data={"name": "Test", "measurement_year": "2026"},
-                files={"file": ("patients.xlsx", b"xlsxdata",
-                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                files={
+                    "file": (
+                        "patients.xlsx",
+                        b"xlsxdata",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                },
             )
         assert response.status_code == 201
 
 
 # ── GET /campaigns ─────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestListCampaignsRoute:
@@ -212,8 +231,9 @@ class TestListCampaignsRoute:
         client = TestClient(_make_app(staff))
         campaigns = [_make_campaign(), _make_campaign()]
 
-        with patch("Clinic_app.Routes.campaigns.list_campaigns",
-                   new=AsyncMock(return_value=campaigns)):
+        with patch(
+            "Clinic_app.Routes.campaigns.list_campaigns", new=AsyncMock(return_value=campaigns)
+        ):
             response = client.get("/campaigns")
 
         assert response.status_code == 200
@@ -223,8 +243,7 @@ class TestListCampaignsRoute:
         staff = _make_staff("viewer")
         client = TestClient(_make_app(staff))
 
-        with patch("Clinic_app.Routes.campaigns.list_campaigns",
-                   new=AsyncMock(return_value=[])):
+        with patch("Clinic_app.Routes.campaigns.list_campaigns", new=AsyncMock(return_value=[])):
             response = client.get("/campaigns")
 
         assert response.status_code == 200
@@ -235,14 +254,14 @@ class TestListCampaignsRoute:
         client = TestClient(_make_app(staff))
 
         # No service call needed — validated before DB query
-        with patch("Clinic_app.Routes.campaigns.list_campaigns",
-                   new=AsyncMock(return_value=[])):
+        with patch("Clinic_app.Routes.campaigns.list_campaigns", new=AsyncMock(return_value=[])):
             response = client.get("/campaigns?status=INVALID_STATUS")
 
         assert response.status_code == 422
 
 
 # ── GET /campaigns/{id} ────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestGetCampaignRoute:
@@ -251,8 +270,9 @@ class TestGetCampaignRoute:
         client = TestClient(_make_app(staff))
         campaign = _make_campaign()
 
-        with patch("Clinic_app.Routes.campaigns.get_campaign",
-                   new=AsyncMock(return_value=campaign)):
+        with patch(
+            "Clinic_app.Routes.campaigns.get_campaign", new=AsyncMock(return_value=campaign)
+        ):
             response = client.get(f"/campaigns/{campaign.id}")
 
         assert response.status_code == 200
@@ -261,6 +281,7 @@ class TestGetCampaignRoute:
 
 # ── POST /campaigns/{id}/pause ─────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestPauseCampaignRoute:
     def test_admin_can_pause(self):
@@ -268,8 +289,9 @@ class TestPauseCampaignRoute:
         client = TestClient(_make_app(staff))
         campaign = _make_campaign(CampaignStatus.PAUSED.value)
 
-        with patch("Clinic_app.Routes.campaigns.pause_campaign",
-                   new=AsyncMock(return_value=campaign)):
+        with patch(
+            "Clinic_app.Routes.campaigns.pause_campaign", new=AsyncMock(return_value=campaign)
+        ):
             response = client.post(f"/campaigns/{uuid.uuid4()}/pause")
 
         assert response.status_code == 200
@@ -284,6 +306,7 @@ class TestPauseCampaignRoute:
 
 
 # ── GET /campaigns/{id}/export — PHI safety ────────────────────────────────────
+
 
 @pytest.mark.unit
 class TestExportRoute:
@@ -304,10 +327,12 @@ class TestExportRoute:
         contact.ehr_appointment_id = None
         contact.created_at = datetime(2026, 3, 20)
 
-        with patch("Clinic_app.Routes.campaigns.get_campaign",
-                   new=AsyncMock(return_value=campaign)), \
-             patch("Clinic_app.Routes.campaigns.get_campaign_contacts",
-                   new=AsyncMock(return_value=[contact])):
+        with patch(
+            "Clinic_app.Routes.campaigns.get_campaign", new=AsyncMock(return_value=campaign)
+        ), patch(
+            "Clinic_app.Routes.campaigns.get_campaign_contacts",
+            new=AsyncMock(return_value=[contact]),
+        ):
             response = client.get(f"/campaigns/{campaign.id}/export")
 
         assert response.status_code == 200

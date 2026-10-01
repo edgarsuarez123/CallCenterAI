@@ -78,12 +78,14 @@ _DEDUP_BLOCK_STATUSES = _TERMINAL_STATUSES | _ACTIVE_STATUSES
 
 # ── Result types ───────────────────────────────────────────────────────────────
 
+
 @dataclass
 class SkippedContact:
     """A row that was skipped during ingestion due to dedup."""
+
     phone_hash: str
     gap_type: str
-    reason: str   # "already_active" | "already_booked" | "already_exhausted"
+    reason: str  # "already_active" | "already_booked" | "already_exhausted"
     raw_row_number: int
 
 
@@ -99,12 +101,14 @@ class CampaignCreateResult:
 
 # ── Phone hashing ──────────────────────────────────────────────────────────────
 
+
 def hash_phone(phone_e164: str) -> str:
     """HMAC-SHA256 of an E.164 phone number using PHI_HASH_KEY. Used for dedup without decryption."""
     return hash_phi(phone_e164)
 
 
 # ── Dedup query ────────────────────────────────────────────────────────────────
+
 
 async def _find_duplicate_contact(
     db: AsyncSession,
@@ -138,6 +142,7 @@ async def _find_duplicate_contact(
 
 
 # ── Campaign creation ──────────────────────────────────────────────────────────
+
 
 async def create_campaign(
     db: AsyncSession,
@@ -199,12 +204,14 @@ async def create_campaign(
                 ContactStatus.HUMAN_REQUESTED.value: "already_declined",
             }
             reason = reason_map.get(existing.status, "already_active")
-            skipped.append(SkippedContact(
-                phone_hash=phone_hash,
-                gap_type=gap_type_val,
-                reason=reason,
-                raw_row_number=row.raw_row_number,
-            ))
+            skipped.append(
+                SkippedContact(
+                    phone_hash=phone_hash,
+                    gap_type=gap_type_val,
+                    reason=reason,
+                    raw_row_number=row.raw_row_number,
+                )
+            )
             continue
 
         # Encrypt phone and optional name for dial-time metadata
@@ -264,6 +271,7 @@ async def create_campaign(
 
 
 # ── Campaign reads ─────────────────────────────────────────────────────────────
+
 
 async def get_campaign(
     db: AsyncSession,
@@ -518,6 +526,7 @@ async def maybe_mark_campaign_completed(
 
 
 # ── Campaign lifecycle ─────────────────────────────────────────────────────────
+
 
 async def pause_campaign(
     db: AsyncSession,

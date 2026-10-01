@@ -25,6 +25,7 @@ import pytest
 # Playwright runtime checks                                                   #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.integration
 @pytest.mark.slow
 class TestPlaywrightRuntime:
@@ -108,7 +109,7 @@ class TestPlaywrightRuntime:
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
-                )
+                ),
             )
             page = await context.new_page()
             viewport = page.viewport_size
@@ -123,6 +124,7 @@ class TestPlaywrightRuntime:
 # Browser-Use + LLM backend runtime checks                                    #
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.integration
 class TestBrowserUseRuntime:
     """
@@ -135,27 +137,18 @@ class TestBrowserUseRuntime:
         try:
             from browser_use import Agent, Browser  # noqa: F401
         except ImportError:
-            pytest.fail(
-                "browser-use is not installed.\n"
-                "Run: pip install browser-use"
-            )
+            pytest.fail("browser-use is not installed.\n" "Run: pip install browser-use")
 
     def test_langchain_openai_is_importable(self):
         """langchain-openai must be importable (AzureChatOpenAI for production)."""
         try:
             from langchain_openai import AzureChatOpenAI  # noqa: F401
         except ImportError:
-            pytest.fail(
-                "langchain-openai is not installed.\n"
-                "Run: pip install langchain-openai"
-            )
+            pytest.fail("langchain-openai is not installed.\n" "Run: pip install langchain-openai")
 
     def test_langchain_ollama_is_importable(self):
         """langchain-ollama must be importable (ChatOllama for local dev)."""
         try:
             from langchain_ollama import ChatOllama  # noqa: F401
         except ImportError:
-            pytest.fail(
-                "langchain-ollama is not installed.\n"
-                "Run: pip install langchain-ollama"
-            )
+            pytest.fail("langchain-ollama is not installed.\n" "Run: pip install langchain-ollama")

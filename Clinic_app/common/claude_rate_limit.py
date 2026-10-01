@@ -48,7 +48,9 @@ async def check_and_increment(clinic_id: UUID) -> bool:
         if count > limit:
             logger.warning(
                 "Claude rate limit exceeded: clinic_id=%s count=%d limit=%d/minute",
-                clinic_id, count, limit,
+                clinic_id,
+                count,
+                limit,
             )
             return False
 
@@ -68,6 +70,7 @@ def _get_limit() -> int:
     except ValueError:
         logger.warning(
             "Invalid RATE_LIMIT_CLAUDE_PER_CLINIC=%r — using default %d",
-            raw, _DEFAULT_LIMIT,
+            raw,
+            _DEFAULT_LIMIT,
         )
         return _DEFAULT_LIMIT

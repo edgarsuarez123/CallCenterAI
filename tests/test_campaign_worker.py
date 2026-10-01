@@ -12,6 +12,7 @@ from Clinic_app.workers import campaign_worker
 @pytest.mark.unit
 def test_mask_phone_e164() -> None:
     from Clinic_app.common.logging_utils import mask_phone_e164
+
     assert mask_phone_e164("+17875551234").endswith("1234")
     assert "+1787" not in mask_phone_e164("+17875551234")
 

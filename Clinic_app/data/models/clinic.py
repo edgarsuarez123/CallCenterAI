@@ -10,6 +10,7 @@ class Clinic(Base):
     """
     Represents a tenant container — one clinic = one deployed instance.
     """
+
     __tablename__ = "clinic"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)

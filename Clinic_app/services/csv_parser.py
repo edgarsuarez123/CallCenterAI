@@ -199,23 +199,26 @@ Return ONLY a valid JSON object. No explanation, no markdown. Example:
 
 # ── Data structures ────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ParsedRow:
     """A normalized, validated patient row ready for campaign ingestion."""
-    phone_e164: str              # E.164 format, e.g. "+17875551234"
+
+    phone_e164: str  # E.164 format, e.g. "+17875551234"
     gap_type: GapType
-    language: str                # "en" | "es" | other BCP-47 code
-    patient_name: Optional[str] = None   # Encrypted at campaign ingest
-    patient_dob: Optional[str] = None    # Encrypted at campaign ingest
+    language: str  # "en" | "es" | other BCP-47 code
+    patient_name: Optional[str] = None  # Encrypted at campaign ingest
+    patient_dob: Optional[str] = None  # Encrypted at campaign ingest
     provider_name: Optional[str] = None  # Plain text — Retell metadata
-    payer: Optional[str] = None          # Plain text — Retell metadata
-    release_date: Optional[str] = None   # hospital_flu only: discharge date ISO string (YYYY-MM-DD)
-    raw_row_number: int = 0      # 1-indexed row number in original file (for error reporting)
+    payer: Optional[str] = None  # Plain text — Retell metadata
+    release_date: Optional[str] = None  # hospital_flu only: discharge date ISO string (YYYY-MM-DD)
+    raw_row_number: int = 0  # 1-indexed row number in original file (for error reporting)
 
 
 @dataclass
 class ParseError:
     """A row that could not be parsed. Upload is not aborted — errors are reported."""
+
     row_number: int
     reason: str
     raw_data: dict = field(default_factory=dict)
@@ -224,6 +227,7 @@ class ParseError:
 @dataclass
 class ColumnMapping:
     """Claude-returned column mapping for a specific CSV layout."""
+
     phone_col: Optional[str]
     gap_type_col: Optional[str]
     language_col: Optional[str]
@@ -231,8 +235,8 @@ class ColumnMapping:
     dob_col: Optional[str]
     provider_col: Optional[str]
     payer_col: Optional[str]
-    release_date_col: Optional[str]   # hospital_flu discharge date column
-    gap_type_values: dict[str, str]   # raw gap type string → GapType.value
+    release_date_col: Optional[str]  # hospital_flu discharge date column
+    gap_type_values: dict[str, str]  # raw gap type string → GapType.value
 
 
 # ── E.164 phone normalization ──────────────────────────────────────────────────
@@ -254,6 +258,7 @@ def normalize_phone(raw: str) -> str:
 
 
 # ── Direct header mapping ──────────────────────────────────────────────────────
+
 
 def _try_direct_header_mapping(
     header_row: list[str],
@@ -300,6 +305,7 @@ def _try_direct_header_mapping(
 
 
 # ── Claude API call ────────────────────────────────────────────────────────────
+
 
 def _get_anthropic_client() -> anthropic.Anthropic:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -372,6 +378,7 @@ def _build_column_mapping(claude_response: dict, header_row: list[str]) -> Colum
 
 # ── Gap type mapping ───────────────────────────────────────────────────────────
 
+
 def map_gap_type(raw: str, gap_type_values: dict[str, str]) -> Optional[GapType]:
     """
     Map a raw gap type string to a GapType enum value using Claude's mapping.
@@ -390,13 +397,19 @@ def map_gap_type(raw: str, gap_type_values: dict[str, str]) -> Optional[GapType]
 
 # ── Delimiter detection ────────────────────────────────────────────────────────
 
+
 def _detect_delimiter(header_line: str) -> str:
     """Heuristically detect CSV delimiter from the header line."""
-    counts = {",": header_line.count(","), "|": header_line.count("|"), "\t": header_line.count("\t")}
+    counts = {
+        ",": header_line.count(","),
+        "|": header_line.count("|"),
+        "\t": header_line.count("\t"),
+    }
     return max(counts, key=counts.get)
 
 
 # ── Excel → row list conversion ────────────────────────────────────────────────
+
 
 def _read_excel_rows(file_bytes: bytes) -> tuple[list[str], list[dict]]:
     """
@@ -438,6 +451,7 @@ def _read_excel_rows(file_bytes: bytes) -> tuple[list[str], list[dict]]:
 
 
 # ── Main parse function ────────────────────────────────────────────────────────
+
 
 def parse_file(
     file_bytes: bytes,
@@ -520,15 +534,19 @@ def parse_file(
         raw_dob = row.get(mapping.dob_col, "").strip() if mapping.dob_col else None
         raw_provider = row.get(mapping.provider_col, "").strip() if mapping.provider_col else None
         raw_payer = row.get(mapping.payer_col, "").strip() if mapping.payer_col else None
-        raw_release_date = row.get(mapping.release_date_col, "").strip() if mapping.release_date_col else None
+        raw_release_date = (
+            row.get(mapping.release_date_col, "").strip() if mapping.release_date_col else None
+        )
 
         try:
             phone_e164 = normalize_phone(raw_phone)
         except ValueError as exc:
-            parse_errors.append(ParseError(
-                row_number=idx,
-                reason=str(exc),
-            ))
+            parse_errors.append(
+                ParseError(
+                    row_number=idx,
+                    reason=str(exc),
+                )
+            )
             continue
 
         gap_type = map_gap_type(raw_gap, mapping.gap_type_values)
@@ -552,17 +570,19 @@ def parse_file(
 
         language = raw_lang if raw_lang else "en"
 
-        parsed_rows.append(ParsedRow(
-            phone_e164=phone_e164,
-            gap_type=gap_type,
-            language=language,
-            patient_name=raw_name or None,
-            patient_dob=raw_dob or None,
-            provider_name=raw_provider or None,
-            payer=raw_payer or None,
-            release_date=raw_release_date or None,
-            raw_row_number=idx,
-        ))
+        parsed_rows.append(
+            ParsedRow(
+                phone_e164=phone_e164,
+                gap_type=gap_type,
+                language=language,
+                patient_name=raw_name or None,
+                patient_dob=raw_dob or None,
+                provider_name=raw_provider or None,
+                payer=raw_payer or None,
+                release_date=raw_release_date or None,
+                raw_row_number=idx,
+            )
+        )
 
     logger.info(f"File parse complete. parsed={len(parsed_rows)}, errors={len(parse_errors)}")
     return parsed_rows, parse_errors

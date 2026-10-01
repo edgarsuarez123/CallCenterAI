@@ -31,6 +31,7 @@ GOOGLE_SCOPES = "openid email profile"
 
 # ── Google OAuth helpers ───────────────────────────────────────────────────────
 
+
 def build_google_auth_url(state: str) -> str:
     """
     Build the Google OAuth 2.0 authorization URL.
@@ -87,7 +88,10 @@ async def exchange_code_for_tokens(code: str) -> dict:
         logger.warning(f"Google token exchange failed: status={response.status_code}")
         raise HTTPException(
             status_code=400,
-            detail={"code": "OAUTH_EXCHANGE_FAILED", "message": "Failed to exchange authorization code"},
+            detail={
+                "code": "OAUTH_EXCHANGE_FAILED",
+                "message": "Failed to exchange authorization code",
+            },
         )
 
     return response.json()
@@ -130,6 +134,7 @@ def extract_google_user(token_response: dict) -> tuple[str, str]:
 
 
 # ── ClinicStaff database operations ───────────────────────────────────────────
+
 
 async def get_staff_clinics(db: AsyncSession, google_sub: str) -> list[ClinicStaff]:
     """
@@ -197,7 +202,10 @@ async def create_staff(
         await db.rollback()
         raise HTTPException(
             status_code=409,
-            detail={"code": "ALREADY_PROVISIONED", "message": "Staff member already provisioned for this clinic"},
+            detail={
+                "code": "ALREADY_PROVISIONED",
+                "message": "Staff member already provisioned for this clinic",
+            },
         )
     return staff
 

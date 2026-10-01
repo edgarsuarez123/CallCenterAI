@@ -20,6 +20,7 @@ from Clinic_app.data.enums import CampaignStatus, ContactOutcome
 # HELPERS
 # ============================================================================
 
+
 def _make_campaign(status=CampaignStatus.DRAFT, total=0, completed=0):
     campaign = MagicMock()
     campaign.id = uuid.uuid4()
@@ -67,22 +68,26 @@ def _make_db(scalar_result=None, scalars_result=None):
 # PHONE NORMALIZATION HELPERS
 # ============================================================================
 
+
 @pytest.mark.unit
 class TestPhoneHelpers:
     def test_normalize_us_phone(self):
         from Clinic_app.services.campaign import _normalize_phone
+
         assert _normalize_phone("+17875550101") == "+17875550101"
         assert _normalize_phone("787-555-0101") == "+17875550101"
         assert _normalize_phone("7875550101") == "+17875550101"
 
     def test_normalize_invalid_phone(self):
         from Clinic_app.services.campaign import _normalize_phone
+
         assert _normalize_phone("not-a-phone") is None
         assert _normalize_phone("123") is None
         assert _normalize_phone("") is None
 
     def test_hash_phone_deterministic(self):
         from Clinic_app.services.campaign import _hash_phone
+
         h1 = _hash_phone("+17875550101")
         h2 = _hash_phone("+17875550101")
         assert h1 == h2
@@ -90,12 +95,14 @@ class TestPhoneHelpers:
 
     def test_hash_phone_different_inputs(self):
         from Clinic_app.services.campaign import _hash_phone
+
         h1 = _hash_phone("+17875550101")
         h2 = _hash_phone("+17875550102")
         assert h1 != h2
 
     def test_mask_phone(self):
         from Clinic_app.services.campaign import _mask_phone
+
         assert _mask_phone("+17875550101") == "***-***-0101"
         assert _mask_phone("+11234567890") == "***-***-7890"
 
@@ -103,6 +110,7 @@ class TestPhoneHelpers:
 # ============================================================================
 # CAMPAIGN CRUD
 # ============================================================================
+
 
 @pytest.mark.unit
 class TestCreateCampaign:
@@ -119,13 +127,16 @@ class TestCreateCampaign:
 
         # Capture what was added to db
         added_obj = None
+
         def capture_add(obj):
             nonlocal added_obj
             added_obj = obj
+
         db.add.side_effect = capture_add
 
         async def mock_refresh(obj):
             pass
+
         db.refresh.side_effect = mock_refresh
 
         clinic_id = uuid.uuid4()
@@ -227,6 +238,7 @@ class TestCampaignStateTransitions:
 # CSV UPLOAD
 # ============================================================================
 
+
 @pytest.mark.unit
 class TestUploadContacts:
     def _make_csv(self, rows: list[dict]) -> bytes:
@@ -247,6 +259,7 @@ class TestUploadContacts:
                 return _make_result(scalar_result=campaign)
             else:
                 return _make_result(scalars_result=hashes)
+
         return multi_execute
 
     @pytest.mark.asyncio
@@ -260,13 +273,17 @@ class TestUploadContacts:
         db.add_all = MagicMock()
         db.execute.side_effect = self._make_multi_execute(campaign)
 
-        csv_content = self._make_csv([
-            {"name": "Maria Garcia", "phone": "+17875550101"},
-            {"name": "James Wilson", "phone": "+17875550102"},
-        ])
+        csv_content = self._make_csv(
+            [
+                {"name": "Maria Garcia", "phone": "+17875550101"},
+                {"name": "James Wilson", "phone": "+17875550102"},
+            ]
+        )
 
         with patch("Clinic_app.services.campaign.encrypt_phi", return_value=b"encrypted"):
-            result = await upload_contacts(db, campaign.id, campaign.clinic_id, csv_content, "Default reason")
+            result = await upload_contacts(
+                db, campaign.id, campaign.clinic_id, csv_content, "Default reason"
+            )
 
         assert result["imported"] == 2
         assert result["duplicates_skipped"] == 0
@@ -283,13 +300,17 @@ class TestUploadContacts:
         db.add_all = MagicMock()
         db.execute.side_effect = self._make_multi_execute(campaign)
 
-        csv_content = self._make_csv([
-            {"name": "Valid Person", "phone": "+17875550101"},
-            {"name": "Bad Phone",   "phone": "not-a-phone"},
-        ])
+        csv_content = self._make_csv(
+            [
+                {"name": "Valid Person", "phone": "+17875550101"},
+                {"name": "Bad Phone", "phone": "not-a-phone"},
+            ]
+        )
 
         with patch("Clinic_app.services.campaign.encrypt_phi", return_value=b"encrypted"):
-            result = await upload_contacts(db, campaign.id, campaign.clinic_id, csv_content, "reason")
+            result = await upload_contacts(
+                db, campaign.id, campaign.clinic_id, csv_content, "reason"
+            )
 
         assert result["imported"] == 1
         assert result["invalid_rows"] == 1
@@ -307,13 +328,17 @@ class TestUploadContacts:
         db.add_all = MagicMock()
         db.execute.side_effect = self._make_multi_execute(campaign, hashes=[existing_hash])
 
-        csv_content = self._make_csv([
-            {"name": "Duplicate Person", "phone": "+17875550101"},
-            {"name": "New Person",       "phone": "+17875550102"},
-        ])
+        csv_content = self._make_csv(
+            [
+                {"name": "Duplicate Person", "phone": "+17875550101"},
+                {"name": "New Person", "phone": "+17875550102"},
+            ]
+        )
 
         with patch("Clinic_app.services.campaign.encrypt_phi", return_value=b"encrypted"):
-            result = await upload_contacts(db, campaign.id, campaign.clinic_id, csv_content, "reason")
+            result = await upload_contacts(
+                db, campaign.id, campaign.clinic_id, csv_content, "reason"
+            )
 
         assert result["imported"] == 1
         assert result["duplicates_skipped"] == 1
@@ -347,6 +372,7 @@ class TestUploadContacts:
 # ============================================================================
 # REPORT GENERATION
 # ============================================================================
+
 
 @pytest.mark.unit
 class TestGetCampaignReport:
@@ -389,6 +415,7 @@ class TestGetCampaignReport:
                 return _make_result(scalar_result=campaign)
             else:
                 return _make_result(scalars_result=[contact])
+
         db.execute.side_effect = multi_execute
 
         with patch("Clinic_app.services.campaign.decrypt_phi") as mock_decrypt:
@@ -404,6 +431,7 @@ class TestGetCampaignReport:
 # ============================================================================
 # DEMO MODE SIMULATION
 # ============================================================================
+
 
 @pytest.mark.unit
 class TestSimulateNextCall:
@@ -457,6 +485,7 @@ class TestSimulateNextCall:
             else:
                 # record_outcome campaign lookup
                 return _make_result(scalar_result=campaign)
+
         db.execute.side_effect = multi_execute
         db.flush = AsyncMock()
 

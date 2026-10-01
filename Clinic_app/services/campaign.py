@@ -82,6 +82,7 @@ def _mask_phone(normalized_phone: str) -> str:
 # CAMPAIGN CRUD
 # ============================================================================
 
+
 async def create_campaign(
     db: AsyncSession,
     clinic_id: UUID,
@@ -185,6 +186,7 @@ async def pause_campaign(
 # CSV UPLOAD
 # ============================================================================
 
+
 async def upload_contacts(
     db: AsyncSession,
     campaign_id: UUID,
@@ -216,9 +218,7 @@ async def upload_contacts(
 
     # Pre-load existing phone hashes for this clinic to detect duplicates
     existing_hashes_result = await db.execute(
-        select(CampaignContact.phone_hash).where(
-            CampaignContact.clinic_id == clinic_id
-        )
+        select(CampaignContact.phone_hash).where(CampaignContact.clinic_id == clinic_id)
     )
     existing_hashes = set(existing_hashes_result.scalars().all())
 
@@ -317,6 +317,7 @@ async def upload_contacts(
 # OUTCOME RECORDING
 # ============================================================================
 
+
 async def record_outcome(
     db: AsyncSession,
     contact_id: UUID,
@@ -384,6 +385,7 @@ async def record_outcome(
 # REPORT GENERATION
 # ============================================================================
 
+
 async def get_campaign_report(
     db: AsyncSession,
     campaign_id: UUID,
@@ -421,18 +423,20 @@ async def get_campaign_report(
             patient_name = "[decryption error]"
             phone_display = "***-***-****"
 
-        rows.append({
-            "id": str(c.id),
-            "patient_name": patient_name,
-            "phone_last4": phone_display,
-            "reason": c.reason,
-            "outcome": c.outcome,
-            "call_date": c.call_date.isoformat() if c.call_date else None,
-            "call_duration_seconds": c.call_duration_seconds,
-            "attempt_count": c.attempt_count,
-            "notes": c.notes,
-            "retell_call_id": c.retell_call_id,
-        })
+        rows.append(
+            {
+                "id": str(c.id),
+                "patient_name": patient_name,
+                "phone_last4": phone_display,
+                "reason": c.reason,
+                "outcome": c.outcome,
+                "call_date": c.call_date.isoformat() if c.call_date else None,
+                "call_duration_seconds": c.call_duration_seconds,
+                "attempt_count": c.attempt_count,
+                "notes": c.notes,
+                "retell_call_id": c.retell_call_id,
+            }
+        )
 
     return campaign, rows
 

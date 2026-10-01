@@ -29,7 +29,7 @@ from Clinic_app.services.booking import (
     get_booking_by_id,
     expire_booking,
     get_expired_tentative_bookings,
-    HOLD_DURATION_MINUTES
+    HOLD_DURATION_MINUTES,
 )
 from Clinic_app.data.enums import BookingStatus, BookingAction
 
@@ -37,6 +37,7 @@ from Clinic_app.data.enums import BookingStatus, BookingAction
 # ============================================================================
 # FIXTURES
 # ============================================================================
+
 
 @pytest.fixture
 def sample_clinic_id():
@@ -105,7 +106,15 @@ def mock_patient(sample_patient_id, sample_clinic_id):
 
 
 @pytest.fixture
-def mock_booking(sample_booking_id, sample_provider_id, sample_patient_id, sample_clinic_id, sample_hold_token, future_slot_start, future_slot_end):
+def mock_booking(
+    sample_booking_id,
+    sample_provider_id,
+    sample_patient_id,
+    sample_clinic_id,
+    sample_hold_token,
+    future_slot_start,
+    future_slot_end,
+):
     """Create a mock Booking object."""
     booking = Mock()
     booking.id = sample_booking_id
@@ -148,29 +157,39 @@ def mock_db_session():
 # TEST HELPER FUNCTIONS
 # ============================================================================
 
+
 class TestCreateAuditEntry:
     """Tests for _create_audit_entry function."""
-    
+
     @pytest.mark.asyncio
-    async def test_create_audit_entry_success(self, mock_db_session, sample_clinic_id, sample_booking_id):
+    async def test_create_audit_entry_success(
+        self, mock_db_session, sample_clinic_id, sample_booking_id
+    ):
         """Test successful audit entry creation."""
         result = await _create_audit_entry(
             db=mock_db_session,
             clinic_id=sample_clinic_id,
             booking_id=sample_booking_id,
             action=BookingAction.HOLD,
-            actor="patient"
+            actor="patient",
         )
-        
+
         mock_db_session.add.assert_called_once()
         mock_db_session.flush.assert_called_once()
         assert result is not None
-    
+
     @pytest.mark.asyncio
-    async def test_create_audit_entry_all_actions(self, mock_db_session, sample_clinic_id, sample_booking_id):
+    async def test_create_audit_entry_all_actions(
+        self, mock_db_session, sample_clinic_id, sample_booking_id
+    ):
         """Test audit entry creation for all action types."""
-        actions = [BookingAction.HOLD, BookingAction.CONFIRM, BookingAction.CANCEL, BookingAction.EXPIRE]
-        
+        actions = [
+            BookingAction.HOLD,
+            BookingAction.CONFIRM,
+            BookingAction.CANCEL,
+            BookingAction.EXPIRE,
+        ]
+
         for action in actions:
             mock_db_session.reset_mock()
             result = await _create_audit_entry(
@@ -178,16 +197,23 @@ class TestCreateAuditEntry:
                 clinic_id=sample_clinic_id,
                 booking_id=sample_booking_id,
                 action=action,
-                actor="test"
+                actor="test",
             )
             mock_db_session.add.assert_called_once()
 
 
 class TestCountSlotBookings:
     """Tests for _count_slot_bookings function."""
-    
+
     @pytest.mark.asyncio
-    async def test_count_returns_zero_for_empty_slot(self, mock_db_session, sample_clinic_id, sample_provider_id, future_slot_start, future_slot_end):
+    async def test_count_returns_zero_for_empty_slot(
+        self,
+        mock_db_session,
+        sample_clinic_id,
+        sample_provider_id,
+        future_slot_start,
+        future_slot_end,
+    ):
         """Test count returns 0 when no bookings exist."""
         mock_result = Mock()
         mock_result.scalar.return_value = 0
@@ -198,13 +224,20 @@ class TestCountSlotBookings:
             clinic_id=sample_clinic_id,
             provider_id=sample_provider_id,
             slot_start=future_slot_start,
-            slot_end=future_slot_end
+            slot_end=future_slot_end,
         )
 
         assert count == 0
 
     @pytest.mark.asyncio
-    async def test_count_returns_booking_count(self, mock_db_session, sample_clinic_id, sample_provider_id, future_slot_start, future_slot_end):
+    async def test_count_returns_booking_count(
+        self,
+        mock_db_session,
+        sample_clinic_id,
+        sample_provider_id,
+        future_slot_start,
+        future_slot_end,
+    ):
         """Test count returns correct number of bookings."""
         mock_result = Mock()
         mock_result.scalar.return_value = 2
@@ -215,7 +248,7 @@ class TestCountSlotBookings:
             clinic_id=sample_clinic_id,
             provider_id=sample_provider_id,
             slot_start=future_slot_start,
-            slot_end=future_slot_end
+            slot_end=future_slot_end,
         )
 
         assert count == 2
@@ -223,58 +256,58 @@ class TestCountSlotBookings:
 
 class TestGetProvider:
     """Tests for _get_provider function."""
-    
+
     @pytest.mark.asyncio
-    async def test_get_provider_success(self, mock_db_session, mock_provider, sample_provider_id, sample_clinic_id):
+    async def test_get_provider_success(
+        self, mock_db_session, mock_provider, sample_provider_id, sample_clinic_id
+    ):
         """Test successful provider retrieval."""
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         result = await _get_provider(
-            db=mock_db_session,
-            provider_id=sample_provider_id,
-            clinic_id=sample_clinic_id
+            db=mock_db_session, provider_id=sample_provider_id, clinic_id=sample_clinic_id
         )
-        
+
         assert result == mock_provider
-    
+
     @pytest.mark.asyncio
-    async def test_get_provider_not_found(self, mock_db_session, sample_provider_id, sample_clinic_id):
+    async def test_get_provider_not_found(
+        self, mock_db_session, sample_provider_id, sample_clinic_id
+    ):
         """Test provider not found raises ValueError."""
         mock_db_session.get = AsyncMock(return_value=None)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await _get_provider(
-                db=mock_db_session,
-                provider_id=sample_provider_id,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, provider_id=sample_provider_id, clinic_id=sample_clinic_id
             )
         assert "not found" in str(exc_info.value)
-    
+
     @pytest.mark.asyncio
-    async def test_get_provider_wrong_clinic(self, mock_db_session, mock_provider, sample_provider_id):
+    async def test_get_provider_wrong_clinic(
+        self, mock_db_session, mock_provider, sample_provider_id
+    ):
         """Test provider from different clinic raises ValueError."""
         different_clinic_id = uuid4()
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await _get_provider(
-                db=mock_db_session,
-                provider_id=sample_provider_id,
-                clinic_id=different_clinic_id
+                db=mock_db_session, provider_id=sample_provider_id, clinic_id=different_clinic_id
             )
         assert "does not belong to clinic" in str(exc_info.value)
-    
+
     @pytest.mark.asyncio
-    async def test_get_provider_inactive(self, mock_db_session, mock_provider, sample_provider_id, sample_clinic_id):
+    async def test_get_provider_inactive(
+        self, mock_db_session, mock_provider, sample_provider_id, sample_clinic_id
+    ):
         """Test inactive provider raises ValueError."""
         mock_provider.active = False
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await _get_provider(
-                db=mock_db_session,
-                provider_id=sample_provider_id,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, provider_id=sample_provider_id, clinic_id=sample_clinic_id
             )
         assert "not active" in str(exc_info.value)
 
@@ -283,22 +316,29 @@ class TestGetProvider:
 # TEST CREATE_TENTATIVE_BOOKING
 # ============================================================================
 
+
 class TestCreateTentativeBooking:
     """Tests for create_tentative_booking function."""
-    
+
     @pytest.mark.asyncio
     async def test_create_booking_success(
-        self, mock_db_session, mock_provider, sample_clinic_id, 
-        sample_provider_id, sample_patient_id, future_slot_start, future_slot_end
+        self,
+        mock_db_session,
+        mock_provider,
+        sample_clinic_id,
+        sample_provider_id,
+        sample_patient_id,
+        future_slot_start,
+        future_slot_end,
     ):
         """Test successful tentative booking creation."""
         # Setup mocks
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         count_result = Mock()
         count_result.scalar.return_value = 0
         mock_db_session.execute = AsyncMock(return_value=count_result)
-        
+
         booking, hold_token = await create_tentative_booking(
             db=mock_db_session,
             clinic_id=sample_clinic_id,
@@ -306,78 +346,96 @@ class TestCreateTentativeBooking:
             patient_id=sample_patient_id,
             slot_start=future_slot_start,
             slot_end=future_slot_end,
-            source="call"
+            source="call",
         )
-        
+
         assert booking is not None
         assert hold_token is not None
         mock_db_session.add.assert_called()  # Booking and audit added
-    
+
     @pytest.mark.asyncio
     async def test_creates_hold_token(
-        self, mock_db_session, mock_provider, sample_clinic_id,
-        sample_provider_id, sample_patient_id, future_slot_start, future_slot_end
+        self,
+        mock_db_session,
+        mock_provider,
+        sample_clinic_id,
+        sample_provider_id,
+        sample_patient_id,
+        future_slot_start,
+        future_slot_end,
     ):
         """Test that hold token is generated."""
         mock_db_session.get = AsyncMock(return_value=mock_provider)
         count_result = Mock()
         count_result.scalar.return_value = 0
         mock_db_session.execute = AsyncMock(return_value=count_result)
-        
+
         booking, hold_token = await create_tentative_booking(
             db=mock_db_session,
             clinic_id=sample_clinic_id,
             provider_id=sample_provider_id,
             patient_id=sample_patient_id,
             slot_start=future_slot_start,
-            slot_end=future_slot_end
+            slot_end=future_slot_end,
         )
-        
+
         assert isinstance(hold_token, UUID)
         assert booking.hold_token == hold_token
-    
+
     @pytest.mark.asyncio
     async def test_sets_5_minute_expiration(
-        self, mock_db_session, mock_provider, sample_clinic_id,
-        sample_provider_id, sample_patient_id, future_slot_start, future_slot_end
+        self,
+        mock_db_session,
+        mock_provider,
+        sample_clinic_id,
+        sample_provider_id,
+        sample_patient_id,
+        future_slot_start,
+        future_slot_end,
     ):
         """Test that hold expires in 5 minutes."""
         mock_db_session.get = AsyncMock(return_value=mock_provider)
         count_result = Mock()
         count_result.scalar.return_value = 0
         mock_db_session.execute = AsyncMock(return_value=count_result)
-        
+
         before = datetime.now(timezone.utc)
-        
+
         booking, _ = await create_tentative_booking(
             db=mock_db_session,
             clinic_id=sample_clinic_id,
             provider_id=sample_provider_id,
             patient_id=sample_patient_id,
             slot_start=future_slot_start,
-            slot_end=future_slot_end
+            slot_end=future_slot_end,
         )
-        
+
         after = datetime.now(timezone.utc)
-        
+
         expected_min = before + timedelta(minutes=HOLD_DURATION_MINUTES)
         expected_max = after + timedelta(minutes=HOLD_DURATION_MINUTES)
-        
+
         assert expected_min <= booking.hold_expires_at <= expected_max
-    
+
     @pytest.mark.asyncio
     async def test_fails_at_capacity(
-        self, mock_db_session, mock_provider, sample_clinic_id,
-        sample_provider_id, sample_patient_id, future_slot_start, future_slot_end
+        self,
+        mock_db_session,
+        mock_provider,
+        sample_clinic_id,
+        sample_provider_id,
+        sample_patient_id,
+        future_slot_start,
+        future_slot_end,
     ):
         """Test that booking fails when slot is at capacity."""
         mock_provider.capacity = 2
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         count_result = Mock()
         count_result.scalar.return_value = 2  # At capacity
         mock_db_session.execute = AsyncMock(return_value=count_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await create_tentative_booking(
                 db=mock_db_session,
@@ -385,7 +443,7 @@ class TestCreateTentativeBooking:
                 provider_id=sample_provider_id,
                 patient_id=sample_patient_id,
                 slot_start=future_slot_start,
-                slot_end=future_slot_end
+                slot_end=future_slot_end,
             )
         assert "capacity" in str(exc_info.value).lower()
 
@@ -394,93 +452,94 @@ class TestCreateTentativeBooking:
 # TEST CONFIRM_BOOKING
 # ============================================================================
 
+
 class TestConfirmBooking:
     """Tests for confirm_booking function."""
-    
+
     @pytest.mark.asyncio
     async def test_confirm_success(
-        self, mock_db_session, mock_booking, mock_provider, mock_patient,
-        sample_clinic_id, sample_hold_token
+        self,
+        mock_db_session,
+        mock_booking,
+        mock_provider,
+        mock_patient,
+        sample_clinic_id,
+        sample_hold_token,
     ):
         """Test successful booking confirmation."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
         mock_db_session.get = AsyncMock(side_effect=[mock_provider, mock_patient])
-        
-        with patch('Clinic_app.services.booking.GoogleCalendarService') as mock_gcal:
+
+        with patch("Clinic_app.services.booking.GoogleCalendarService") as mock_gcal:
             mock_gcal.create_event = AsyncMock(return_value={"id": "gcal_event_123"})
-            
+
             result = await confirm_booking(
-                db=mock_db_session,
-                hold_token=sample_hold_token,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, hold_token=sample_hold_token, clinic_id=sample_clinic_id
             )
-        
+
         assert result.status == BookingStatus.CONFIRMED
         assert result.hold_token is None
         assert result.hold_expires_at is None
-    
+
     @pytest.mark.asyncio
     async def test_confirm_creates_gcal_event(
-        self, mock_db_session, mock_booking, mock_provider, mock_patient,
-        sample_clinic_id, sample_hold_token
+        self,
+        mock_db_session,
+        mock_booking,
+        mock_provider,
+        mock_patient,
+        sample_clinic_id,
+        sample_hold_token,
     ):
         """Test that confirming creates Google Calendar event."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
         mock_db_session.get = AsyncMock(side_effect=[mock_provider, mock_patient])
-        
-        with patch('Clinic_app.services.booking.GoogleCalendarService') as mock_gcal:
+
+        with patch("Clinic_app.services.booking.GoogleCalendarService") as mock_gcal:
             mock_gcal.create_event = AsyncMock(return_value={"id": "gcal_event_123"})
-            
+
             result = await confirm_booking(
-                db=mock_db_session,
-                hold_token=sample_hold_token,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, hold_token=sample_hold_token, clinic_id=sample_clinic_id
             )
-            
+
             mock_gcal.create_event.assert_called_once()
-        
+
         assert result.google_event_id == "gcal_event_123"
-    
+
     @pytest.mark.asyncio
     async def test_confirm_expired_token_fails(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_hold_token
     ):
         """Test that expired hold token raises error."""
         mock_booking.hold_expires_at = datetime.now(timezone.utc) - timedelta(minutes=10)
-        
+
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await confirm_booking(
-                db=mock_db_session,
-                hold_token=sample_hold_token,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, hold_token=sample_hold_token, clinic_id=sample_clinic_id
             )
         assert "expired" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
-    async def test_confirm_invalid_token_fails(
-        self, mock_db_session, sample_clinic_id
-    ):
+    async def test_confirm_invalid_token_fails(self, mock_db_session, sample_clinic_id):
         """Test that invalid hold token raises error."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await confirm_booking(
-                db=mock_db_session,
-                hold_token=uuid4(),
-                clinic_id=sample_clinic_id
+                db=mock_db_session, hold_token=uuid4(), clinic_id=sample_clinic_id
             )
         assert "not found" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_confirm_already_confirmed_fails(
         self, mock_db_session, mock_confirmed_booking, sample_clinic_id, sample_hold_token
@@ -489,12 +548,10 @@ class TestConfirmBooking:
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_confirmed_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await confirm_booking(
-                db=mock_db_session,
-                hold_token=sample_hold_token,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, hold_token=sample_hold_token, clinic_id=sample_clinic_id
             )
         assert "not tentative" in str(exc_info.value).lower()
 
@@ -503,51 +560,53 @@ class TestConfirmBooking:
 # TEST CANCEL_BOOKING
 # ============================================================================
 
+
 class TestCancelBooking:
     """Tests for cancel_booking function."""
-    
+
     @pytest.mark.asyncio
     async def test_cancel_success(
-        self, mock_db_session, mock_booking, mock_provider,
-        sample_clinic_id, sample_booking_id
+        self, mock_db_session, mock_booking, mock_provider, sample_clinic_id, sample_booking_id
     ):
         """Test successful booking cancellation."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         result = await cancel_booking(
             db=mock_db_session,
             booking_id=sample_booking_id,
             clinic_id=sample_clinic_id,
-            actor="patient"
+            actor="patient",
         )
-        
+
         assert result.status == BookingStatus.CANCELED
-    
+
     @pytest.mark.asyncio
     async def test_cancel_deletes_gcal_event(
-        self, mock_db_session, mock_confirmed_booking, mock_provider,
-        sample_clinic_id, sample_booking_id
+        self,
+        mock_db_session,
+        mock_confirmed_booking,
+        mock_provider,
+        sample_clinic_id,
+        sample_booking_id,
     ):
         """Test that canceling deletes Google Calendar event."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_confirmed_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
-        with patch('Clinic_app.services.booking.GoogleCalendarService') as mock_gcal:
+
+        with patch("Clinic_app.services.booking.GoogleCalendarService") as mock_gcal:
             mock_gcal.delete_event = AsyncMock()
-            
+
             await cancel_booking(
-                db=mock_db_session,
-                booking_id=sample_booking_id,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, booking_id=sample_booking_id, clinic_id=sample_clinic_id
             )
-            
+
             mock_gcal.delete_event.assert_called_once()
-    
+
     @pytest.mark.asyncio
     async def test_cancel_not_found_fails(
         self, mock_db_session, sample_clinic_id, sample_booking_id
@@ -556,31 +615,27 @@ class TestCancelBooking:
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await cancel_booking(
-                db=mock_db_session,
-                booking_id=sample_booking_id,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, booking_id=sample_booking_id, clinic_id=sample_clinic_id
             )
         assert "not found" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_cancel_already_canceled_fails(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_booking_id
     ):
         """Test canceling already canceled booking raises error."""
         mock_booking.status = BookingStatus.CANCELED
-        
+
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await cancel_booking(
-                db=mock_db_session,
-                booking_id=sample_booking_id,
-                clinic_id=sample_clinic_id
+                db=mock_db_session, booking_id=sample_booking_id, clinic_id=sample_clinic_id
             )
         assert "already canceled" in str(exc_info.value).lower()
 
@@ -589,13 +644,13 @@ class TestCancelBooking:
 # TEST RESCHEDULE_BOOKING
 # ============================================================================
 
+
 class TestRescheduleBooking:
     """Tests for reschedule_booking function."""
-    
+
     @pytest.mark.asyncio
     async def test_reschedule_success(
-        self, mock_db_session, mock_booking, mock_provider,
-        sample_clinic_id, sample_booking_id
+        self, mock_db_session, mock_booking, mock_provider, sample_clinic_id, sample_booking_id
     ):
         """Test successful booking rescheduling."""
         # Setup for finding original booking
@@ -603,26 +658,28 @@ class TestRescheduleBooking:
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
         mock_db_session.get = AsyncMock(return_value=mock_provider)
-        
+
         # New slot
         new_start = datetime.now(timezone.utc) + timedelta(days=2)
         new_end = new_start + timedelta(minutes=30)
-        
+
         # Mock the capacity check to return 0
-        with patch('Clinic_app.services.booking._count_slot_bookings', new=AsyncMock(return_value=0)):
-            with patch('Clinic_app.services.booking.GoogleCalendarService'):
+        with patch(
+            "Clinic_app.services.booking._count_slot_bookings", new=AsyncMock(return_value=0)
+        ):
+            with patch("Clinic_app.services.booking.GoogleCalendarService"):
                 new_booking, hold_token = await reschedule_booking(
                     db=mock_db_session,
                     booking_id=sample_booking_id,
                     clinic_id=sample_clinic_id,
                     new_slot_start=new_start,
                     new_slot_end=new_end,
-                    actor="patient"
+                    actor="patient",
                 )
-        
+
         assert new_booking is not None
         assert hold_token is not None
-    
+
     @pytest.mark.asyncio
     async def test_reschedule_not_found_fails(
         self, mock_db_session, sample_clinic_id, sample_booking_id
@@ -631,17 +688,17 @@ class TestRescheduleBooking:
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         new_start = datetime.now(timezone.utc) + timedelta(days=2)
         new_end = new_start + timedelta(minutes=30)
-        
+
         with pytest.raises(ValueError) as exc_info:
             await reschedule_booking(
                 db=mock_db_session,
                 booking_id=sample_booking_id,
                 clinic_id=sample_clinic_id,
                 new_slot_start=new_start,
-                new_slot_end=new_end
+                new_slot_end=new_end,
             )
         assert "not found" in str(exc_info.value).lower()
 
@@ -650,9 +707,10 @@ class TestRescheduleBooking:
 # TEST QUERY FUNCTIONS
 # ============================================================================
 
+
 class TestQueryFunctions:
     """Tests for query functions."""
-    
+
     @pytest.mark.asyncio
     async def test_get_by_hold_token_found(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_hold_token
@@ -661,32 +719,26 @@ class TestQueryFunctions:
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         result = await get_booking_by_hold_token(
-            db=mock_db_session,
-            hold_token=sample_hold_token,
-            clinic_id=sample_clinic_id
+            db=mock_db_session, hold_token=sample_hold_token, clinic_id=sample_clinic_id
         )
-        
+
         assert result == mock_booking
-    
+
     @pytest.mark.asyncio
-    async def test_get_by_hold_token_not_found(
-        self, mock_db_session, sample_clinic_id
-    ):
+    async def test_get_by_hold_token_not_found(self, mock_db_session, sample_clinic_id):
         """Test that non-existent hold token returns None."""
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         result = await get_booking_by_hold_token(
-            db=mock_db_session,
-            hold_token=uuid4(),
-            clinic_id=sample_clinic_id
+            db=mock_db_session, hold_token=uuid4(), clinic_id=sample_clinic_id
         )
-        
+
         assert result is None
-    
+
     @pytest.mark.asyncio
     async def test_get_patient_bookings(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_patient_id
@@ -697,16 +749,14 @@ class TestQueryFunctions:
         mock_result = Mock()
         mock_result.scalars.return_value = mock_scalars
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         result = await get_patient_bookings(
-            db=mock_db_session,
-            patient_id=sample_patient_id,
-            clinic_id=sample_clinic_id
+            db=mock_db_session, patient_id=sample_patient_id, clinic_id=sample_clinic_id
         )
-        
+
         assert len(result) == 1
         assert result[0] == mock_booking
-    
+
     @pytest.mark.asyncio
     async def test_get_patient_bookings_with_status_filter(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_patient_id
@@ -717,16 +767,16 @@ class TestQueryFunctions:
         mock_result = Mock()
         mock_result.scalars.return_value = mock_scalars
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         result = await get_patient_bookings(
             db=mock_db_session,
             patient_id=sample_patient_id,
             clinic_id=sample_clinic_id,
-            status_filter=[BookingStatus.CONFIRMED]
+            status_filter=[BookingStatus.CONFIRMED],
         )
-        
+
         assert len(result) == 1
-    
+
     @pytest.mark.asyncio
     async def test_get_booking_by_id(
         self, mock_db_session, mock_booking, sample_clinic_id, sample_booking_id
@@ -735,13 +785,11 @@ class TestQueryFunctions:
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = mock_booking
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
+
         result = await get_booking_by_id(
-            db=mock_db_session,
-            booking_id=sample_booking_id,
-            clinic_id=sample_clinic_id
+            db=mock_db_session, booking_id=sample_booking_id, clinic_id=sample_clinic_id
         )
-        
+
         assert result == mock_booking
 
 
@@ -749,9 +797,10 @@ class TestQueryFunctions:
 # TEST EXPIRATION
 # ============================================================================
 
+
 class TestExpiration:
     """Tests for expiration functions."""
-    
+
     @pytest.mark.asyncio
     async def test_expire_booking_updates_status(
         self, mock_db_session, mock_booking, sample_booking_id, sample_clinic_id
@@ -804,28 +853,23 @@ class TestExpiration:
                 clinic_id=sample_clinic_id,
             )
         assert "not tentative" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
-    async def test_get_expired_finds_expired_holds(
-        self, mock_db_session, mock_booking
-    ):
+    async def test_get_expired_finds_expired_holds(self, mock_db_session, mock_booking):
         """Test getting expired tentative bookings."""
         mock_booking.hold_expires_at = datetime.now(timezone.utc) - timedelta(minutes=10)
-        
+
         mock_scalars = Mock()
         mock_scalars.all.return_value = [mock_booking]
         mock_result = Mock()
         mock_result.scalars.return_value = mock_scalars
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
-        result = await get_expired_tentative_bookings(
-            db=mock_db_session,
-            limit=100
-        )
-        
+
+        result = await get_expired_tentative_bookings(db=mock_db_session, limit=100)
+
         assert len(result) == 1
         assert result[0] == mock_booking
-    
+
     @pytest.mark.asyncio
     async def test_get_expired_returns_empty_when_none(self, mock_db_session):
         """Test getting expired bookings returns empty list when none exist."""
@@ -834,11 +878,7 @@ class TestExpiration:
         mock_result = Mock()
         mock_result.scalars.return_value = mock_scalars
         mock_db_session.execute = AsyncMock(return_value=mock_result)
-        
-        result = await get_expired_tentative_bookings(
-            db=mock_db_session,
-            limit=100
-        )
-        
-        assert result == []
 
+        result = await get_expired_tentative_bookings(db=mock_db_session, limit=100)
+
+        assert result == []

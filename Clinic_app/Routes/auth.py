@@ -44,13 +44,14 @@ auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ── Request / Response models ──────────────────────────────────────────────────
 
+
 class SelectClinicRequest(BaseModel):
     clinic_id: UUID
 
 
 class TokenResponse(BaseModel):
     token: str
-    token_type: str                          # "scoped" | "unscoped"
+    token_type: str  # "scoped" | "unscoped"
     requires_clinic_selection: bool = False  # True when multiple clinics
 
 
@@ -67,6 +68,7 @@ class MeResponse(BaseModel):
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+
 
 @auth_router.get("/google", summary="Initiate Google OAuth login")
 async def google_login(
@@ -121,7 +123,10 @@ async def google_callback(
     if not memberships:
         raise HTTPException(
             status_code=403,
-            detail={"code": "NOT_PROVISIONED", "message": "This Google account has not been provisioned for any clinic. Contact your administrator."},
+            detail={
+                "code": "NOT_PROVISIONED",
+                "message": "This Google account has not been provisioned for any clinic. Contact your administrator.",
+            },
         )
 
     # 6. Single clinic → scoped JWT directly (skip selector screen)
@@ -156,13 +161,16 @@ async def get_me(
         # Load clinic name — clinic is accessible via FK relationship
         from sqlalchemy import select as sa_select
         from Clinic_app.data.models.clinic import Clinic
+
         clinic = await db.get(Clinic, m.clinic_id)
         clinic_name = clinic.name if clinic else "Unknown"
-        clinic_list.append(ClinicMembership(
-            clinic_id=m.clinic_id,
-            clinic_name=clinic_name,
-            role=m.role,
-        ))
+        clinic_list.append(
+            ClinicMembership(
+                clinic_id=m.clinic_id,
+                clinic_name=clinic_name,
+                role=m.role,
+            )
+        )
 
     return MeResponse(
         google_sub=staff.google_sub,
@@ -171,7 +179,9 @@ async def get_me(
     )
 
 
-@auth_router.post("/select-clinic", response_model=TokenResponse, summary="Select a clinic and get scoped JWT")
+@auth_router.post(
+    "/select-clinic", response_model=TokenResponse, summary="Select a clinic and get scoped JWT"
+)
 async def select_clinic(
     request: SelectClinicRequest,
     staff: StaffToken = Depends(get_current_staff),
@@ -190,5 +200,7 @@ async def select_clinic(
             detail={"code": "ACCESS_DENIED", "message": "You do not have access to this clinic"},
         )
 
-    token = create_scoped_token(staff.google_sub, staff.email, membership.clinic_id, membership.role)
+    token = create_scoped_token(
+        staff.google_sub, staff.email, membership.clinic_id, membership.role
+    )
     return TokenResponse(token=token, token_type="scoped")

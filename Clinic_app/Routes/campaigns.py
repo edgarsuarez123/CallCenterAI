@@ -55,7 +55,7 @@ campaign_router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-MAX_FILE_BYTES = 10 * 1024 * 1024   # 10 MB
+MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_ROWS = 2000
 ALLOWED_CONTENT_TYPES = {
     "text/csv",
@@ -66,6 +66,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 
 # ── Response schemas ───────────────────────────────────────────────────────────
+
 
 class SkippedContactOut(BaseModel):
     phone_hash: str
@@ -133,6 +134,7 @@ class AuditResponse(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+
 def _campaign_to_response(c) -> CampaignResponse:
     return CampaignResponse(
         campaign_id=c.id,
@@ -161,6 +163,7 @@ def _require_admin(staff: StaffToken) -> None:
 
 
 # ── Upload endpoint ────────────────────────────────────────────────────────────
+
 
 @campaign_router.post("/upload", response_model=CampaignUploadResponse, status_code=201)
 async def upload_campaign(
@@ -243,21 +246,26 @@ async def upload_campaign(
         total_contacts=result.total_contacts,
         skipped_count=len(result.skipped_contacts),
         skipped_contacts=[
-            SkippedContactOut(**{
-                "phone_hash": s.phone_hash,
-                "gap_type": s.gap_type,
-                "reason": s.reason,
-                "raw_row_number": s.raw_row_number,
-            })
+            SkippedContactOut(
+                **{
+                    "phone_hash": s.phone_hash,
+                    "gap_type": s.gap_type,
+                    "reason": s.reason,
+                    "raw_row_number": s.raw_row_number,
+                }
+            )
             for s in result.skipped_contacts
         ],
         parse_error_count=len(parse_errors),
-        parse_errors=[ParseErrorOut(row_number=e.row_number, reason=e.reason) for e in parse_errors],
+        parse_errors=[
+            ParseErrorOut(row_number=e.row_number, reason=e.reason) for e in parse_errors
+        ],
         status=result.status,
     )
 
 
 # ── List campaigns ─────────────────────────────────────────────────────────────
+
 
 @campaign_router.get("", response_model=list[CampaignResponse])
 async def list_campaigns_route(
@@ -273,13 +281,17 @@ async def list_campaigns_route(
         except ValueError:
             raise HTTPException(
                 status_code=422,
-                detail={"code": "INVALID_STATUS", "message": f"Unknown campaign status: {status!r}"},
+                detail={
+                    "code": "INVALID_STATUS",
+                    "message": f"Unknown campaign status: {status!r}",
+                },
             )
     campaigns = await list_campaigns(db, staff.clinic_id, status=status_enum)
     return [_campaign_to_response(c) for c in campaigns]
 
 
 # ── Campaign detail ────────────────────────────────────────────────────────────
+
 
 @campaign_router.get("/{campaign_id}", response_model=CampaignResponse)
 async def get_campaign_route(
@@ -293,6 +305,7 @@ async def get_campaign_route(
 
 
 # ── Contact list ───────────────────────────────────────────────────────────────
+
 
 @campaign_router.get("/{campaign_id}/contacts", response_model=list[ContactResponse])
 async def get_contacts_route(
@@ -318,8 +331,12 @@ async def get_contacts_route(
             )
 
     contacts = await get_campaign_contacts(
-        db, staff.clinic_id, campaign_id,
-        status=status_enum, limit=limit, offset=offset,
+        db,
+        staff.clinic_id,
+        campaign_id,
+        status=status_enum,
+        limit=limit,
+        offset=offset,
     )
     return [
         ContactResponse(
@@ -338,6 +355,7 @@ async def get_contacts_route(
 
 
 # ── Audit records (call summaries) ─────────────────────────────────────────────
+
 
 @campaign_router.get("/{campaign_id}/audits", response_model=list[AuditResponse])
 async def get_campaign_audits(
@@ -384,20 +402,23 @@ async def get_campaign_audits(
             except Exception:
                 patient_name = "[decryption error]"
 
-        out.append(AuditResponse(
-            audit_id=a.id,
-            contact_id=a.campaign_contact_id,
-            retell_call_id=a.retell_call_id,
-            outcome=a.outcome,
-            attempt_number=a.attempt_number,
-            called_at=a.called_at,
-            call_summary=call_summary,
-            patient_name=patient_name,
-        ))
+        out.append(
+            AuditResponse(
+                audit_id=a.id,
+                contact_id=a.campaign_contact_id,
+                retell_call_id=a.retell_call_id,
+                outcome=a.outcome,
+                attempt_number=a.attempt_number,
+                called_at=a.called_at,
+                call_summary=call_summary,
+                patient_name=patient_name,
+            )
+        )
     return out
 
 
 # ── Start (PENDING or CANCELED -> ACTIVE) ────────────────────────────────────
+
 
 @campaign_router.post("/{campaign_id}/start", response_model=CampaignResponse)
 async def start_campaign_route(
@@ -415,6 +436,7 @@ async def start_campaign_route(
 
 # ── Pause ──────────────────────────────────────────────────────────────────────
 
+
 @campaign_router.post("/{campaign_id}/pause", response_model=CampaignResponse)
 async def pause_campaign_route(
     campaign_id: UUID,
@@ -429,6 +451,7 @@ async def pause_campaign_route(
 
 
 # ── Resume ─────────────────────────────────────────────────────────────────────
+
 
 @campaign_router.post("/{campaign_id}/resume", response_model=CampaignResponse)
 async def resume_campaign_route(
@@ -446,6 +469,7 @@ async def resume_campaign_route(
 
 # ── Cancel ─────────────────────────────────────────────────────────────────────
 
+
 @campaign_router.post("/{campaign_id}/cancel", response_model=CampaignResponse)
 async def cancel_campaign_route(
     campaign_id: UUID,
@@ -460,6 +484,7 @@ async def cancel_campaign_route(
 
 
 # ── PHI-safe export ────────────────────────────────────────────────────────────
+
 
 @campaign_router.get("/{campaign_id}/export")
 async def export_campaign_route(
@@ -476,26 +501,34 @@ async def export_campaign_route(
     campaign = await get_campaign(db, staff.clinic_id, campaign_id)
 
     # Fetch all contacts (no pagination for export)
-    contacts = await get_campaign_contacts(
-        db, staff.clinic_id, campaign_id, limit=10000, offset=0
-    )
+    contacts = await get_campaign_contacts(db, staff.clinic_id, campaign_id, limit=10000, offset=0)
 
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=[
-        "phone_hash", "gap_type", "preferred_language", "status",
-        "attempt_count", "last_attempted_at", "ehr_appointment_id",
-    ])
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "phone_hash",
+            "gap_type",
+            "preferred_language",
+            "status",
+            "attempt_count",
+            "last_attempted_at",
+            "ehr_appointment_id",
+        ],
+    )
     writer.writeheader()
     for c in contacts:
-        writer.writerow({
-            "phone_hash": c.phone_hash,
-            "gap_type": c.gap_type,
-            "preferred_language": c.preferred_language,
-            "status": c.status,
-            "attempt_count": c.attempt_count,
-            "last_attempted_at": c.last_attempted_at.isoformat() if c.last_attempted_at else "",
-            "ehr_appointment_id": c.ehr_appointment_id or "",
-        })
+        writer.writerow(
+            {
+                "phone_hash": c.phone_hash,
+                "gap_type": c.gap_type,
+                "preferred_language": c.preferred_language,
+                "status": c.status,
+                "attempt_count": c.attempt_count,
+                "last_attempted_at": c.last_attempted_at.isoformat() if c.last_attempted_at else "",
+                "ehr_appointment_id": c.ehr_appointment_id or "",
+            }
+        )
 
     output.seek(0)
     safe_name = "".join(c for c in campaign.name if c.isalnum() or c in " _-")[:50]

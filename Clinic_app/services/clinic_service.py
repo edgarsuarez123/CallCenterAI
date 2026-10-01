@@ -30,7 +30,10 @@ async def get_clinic_settings(db: AsyncSession, clinic_id: UUID) -> ClinicIntegr
     if integration is None:
         raise HTTPException(
             status_code=404,
-            detail={"code": "SETTINGS_NOT_FOUND", "message": "Clinic integration settings not configured yet."},
+            detail={
+                "code": "SETTINGS_NOT_FOUND",
+                "message": "Clinic integration settings not configured yet.",
+            },
         )
     return integration
 
@@ -47,7 +50,10 @@ def validate_hhmm(value: str, field_name: str) -> None:
     except (ValueError, AttributeError):
         raise HTTPException(
             status_code=422,
-            detail={"code": "INVALID_TIME", "message": f"{field_name} must be HH:MM format (00:00–23:59)."},
+            detail={
+                "code": "INVALID_TIME",
+                "message": f"{field_name} must be HH:MM format (00:00–23:59).",
+            },
         )
 
 
@@ -83,13 +89,19 @@ async def update_clinic_settings(
     if new_start >= new_end:
         raise HTTPException(
             status_code=422,
-            detail={"code": "INVALID_HOURS", "message": "calling_hours_start must be before calling_hours_end."},
+            detail={
+                "code": "INVALID_HOURS",
+                "message": "calling_hours_start must be before calling_hours_end.",
+            },
         )
 
     if campaign_concurrency_limit is not None and not (1 <= campaign_concurrency_limit <= 10):
         raise HTTPException(
             status_code=422,
-            detail={"code": "INVALID_CONCURRENCY", "message": "campaign_concurrency_limit must be between 1 and 10."},
+            detail={
+                "code": "INVALID_CONCURRENCY",
+                "message": "campaign_concurrency_limit must be between 1 and 10.",
+            },
         )
 
     if max_attempts is not None and not (1 <= max_attempts <= 5):
@@ -106,13 +118,19 @@ async def update_clinic_settings(
         if field_val is not None and not (1 <= field_val <= 72):
             raise HTTPException(
                 status_code=422,
-                detail={"code": "INVALID_RETRY_HOURS", "message": f"{field_name} must be between 1 and 72."},
+                detail={
+                    "code": "INVALID_RETRY_HOURS",
+                    "message": f"{field_name} must be between 1 and 72.",
+                },
             )
 
     if timezone is not None and timezone not in available_timezones():
         raise HTTPException(
             status_code=422,
-            detail={"code": "INVALID_TIMEZONE", "message": f"'{timezone}' is not a valid IANA timezone."},
+            detail={
+                "code": "INVALID_TIMEZONE",
+                "message": f"'{timezone}' is not a valid IANA timezone.",
+            },
         )
 
     # Apply changes

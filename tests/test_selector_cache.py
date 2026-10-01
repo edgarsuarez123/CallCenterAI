@@ -63,10 +63,12 @@ class TestSlotCache:
 
     async def test_tenant_isolation_different_keys(self, clinic_a, clinic_b, monkeypatch):
         mock_redis = AsyncMock()
-        mock_redis.get = AsyncMock(side_effect=[
-            json.dumps(SAMPLE_SLOTS).encode(),
-            json.dumps([]).encode(),
-        ])
+        mock_redis.get = AsyncMock(
+            side_effect=[
+                json.dumps(SAMPLE_SLOTS).encode(),
+                json.dumps([]).encode(),
+            ]
+        )
         monkeypatch.setattr(pc, "get_redis", AsyncMock(return_value=mock_redis))
 
         slots_a = await pc.get_cached_slots(clinic_a, "Dr. Jones")

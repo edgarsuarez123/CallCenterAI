@@ -25,6 +25,7 @@ def reset_hash_key():
         yield
     encryption_module._hash_key = None
 
+
 from fastapi import HTTPException
 
 from Clinic_app.data.enums import CampaignStatus, ContactStatus, GapType
@@ -92,27 +93,32 @@ def _make_clinic_integration_mock(
 
 # ── phone hashing + encryption ────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 class TestPhoneHandling:
     def test_phone_is_hashed_not_plaintext(self):
         """Phone must be stored as SHA-256 hash, never plaintext."""
         from Clinic_app.services.campaign_service import hash_phone
+
         result = hash_phone("+17875551234")
         assert "+17875551234" not in result
         assert len(result) == 64  # SHA-256 hex
 
     def test_hash_is_deterministic(self):
         from Clinic_app.services.campaign_service import hash_phone
+
         assert hash_phone("+17875551234") == hash_phone("+17875551234")
 
 
 # ── get_campaign ───────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestGetCampaign:
     async def test_returns_campaign_for_correct_clinic(self):
         from Clinic_app.services.campaign_service import get_campaign
+
         campaign = _make_campaign()
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -124,6 +130,7 @@ class TestGetCampaign:
 
     async def test_raises_404_for_wrong_clinic(self):
         from Clinic_app.services.campaign_service import get_campaign
+
         mock_db = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
@@ -135,6 +142,7 @@ class TestGetCampaign:
 
     async def test_raises_404_not_found(self):
         from Clinic_app.services.campaign_service import get_campaign
+
         mock_db = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
@@ -148,11 +156,13 @@ class TestGetCampaign:
 
 # ── list_campaigns ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestListCampaigns:
     async def test_returns_list(self):
         from Clinic_app.services.campaign_service import list_campaigns
+
         campaigns = [_make_campaign(), _make_campaign()]
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -164,6 +174,7 @@ class TestListCampaigns:
 
     async def test_empty_list_for_new_clinic(self):
         from Clinic_app.services.campaign_service import list_campaigns
+
         mock_db = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalars.return_value.all.return_value = []
@@ -175,11 +186,13 @@ class TestListCampaigns:
 
 # ── pause_campaign ─────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestPauseCampaign:
     async def test_pause_active_campaign(self):
         from Clinic_app.services.campaign_service import pause_campaign
+
         campaign = _make_campaign(CampaignStatus.ACTIVE.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -193,6 +206,7 @@ class TestPauseCampaign:
 
     async def test_pause_already_paused_raises_409(self):
         from Clinic_app.services.campaign_service import pause_campaign
+
         campaign = _make_campaign(CampaignStatus.PAUSED.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -206,6 +220,7 @@ class TestPauseCampaign:
 
     async def test_pause_pending_raises_409(self):
         from Clinic_app.services.campaign_service import pause_campaign
+
         campaign = _make_campaign(CampaignStatus.PENDING.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -219,11 +234,13 @@ class TestPauseCampaign:
 
 # ── resume_campaign ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestResumeCampaign:
     async def test_resume_paused_campaign(self):
         from Clinic_app.services.campaign_service import resume_campaign
+
         campaign = _make_campaign(CampaignStatus.PAUSED.value)
         mock_db = AsyncMock()
         camp_res = MagicMock()
@@ -241,6 +258,7 @@ class TestResumeCampaign:
 
     async def test_resume_active_raises_409(self):
         from Clinic_app.services.campaign_service import resume_campaign
+
         campaign = _make_campaign(CampaignStatus.ACTIVE.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -254,11 +272,13 @@ class TestResumeCampaign:
 
 # ── cancel_campaign ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestCancelCampaign:
     async def test_cancel_active_campaign(self):
         from Clinic_app.services.campaign_service import cancel_campaign
+
         campaign = _make_campaign(CampaignStatus.ACTIVE.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -272,6 +292,7 @@ class TestCancelCampaign:
 
     async def test_cancel_already_canceled_raises_409(self):
         from Clinic_app.services.campaign_service import cancel_campaign
+
         campaign = _make_campaign(CampaignStatus.CANCELED.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -284,6 +305,7 @@ class TestCancelCampaign:
 
     async def test_cancel_completed_raises_409(self):
         from Clinic_app.services.campaign_service import cancel_campaign
+
         campaign = _make_campaign(CampaignStatus.COMPLETED.value)
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -296,6 +318,7 @@ class TestCancelCampaign:
 
 
 # ── start_campaign ─────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
@@ -460,6 +483,7 @@ class TestStartCampaign:
 
 
 # ── get_next_eligible_contact ─────────────────────────────────────────────────
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio

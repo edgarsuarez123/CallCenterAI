@@ -50,7 +50,7 @@ MFA_POLL_INTERVAL_SECONDS = 5
 MFA_TIMEOUT_SECONDS = 300  # 5 minutes
 
 BROWSERUSE_MAX_STEPS_LOGIN = 15
-BROWSERUSE_MAX_STEPS_SLOTS = 50   # may page through months of booked calendar
+BROWSERUSE_MAX_STEPS_SLOTS = 50  # may page through months of booked calendar
 BROWSERUSE_MAX_STEPS_BOOKING = 30
 BROWSERUSE_USE_VISION = False
 
@@ -93,9 +93,7 @@ class PlaywrightEHRService:
         except RuntimeError as e:
             logger.warning("EHR LLM not configured — EHR tools will be unavailable: %s", e)
         self._started = True
-        logger.info(
-            "PlaywrightEHRService: Browser-Use initialized (headless=%s)", headless
-        )
+        logger.info("PlaywrightEHRService: Browser-Use initialized (headless=%s)", headless)
 
     async def shutdown_all(self) -> None:
         """Close the shared Browser-Use browser."""
@@ -381,9 +379,7 @@ class PlaywrightEHRService:
             await self.startup()
 
     async def _load_ehr_config(self, db: AsyncSession, clinic_id: UUID) -> ClinicEHRConfig:
-        r = await db.execute(
-            select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id)
-        )
+        r = await db.execute(select(ClinicEHRConfig).where(ClinicEHRConfig.clinic_id == clinic_id))
         row = r.scalar_one_or_none()
         if row is None:
             raise ValueError("ClinicEHRConfig not found for clinic")
