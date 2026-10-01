@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 from datetime import datetime, timezone
 from sqlalchemy import text
 from Clinic_app.common.database import AsyncSessionLocal
@@ -10,8 +10,11 @@ health_router = APIRouter()
 
 
 @health_router.get("/health")
-async def health_check():
-    """Health check endpoint for load balancers and monitoring."""
+async def health_check(response: Response):
+    """Health check endpoint for load balancers and monitoring.
+
+    Returns 200 when healthy, 503 when the database is unreachable.
+    """
     # Test database connection
     db_status = "connected"
     try:
@@ -23,6 +26,9 @@ async def health_check():
 
     # Determine overall status
     overall_status = "healthy" if db_status == "connected" else "unhealthy"
+
+    if overall_status != "healthy":
+        response.status_code = 503
 
     return {
         "status": overall_status,

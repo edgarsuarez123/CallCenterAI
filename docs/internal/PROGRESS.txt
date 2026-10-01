@@ -1045,3 +1045,50 @@ FILES MODIFIED:
 - docs/internal/PROGRESS.txt (this entry)
 - docs/internal/SESSION_2026-10-01.md (new)
 ================================================================================
+
+================================================================================
+SESSION: 2026-10-01 (Session — Production-Readiness Sprint)
+================================================================================
+COMPLETED:
+- Alembic catch-up migration (e1f2a3b4c5d6): adds 8 missing columns to campaign
+  (reason, completed_contacts) and campaign_contact (reason, outcome,
+  retell_call_id, call_duration_seconds, call_date, notes); fixes priority_order
+  nullability; adds idx_campaign_contact_outcome_catchup index
+- Deleted dead migration branch c7d8e9f0a1b2_add_campaign_tables.py (branched
+  off same parent as live chain, caused Alembic multiple-heads error)
+- campaign_worker.py: _process_campaign() now enforces calling hours — looks up
+  ClinicIntegration, calls _is_within_calling_hours(), returns early if outside
+  window; skips check in demo mode (no integration row)
+- campaign.py: get_next_pending_contact() now filters attempt_count < max_attempts
+  and next_attempt_after <= now(); simulate_next_call() accepts max_attempts param
+  and sets last_attempted_at; imported func and or_ from sqlalchemy
+- retell.py: _handle_call_ended() has idempotency guard — skips reprocessing if
+  call_log.outcome already in terminal state; _update_hedis_campaign_contact_from_call_end()
+  has contact-level guard — skips if contact.status already terminal
+- health.py: returns HTTP 503 (not 200) when database is disconnected
+- README.md: CI badge added, FastAPI badge corrected (0.104→0.115.6), tech stack
+  table corrected, git clone URL updated from placeholder to real GitHub URL
+
+SKIPPED / DEFERRED:
+- Concurrency enforcement (campaign_concurrency_limit in worker loop) — Tier 3
+- TCPA opt-out tracking — Tier 3 (legal review needed)
+- Retry scheduling in demo mode (VOICEMAIL/NO_ANSWER reset to PENDING) — Tier 3
+
+ERRORS / BLOCKERS:
+- None.
+
+NEXT SESSION SHOULD START WITH:
+- Push to GitHub and confirm CI badge turns green
+- Run docker compose + alembic upgrade head to validate migration end-to-end
+- Optional: add tests for the new calling-hours enforcement and idempotency paths
+
+FILES MODIFIED:
+- Clinic_app/alembic/versions/e1f2a3b4c5d6_production_readiness_schema_catchup.py (new)
+- Clinic_app/alembic/versions/c7d8e9f0a1b2_add_campaign_tables.py (DELETED)
+- Clinic_app/workers/campaign_worker.py
+- Clinic_app/services/campaign.py
+- Clinic_app/Routes/retell.py
+- Clinic_app/Routes/health.py
+- README.md
+- docs/internal/PROGRESS.txt (this entry)
+================================================================================
