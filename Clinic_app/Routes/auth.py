@@ -12,15 +12,13 @@ All routes are stateless. CSRF protection uses a signed state token (see common/
 
 import logging
 import os
-from uuid import UUID
 from urllib.parse import urlencode
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
-
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from Clinic_app.common.database import get_db
 from Clinic_app.common.rate_limit import auth_rate_limit
@@ -42,6 +40,8 @@ from Clinic_app.services.auth_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
