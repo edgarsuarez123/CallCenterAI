@@ -88,6 +88,7 @@ async def create_campaign(
     clinic_id: UUID,
     name: str,
     reason: str,
+    measurement_year: Optional[int] = None,
 ) -> Campaign:
     """Create a new draft campaign."""
     campaign = Campaign(
@@ -95,6 +96,7 @@ async def create_campaign(
         name=name,
         reason=reason,
         status=CampaignStatus.DRAFT,
+        measurement_year=measurement_year or datetime.now().year,
         total_contacts=0,
         completed_contacts=0,
     )
@@ -239,6 +241,7 @@ async def upload_contacts(
     name_col = headers.get("patient_name") or headers.get("name")
     phone_col = headers["phone"]
     reason_col = headers.get("reason")
+    gap_type_col = headers.get("gap_type")
 
     imported = 0
     duplicates_skipped = 0
@@ -252,6 +255,9 @@ async def upload_contacts(
         reason = row.get(reason_col, "").strip() if reason_col else ""
         if not reason:
             reason = default_reason
+        gap_type = row.get(gap_type_col, "").strip() if gap_type_col else ""
+        if not gap_type:
+            gap_type = "AWV"
 
         if not name:
             errors.append(f"Row {row_num}: patient_name is empty, skipping")
@@ -286,6 +292,7 @@ async def upload_contacts(
             phone_encrypted=phone_enc,
             phone_hash=phone_hash,
             reason=reason,
+            gap_type=gap_type,
             outcome=ContactOutcome.PENDING,
             attempt_count=0,
         )

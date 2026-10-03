@@ -1,0 +1,113 @@
+================================================================================
+SESSION: 2026-10-03 (afternoon)
+================================================================================
+COMPLETED:
+
+--- Demo Smoke Test / Unblocking ---
+- Created .env file from env.example (was missing — prevented container rebuild)
+- Rebuilt callcenter-api-dev container from latest source (was 5 months stale)
+- Ran Alembic migration d0e1f2a3b4c5 → e1f2a3b4c5d6 (production_readiness_schema_catchup)
+  from inside the app container (migrate service lacks volume mount)
+- Fixed campaign service bug: create_campaign() didn't set measurement_year (NOT NULL column)
+- Fixed upload service bug: upload_contacts() didn't set gap_type (NOT NULL column)
+  → reads from CSV column 'gap_type', defaults to "AWV"
+- Seeded demo data: clinic 760e9a9c, campaign "AWV Outreach Q3 2026", 8 contacts, 5 simulated
+
+--- Full Dashboard Redesign ---
+Backend changes (3 files):
+- Clinic_app/main.py — wired Routes/campaigns.py as staff_campaign_router
+  (staff JWT campaign endpoints now live at /campaigns/...)
+- Clinic_app/Routes/auth.py — changed google_callback() from JSON response to
+  RedirectResponse → frontend at {FRONTEND_URL}/auth/callback#token=...&type=...
+  Added FRONTEND_URL env var (default http://localhost:5173), urllib.parse.urlencode import
+- dashboard/vite.config.ts — added proxy rules for /auth, /campaigns, /clinic
+
+Frontend (18 new files, App.tsx + main.tsx + index.css rewritten):
+- src/contexts/AuthContext.tsx — dual-mode auth (Google JWT + Demo API key)
+  localStorage-backed, exposes loginWithGoogle, loginDemo, selectClinic, logout,
+  handleOAuthCallback (parses hash fragment from OAuth redirect)
+- src/hooks/useApi.ts — fetch wrapper auto-injects Authorization or X-API-Key
+  based on auth mode; throws typed ApiError on non-2xx
+- src/hooks/useCampaigns.ts — campaign list with 30s polling, normalizes both
+  admin API shape (id, progress_pct) and JWT API shape (campaign_id, called_count)
+- src/hooks/useCampaignDetail.ts — campaign detail + contacts, triggerAction() for
+  start/pause/resume/cancel/process-next, dual-mode path routing
+- src/components/ui/ — Button, StatusBadge, StatCard, ProgressBar, Modal,
+  FileUpload (drag-and-drop), Spinner/PageSpinner
+- src/components/layout/ — Sidebar (dark slate-900), Header, Layout
+- src/components/campaigns/ — CampaignTable, CampaignControls (with cancel modal),
+  CampaignStats (6 outcome cards), ContactsTable (filter tabs + pagination), UploadPanel
+- src/pages/LoginPage.tsx — Google OAuth button + collapsible demo login (API key → clinic picker)
+- src/pages/ClinicSelectorPage.tsx — multi-clinic picker for unscoped JWT
+- src/pages/DashboardPage.tsx — 4 stat cards + New Campaign modal + campaign table
+- src/pages/CampaignDetailPage.tsx — breadcrumb, controls, upload panel, stats, contacts
+- src/pages/SettingsPage.tsx — clinic settings form (JWT mode only; viewer-safe)
+- src/App.tsx — rewritten as router shell (auth gate → login/selector/layout+pages)
+- src/main.tsx — wraps App in AuthProvider
+- src/index.css — Inter font import + font smoothing
+
+TypeScript: zero errors (npx tsc --noEmit clean)
+
+SKIPPED / DEFERRED:
+- Docker Desktop went into read-only overlay2 state mid-session — containers could
+  not be fully restarted. Full integration test of redesigned dashboard is BLOCKED
+  until Docker is healthy again.
+- seed_demo.py is broken (imports Clinic_app.data.models.license which was merged
+  into Clinic; not fixed this session)
+- Google OAuth not tested (requires real GOOGLE_CLIENT_ID/SECRET in .env)
+
+ERRORS / BLOCKERS:
+- Docker Desktop overlay2 read-only filesystem error after force-recreate attempt.
+  User quit and relaunched Docker Desktop but containers are still in dead/unhealthy
+  state. Needs fresh `docker compose -f docker-compose.dev.yaml up -d` after Docker
+  fully recovers.
+- campaigns.py (JWT routes) uses campaign_service.py (not campaign.py) — both files
+  exist; no conflict found but not smoke-tested yet.
+
+NEXT SESSION SHOULD START WITH:
+1. Verify Docker is healthy: `docker ps` — all 3 containers (postgres, redis, api) Up+healthy
+2. If postgres is dead: `docker compose -f docker-compose.dev.yaml up -d --force-recreate`
+3. Run migrations from app container:
+   `docker exec callcenter-api-dev sh -c "cd /app/Clinic_app && python -m alembic upgrade head"`
+4. Open http://localhost:5173 — click "Demo login" → enter API key test-admin-key-123
+   → pick "Test Clinic" → verify campaign dashboard loads with AWV Outreach campaign
+5. Test: New Campaign modal → upload CSV → Start → Simulate Next Call (x3) → see contacts update
+6. If anything broken in useCampaignDetail (report endpoint shape mismatch), check
+   /admin/clinics/{id}/campaigns/{id}/report response and fix normalization in hook
+7. Consider fixing seed_demo.py (remove License import, use Clinic model directly)
+
+FILES MODIFIED THIS SESSION:
+- .env (CREATED — was missing)
+- dashboard/.env.local (CREATED)
+- dashboard/vite.config.ts
+- Clinic_app/main.py
+- Clinic_app/Routes/auth.py
+- Clinic_app/services/campaign.py (measurement_year default + gap_type in upload)
+- dashboard/src/App.tsx (rewritten)
+- dashboard/src/main.tsx
+- dashboard/src/index.css
+- dashboard/src/contexts/AuthContext.tsx (CREATED)
+- dashboard/src/hooks/useApi.ts (CREATED)
+- dashboard/src/hooks/useCampaigns.ts (CREATED)
+- dashboard/src/hooks/useCampaignDetail.ts (CREATED)
+- dashboard/src/components/ui/Button.tsx (CREATED)
+- dashboard/src/components/ui/StatusBadge.tsx (CREATED)
+- dashboard/src/components/ui/StatCard.tsx (CREATED)
+- dashboard/src/components/ui/ProgressBar.tsx (CREATED)
+- dashboard/src/components/ui/Modal.tsx (CREATED)
+- dashboard/src/components/ui/FileUpload.tsx (CREATED)
+- dashboard/src/components/ui/Spinner.tsx (CREATED)
+- dashboard/src/components/layout/Sidebar.tsx (CREATED)
+- dashboard/src/components/layout/Header.tsx (CREATED)
+- dashboard/src/components/layout/Layout.tsx (CREATED)
+- dashboard/src/components/campaigns/CampaignTable.tsx (CREATED)
+- dashboard/src/components/campaigns/CampaignControls.tsx (CREATED)
+- dashboard/src/components/campaigns/CampaignStats.tsx (CREATED)
+- dashboard/src/components/campaigns/ContactsTable.tsx (CREATED)
+- dashboard/src/components/campaigns/UploadPanel.tsx (CREATED)
+- dashboard/src/pages/LoginPage.tsx (CREATED)
+- dashboard/src/pages/ClinicSelectorPage.tsx (CREATED)
+- dashboard/src/pages/DashboardPage.tsx (CREATED)
+- dashboard/src/pages/CampaignDetailPage.tsx (CREATED)
+- dashboard/src/pages/SettingsPage.tsx (CREATED)
+================================================================================
