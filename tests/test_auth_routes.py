@@ -84,6 +84,8 @@ class TestGoogleCallback:
         assert response.json()["detail"]["code"] == "INVALID_STATE"
 
     def test_single_clinic_returns_scoped_token(self):
+        from urllib.parse import parse_qs, urlparse
+
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
         from Clinic_app.common.database import get_db
@@ -109,17 +111,23 @@ class TestGoogleCallback:
 
             client = TestClient(app, raise_server_exceptions=False)
             state = self._valid_state()
-            response = client.get(f"/auth/google/callback?code=authcode&state={state}")
+            response = client.get(
+                f"/auth/google/callback?code=authcode&state={state}",
+                follow_redirects=False,
+            )
 
         app.dependency_overrides.clear()
 
-        assert response.status_code == 200
-        data = response.json()
-        assert data["token_type"] == "scoped"
-        assert "token" in data
-        assert data.get("requires_clinic_selection") is False
+        assert response.status_code == 302
+        location = response.headers["location"]
+        fragment = parse_qs(urlparse(location).fragment)
+        assert fragment["type"] == ["scoped"]
+        assert fragment["requires_selection"] == ["false"]
+        assert "token" in fragment
 
     def test_multiple_clinics_returns_unscoped_token(self):
+        from urllib.parse import parse_qs, urlparse
+
         from fastapi.testclient import TestClient
         from Clinic_app.main import app
         from Clinic_app.common.database import get_db
@@ -145,13 +153,18 @@ class TestGoogleCallback:
 
             client = TestClient(app, raise_server_exceptions=False)
             state = self._valid_state()
-            response = client.get(f"/auth/google/callback?code=authcode&state={state}")
+            response = client.get(
+                f"/auth/google/callback?code=authcode&state={state}",
+                follow_redirects=False,
+            )
 
         app.dependency_overrides.clear()
-        assert response.status_code == 200
-        data = response.json()
-        assert data["token_type"] == "unscoped"
-        assert data["requires_clinic_selection"] is True
+        assert response.status_code == 302
+        location = response.headers["location"]
+        fragment = parse_qs(urlparse(location).fragment)
+        assert fragment["type"] == ["unscoped"]
+        assert fragment["requires_selection"] == ["true"]
+        assert "token" in fragment
 
     def test_zero_clinics_returns_403(self):
         from fastapi.testclient import TestClient
