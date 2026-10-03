@@ -11,12 +11,16 @@ All routes are stateless. CSRF protection uses a signed state token (see common/
 """
 
 import logging
+import os
 from uuid import UUID
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
 from Clinic_app.common.database import get_db
 from Clinic_app.common.rate_limit import auth_rate_limit
@@ -83,15 +87,18 @@ async def google_login(
     return RedirectResponse(url=url, status_code=302)
 
 
-@auth_router.get("/google/callback", response_model=TokenResponse, summary="Google OAuth callback")
+@auth_router.get("/google/callback", summary="Google OAuth callback")
 async def google_callback(
     code: str,
     state: str,
     db: AsyncSession = Depends(get_db),
     _rl: None = Depends(auth_rate_limit()),
-) -> TokenResponse:
+) -> RedirectResponse:
     """
     Handle the Google OAuth callback.
+
+    Redirects to the frontend with the JWT in the URL fragment:
+      {FRONTEND_URL}/auth/callback#token=<jwt>&type=<scoped|unscoped>&requires_selection=<bool>
 
     - Verifies CSRF state token
     - Exchanges authorization code for Google tokens
@@ -133,15 +140,13 @@ async def google_callback(
     if len(memberships) == 1:
         m = memberships[0]
         token = create_scoped_token(google_sub, email, m.clinic_id, m.role)
-        return TokenResponse(token=token, token_type="scoped")
+        fragment = urlencode({"token": token, "type": "scoped", "requires_selection": "false"})
+        return RedirectResponse(url=f"{FRONTEND_URL}/auth/callback#{fragment}", status_code=302)
 
     # 7. Multiple clinics → unscoped JWT, client must call /auth/select-clinic
     token = create_unscoped_token(google_sub, email)
-    return TokenResponse(
-        token=token,
-        token_type="unscoped",
-        requires_clinic_selection=True,
-    )
+    fragment = urlencode({"token": token, "type": "unscoped", "requires_selection": "true"})
+    return RedirectResponse(url=f"{FRONTEND_URL}/auth/callback#{fragment}", status_code=302)
 
 
 @auth_router.get("/me", response_model=MeResponse, summary="Get current staff clinic memberships")
